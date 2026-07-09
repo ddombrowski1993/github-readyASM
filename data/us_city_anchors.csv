@@ -1,0 +1,413 @@
+city,state,latitude,longitude
+auburn,AL,32.6099,-85.4808
+birmingham,AL,33.5186,-86.8104
+decatur,AL,34.6059,-86.9833
+dothan,AL,31.2232,-85.3905
+florence,AL,34.7998,-87.6773
+hoover,AL,33.4054,-86.8114
+huntsville,AL,34.7304,-86.5861
+mobile,AL,30.6954,-88.0399
+montgomery,AL,32.3792,-86.3077
+tuscaloosa,AL,33.2098,-87.5692
+anchorage,AK,61.2176,-149.8997
+fairbanks,AK,64.8378,-147.7164
+juneau,AK,58.3019,-134.4197
+flagstaff,AZ,35.1983,-111.6513
+gilbert,AZ,33.3528,-111.7890
+glendale,AZ,33.5387,-112.1860
+mesa,AZ,33.4152,-111.8315
+phoenix,AZ,33.4484,-112.0740
+prescott,AZ,34.5400,-112.4685
+scottsdale,AZ,33.4942,-111.9261
+tempe,AZ,33.4255,-111.9400
+tucson,AZ,32.2226,-110.9747
+yuma,AZ,32.6927,-114.6277
+bentonville,AR,36.3729,-94.2088
+conway,AR,35.0887,-92.4421
+fayetteville,AR,36.0626,-94.1574
+fort smith,AR,35.3859,-94.3985
+jonesboro,AR,35.8423,-90.7043
+little rock,AR,34.7465,-92.2896
+pine bluff,AR,34.2284,-92.0032
+rogers,AR,36.3320,-94.1185
+anaheim,CA,33.8366,-117.9143
+bakersfield,CA,35.3733,-119.0187
+berkeley,CA,37.8715,-122.2730
+chico,CA,39.7285,-121.8375
+fresno,CA,36.7378,-119.7871
+irvine,CA,33.6846,-117.8265
+long beach,CA,33.7701,-118.1937
+los angeles,CA,34.0522,-118.2437
+modesto,CA,37.6391,-120.9969
+oakland,CA,37.8044,-122.2711
+orland,CA,39.7474,-122.1964
+oxnard,CA,34.1975,-119.1771
+palm springs,CA,33.8303,-116.5453
+pasadena,CA,34.1478,-118.1445
+riverside,CA,33.9806,-117.3755
+sacramento,CA,38.5816,-121.4944
+san bernardino,CA,34.1083,-117.2898
+san diego,CA,32.7157,-117.1611
+san francisco,CA,37.7749,-122.4194
+san jose,CA,37.3382,-121.8863
+san luis obispo,CA,35.2828,-120.6596
+santa ana,CA,33.7455,-117.8677
+santa barbara,CA,34.4208,-119.6982
+santa rosa,CA,38.4404,-122.7141
+stockton,CA,37.9577,-121.2908
+ventura,CA,34.2746,-119.2290
+aurora,CO,39.7294,-104.8319
+boulder,CO,40.0150,-105.2705
+colorado springs,CO,38.8339,-104.8214
+denver,CO,39.7392,-104.9903
+fort collins,CO,40.5853,-105.0844
+grand junction,CO,39.0639,-108.5506
+greeley,CO,40.4233,-104.7091
+pueblo,CO,38.2544,-104.6091
+bridgeport,CT,41.1865,-73.1952
+danbury,CT,41.3948,-73.4540
+hartford,CT,41.7658,-72.6734
+new haven,CT,41.3083,-72.9279
+norwalk,CT,41.1177,-73.4082
+stamford,CT,41.0534,-73.5387
+waterbury,CT,41.5582,-73.0515
+dover,DE,39.1582,-75.5244
+newark,DE,39.6837,-75.7497
+wilmington,DE,39.7447,-75.5484
+washington,DC,38.9072,-77.0369
+bradenton,FL,27.4989,-82.5748
+cape coral,FL,26.5629,-81.9495
+clearwater,FL,27.9659,-82.8001
+daytona beach,FL,29.2108,-81.0228
+fort lauderdale,FL,26.1224,-80.1373
+fort myers,FL,26.6406,-81.8723
+gainesville,FL,29.6516,-82.3248
+jacksonville,FL,30.3322,-81.6557
+lakeland,FL,28.0395,-81.9498
+miami,FL,25.7617,-80.1918
+naples,FL,26.1420,-81.7948
+ocala,FL,29.1872,-82.1401
+orland,FL,28.5383,-81.3792
+orlando,FL,28.5383,-81.3792
+panama city,FL,30.1588,-85.6602
+pensacola,FL,30.4213,-87.2169
+port st lucie,FL,27.2730,-80.3582
+sarasota,FL,27.3364,-82.5307
+st petersburg,FL,27.7676,-82.6403
+tallahassee,FL,30.4383,-84.2807
+tampa,FL,27.9506,-82.4572
+west palm beach,FL,26.7153,-80.0534
+albany,GA,31.5785,-84.1557
+athens,GA,33.9519,-83.3576
+atlanta,GA,33.7490,-84.3880
+augusta,GA,33.4735,-82.0105
+columbus,GA,32.4609,-84.9877
+macon,GA,32.8407,-83.6324
+marietta,GA,33.9526,-84.5499
+savannah,GA,32.0809,-81.0912
+valdosta,GA,30.8327,-83.2785
+hilo,HI,19.7071,-155.0885
+honolulu,HI,21.3099,-157.8581
+kailua kona,HI,19.6406,-155.9956
+boise,ID,43.6150,-116.2023
+coeur d alene,ID,47.6777,-116.7805
+idaho falls,ID,43.4927,-112.0408
+lewiston,ID,46.4004,-117.0012
+meridian,ID,43.6121,-116.3915
+nampa,ID,43.5407,-116.5635
+pocatello,ID,42.8713,-112.4455
+aurora,IL,41.7606,-88.3201
+bloomington,IL,40.4842,-88.9937
+champaign,IL,40.1164,-88.2434
+chicago,IL,41.8781,-87.6298
+decatur,IL,39.8403,-88.9548
+evanston,IL,42.0451,-87.6877
+joliet,IL,41.5250,-88.0817
+naperville,IL,41.7508,-88.1535
+normal,IL,40.5142,-88.9906
+orland park,IL,41.6303,-87.8539
+peoria,IL,40.6936,-89.5890
+rockford,IL,42.2711,-89.0940
+springfield,IL,39.7817,-89.6501
+bloomington,IN,39.1653,-86.5264
+carmel,IN,39.9784,-86.1180
+evansville,IN,37.9716,-87.5711
+fort wayne,IN,41.0793,-85.1394
+gary,IN,41.5934,-87.3464
+indianapolis,IN,39.7684,-86.1581
+lafayette,IN,40.4167,-86.8753
+muncie,IN,40.1934,-85.3864
+south bend,IN,41.6764,-86.2520
+terre haute,IN,39.4667,-87.4139
+ames,IA,42.0308,-93.6319
+cedar rapids,IA,41.9779,-91.6656
+council bluffs,IA,41.2619,-95.8608
+davenport,IA,41.5236,-90.5776
+des moines,IA,41.5868,-93.6250
+dubuque,IA,42.5006,-90.6646
+iowa city,IA,41.6611,-91.5302
+sioux city,IA,42.4963,-96.4049
+waterloo,IA,42.4928,-92.3426
+garden city,KS,37.9717,-100.8727
+hutchinson,KS,38.0608,-97.9298
+kansas city,KS,39.1142,-94.6275
+lawrence,KS,38.9717,-95.2353
+manhattan,KS,39.1836,-96.5717
+olathe,KS,38.8814,-94.8191
+overland park,KS,38.9822,-94.6708
+salina,KS,38.8403,-97.6114
+topeka,KS,39.0473,-95.6752
+wichita,KS,37.6872,-97.3301
+bowling green,KY,36.9685,-86.4808
+covington,KY,39.0837,-84.5086
+frankfort,KY,38.2009,-84.8733
+lexington,KY,38.0406,-84.5037
+louisville,KY,38.2527,-85.7585
+owensboro,KY,37.7719,-87.1112
+paducah,KY,37.0834,-88.6000
+alexandria,LA,31.3113,-92.4451
+baton rouge,LA,30.4515,-91.1871
+lafayette,LA,30.2241,-92.0198
+lake charles,LA,30.2266,-93.2174
+monroe,LA,32.5093,-92.1193
+new orleans,LA,29.9511,-90.0715
+shreveport,LA,32.5252,-93.7502
+augusta,ME,44.3106,-69.7795
+bangor,ME,44.8016,-68.7712
+lewiston,ME,44.1004,-70.2148
+portland,ME,43.6591,-70.2568
+rockland,ME,44.1037,-69.1089
+annapolis,MD,38.9784,-76.4922
+baltimore,MD,39.2904,-76.6122
+frederick,MD,39.4143,-77.4105
+gaithersburg,MD,39.1434,-77.2014
+hagerstown,MD,39.6418,-77.7200
+rockville,MD,39.0840,-77.1528
+salisbury,MD,38.3607,-75.5994
+wheaton,MD,39.0398,-77.0553
+boston,MA,42.3601,-71.0589
+cambridge,MA,42.3736,-71.1097
+fall river,MA,41.7015,-71.1550
+framingham,MA,42.2793,-71.4162
+lowell,MA,42.6334,-71.3162
+new bedford,MA,41.6362,-70.9342
+springfield,MA,42.1015,-72.5898
+worcester,MA,42.2626,-71.8023
+ann arbor,MI,42.2808,-83.7430
+battle creek,MI,42.3212,-85.1797
+detroit,MI,42.3314,-83.0458
+flint,MI,43.0125,-83.6875
+grand rapids,MI,42.9634,-85.6681
+kalamazoo,MI,42.2917,-85.5872
+lansing,MI,42.7325,-84.5555
+midland,MI,43.6156,-84.2472
+muskegon,MI,43.2342,-86.2484
+saginaw,MI,43.4195,-83.9508
+traverse city,MI,44.7631,-85.6206
+warren,MI,42.5145,-83.0147
+duluth,MN,46.7867,-92.1005
+mankato,MN,44.1636,-93.9994
+minneapolis,MN,44.9778,-93.2650
+rochesterr,MN,44.0121,-92.4802
+rochester,MN,44.0121,-92.4802
+st cloud,MN,45.5579,-94.1632
+st paul,MN,44.9537,-93.0900
+biloxi,MS,30.3960,-88.8853
+gulfport,MS,30.3674,-89.0928
+hattiesburg,MS,31.3271,-89.2903
+jackson,MS,32.2988,-90.1848
+meridian,MS,32.3643,-88.7037
+southaven,MS,34.9890,-90.0126
+tupelo,MS,34.2576,-88.7034
+columbia,MO,38.9517,-92.3341
+jefferson city,MO,38.5767,-92.1735
+joplin,MO,37.0842,-94.5133
+kansas city,MO,39.0997,-94.5786
+springfield,MO,37.2089,-93.2923
+st joseph,MO,39.7675,-94.8467
+st louis,MO,38.6270,-90.1994
+billings,MT,45.7833,-108.5007
+bozeman,MT,45.6770,-111.0429
+butte,MT,46.0038,-112.5348
+great falls,MT,47.5053,-111.3008
+helena,MT,46.5891,-112.0391
+kalispell,MT,48.1917,-114.3168
+missoula,MT,46.8721,-113.9940
+grand island,NE,40.9264,-98.3420
+kearney,NE,40.6995,-99.0815
+lincoln,NE,40.8136,-96.7026
+omaha,NE,41.2565,-95.9345
+carson city,NV,39.1638,-119.7674
+elko,NV,40.8324,-115.7631
+henderson,NV,36.0395,-114.9817
+las vegas,NV,36.1699,-115.1398
+reno,NV,39.5296,-119.8138
+sparks,NV,39.5349,-119.7527
+concord,NH,43.2081,-71.5376
+manchester,NH,42.9956,-71.4548
+nashua,NH,42.7654,-71.4676
+portsmouth,NH,43.0718,-70.7626
+atlantic city,NJ,39.3643,-74.4229
+camden,NJ,39.9259,-75.1196
+edison,NJ,40.5187,-74.4121
+jersey city,NJ,40.7178,-74.0431
+morristown,NJ,40.7968,-74.4815
+newark,NJ,40.7357,-74.1724
+paterson,NJ,40.9168,-74.1718
+trenton,NJ,40.2206,-74.7597
+albuquerque,NM,35.0844,-106.6504
+farmington,NM,36.7281,-108.2187
+las cruces,NM,32.3199,-106.7637
+roswell,NM,33.3943,-104.5230
+santa fe,NM,35.6870,-105.9378
+albany,NY,42.6526,-73.7562
+binghamton,NY,42.0987,-75.9180
+buffalo,NY,42.8864,-78.8784
+ithaca,NY,42.4430,-76.5019
+new york,NY,40.7128,-74.0060
+rochester,NY,43.1566,-77.6088
+syracuse,NY,43.0481,-76.1474
+utica,NY,43.1009,-75.2327
+yonkers,NY,40.9312,-73.8988
+asheville,NC,35.5951,-82.5515
+cary,NC,35.7915,-78.7811
+charlotte,NC,35.2271,-80.8431
+durham,NC,35.9940,-78.8986
+fayetteville,NC,35.0527,-78.8784
+greensboro,NC,36.0726,-79.7920
+greenville,NC,35.6127,-77.3664
+raleigh,NC,35.7796,-78.6382
+wilmington,NC,34.2257,-77.9447
+winston salem,NC,36.0999,-80.2442
+bismarck,ND,46.8083,-100.7837
+fargo,ND,46.8772,-96.7898
+grand forks,ND,47.9253,-97.0329
+minot,ND,48.2325,-101.2963
+akron,OH,41.0814,-81.5190
+canton,OH,40.7989,-81.3784
+cincinnati,OH,39.1031,-84.5120
+cleveland,OH,41.4993,-81.6944
+columbus,OH,39.9612,-82.9988
+dayton,OH,39.7589,-84.1916
+findlay,OH,41.0442,-83.6499
+springfield,OH,39.9242,-83.8088
+toledo,OH,41.6528,-83.5379
+youngstown,OH,41.0998,-80.6495
+zanesville,OH,39.9403,-82.0132
+lawton,OK,34.6036,-98.3959
+norman,OK,35.2226,-97.4395
+oklahoma city,OK,35.4676,-97.5164
+stillwater,OK,36.1156,-97.0584
+tulsa,OK,36.1540,-95.9928
+bend,OR,44.0582,-121.3153
+eugene,OR,44.0521,-123.0868
+medford,OR,42.3265,-122.8756
+portland,OR,45.5152,-122.6784
+salem,OR,44.9429,-123.0351
+allentown,PA,40.6084,-75.4902
+altoona,PA,40.5187,-78.3947
+erie,PA,42.1292,-80.0851
+harrisburg,PA,40.2732,-76.8867
+hersey,PA,40.2859,-76.6502
+hershey,PA,40.2859,-76.6502
+johnstown,PA,40.3267,-78.9219
+lancaster,PA,40.0379,-76.3055
+philadelphia,PA,39.9526,-75.1652
+pittsburgh,PA,40.4406,-79.9959
+reading,PA,40.3356,-75.9269
+scranton,PA,41.4090,-75.6624
+state college,PA,40.7934,-77.8600
+wilkes barre,PA,41.2459,-75.8813
+york,PA,39.9626,-76.7277
+newport,RI,41.4901,-71.3128
+providence,RI,41.8240,-71.4128
+warwick,RI,41.7001,-71.4162
+charleston,SC,32.7765,-79.9311
+columbia,SC,34.0007,-81.0348
+florence,SC,34.1954,-79.7626
+greenville,SC,34.8526,-82.3940
+myrtle beach,SC,33.6891,-78.8867
+rock hill,SC,34.9249,-81.0251
+spartanburg,SC,34.9496,-81.9320
+aberdeen,SD,45.4647,-98.4865
+rapid city,SD,44.0805,-103.2310
+sioux falls,SD,43.5460,-96.7313
+brookings,SD,44.3114,-96.7984
+chattanooga,TN,35.0456,-85.3097
+clarksville,TN,36.5298,-87.3595
+jackson,TN,35.6145,-88.8139
+knoxville,TN,35.9606,-83.9207
+memphis,TN,35.1495,-90.0490
+nashville,TN,36.1627,-86.7816
+abilene,TX,32.4487,-99.7331
+amarillo,TX,35.2220,-101.8313
+arlington,TX,32.7357,-97.1081
+austin,TX,30.2672,-97.7431
+beaumont,TX,30.0802,-94.1266
+brownsville,TX,25.9017,-97.4975
+college station,TX,30.6279,-96.3344
+corpus christi,TX,27.8006,-97.3964
+dallas,TX,32.7767,-96.7970
+el paso,TX,31.7619,-106.4850
+fort worth,TX,32.7555,-97.3308
+frisco,TX,33.1507,-96.8236
+houston,TX,29.7604,-95.3698
+killeen,TX,31.1171,-97.7278
+laredo,TX,27.5306,-99.4803
+lubbock,TX,33.5779,-101.8552
+mcallen,TX,26.2034,-98.2300
+midland,TX,31.9973,-102.0779
+odessa,TX,31.8457,-102.3676
+plano,TX,33.0198,-96.6989
+san angelo,TX,31.4638,-100.4370
+san antonio,TX,29.4252,-98.4946
+tyler,TX,32.3513,-95.3011
+waco,TX,31.5493,-97.1467
+wichita falls,TX,33.9137,-98.4934
+logan,UT,41.73698,-111.8338
+ogden,UT,41.2230,-111.9738
+provo,UT,40.2338,-111.6585
+salt lake city,UT,40.7608,-111.8910
+st george,UT,37.0965,-113.5684
+burlington,VT,44.4759,-73.2121
+montpelier,VT,44.2601,-72.5754
+rutland,VT,43.6106,-72.9726
+alexandria,VA,38.8048,-77.0469
+charlottesville,VA,38.0293,-78.4767
+chesapeake,VA,36.7682,-76.2875
+fredericksburg,VA,38.3032,-77.4605
+hampton,VA,37.0299,-76.3452
+lynchburg,VA,37.4138,-79.1422
+newport news,VA,37.0871,-76.4730
+norfolk,VA,36.8508,-76.2859
+richmond,VA,37.5407,-77.4360
+roanoke,VA,37.27097,-79.9414
+virginia beach,VA,36.8529,-75.9780
+bellingham,WA,48.7519,-122.4787
+kennewick,WA,46.2112,-119.1372
+olympia,WA,47.0379,-122.9007
+seattle,WA,47.6062,-122.3321
+spokane,WA,47.6588,-117.4260
+tacoma,WA,47.2529,-122.4443
+vancouver,WA,45.6387,-122.6615
+yakima,WA,46.6021,-120.5059
+charleston,WV,38.3498,-81.6326
+huntington,WV,38.4192,-82.4452
+martinsburg,WV,39.4562,-77.9639
+morgantown,WV,39.6295,-79.9559
+wheeling,WV,40.0639,-80.7209
+appleton,WI,44.2619,-88.4154
+eau claire,WI,44.8113,-91.4985
+green bay,WI,44.5133,-88.0133
+kenosha,WI,42.5847,-87.8212
+la crosse,WI,43.8138,-91.2519
+madison,WI,43.0731,-89.4012
+milwaukee,WI,43.0389,-87.9065
+oshkosh,WI,44.0247,-88.5426
+racine,WI,42.7261,-87.7829
+wausau,WI,44.9591,-89.6301
+casper,WY,42.8501,-106.3252
+cheyenne,WY,41.1400,-104.8202
+gillette,WY,44.2911,-105.5022
+laramie,WY,41.3114,-105.5911
+rock springs,WY,41.5875,-109.2029

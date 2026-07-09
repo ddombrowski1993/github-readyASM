@@ -1,0 +1,2 @@
+work_order_number,store_number,title,description,priority,due_date,notes
+WO-1001,45200,Repair exterior sign,Deferred exterior sign repair,High,2026-07-01,Sample work order

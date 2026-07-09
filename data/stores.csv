@@ -1,0 +1,76 @@
+store_number,address,city,state,zip,latitude,longitude,pmt_tech,brand_tech,status,notes
+45200,100 Main St,Cleveland,OH,44000,41.553741960480984,-81.75955103528513,Brandon Keller,Brandon Keller,Scheduled,Sample store
+45201,101 Main St,Mentor,OH,44000,41.693937857219574,-81.25406989285861,Christopher,Christopher,Completed,Sample store
+45202,102 Main St,Sandusky,OH,44000,41.462453061438005,-82.65899004336906,Angelo,Angelo,Scheduled,Sample store
+45203,103 Main St,Akron,OH,44000,41.073368869713555,-81.51843310944761,Norris,Norris,Completed,Sample store
+45204,104 Main St,Mansfield,OH,44000,40.80638614837871,-82.41546995991708,Brandon Keller,Parker,Completed,Sample store
+45205,105 Main St,Cleveland,OH,44000,41.43003280178694,-81.57927998325519,Brandon Keller,Brandon Keller,Completed,Sample store
+45206,106 Main St,Mentor,OH,44000,41.69517165563612,-81.25287953316864,Christopher,Christopher,Not Started,Sample store
+45207,107 Main St,Sandusky,OH,44000,41.56827564233971,-82.63492804258688,Angelo,Angelo,Not Started,Sample store
+45208,108 Main St,Akron,OH,44000,41.02301053886898,-81.44048894603571,Norris,Norris,Scheduled,Sample store
+45209,109 Main St,Mansfield,OH,44000,40.777083894470195,-82.61115670076677,Brandon Keller,Parker,Not Started,Sample store
+45210,110 Main St,Cleveland,OH,44000,41.46596055409356,-81.66892871198353,Brandon Keller,Brandon Keller,Not Started,Sample store
+45211,111 Main St,Mentor,OH,44000,41.56249081768138,-81.41791023690902,Christopher,Christopher,Not Started,Sample store
+45212,112 Main St,Sandusky,OH,44000,41.55729553873398,-82.67945189241615,Angelo,Angelo,Scheduled,Sample store
+45213,113 Main St,Akron,OH,44000,41.10434239577151,-81.62518281542322,Norris,Norris,Not Started,Sample store
+45214,114 Main St,Mansfield,OH,44000,40.694819237343836,-82.60424420752709,Brandon Keller,Parker,Scheduled,Sample store
+45215,115 Main St,Cleveland,OH,44000,41.57729449380672,-81.61383218472277,Brandon Keller,Brandon Keller,Not Started,Sample store
+45216,116 Main St,Mentor,OH,44000,41.55587077344969,-81.29166842276584,Christopher,Christopher,Not Started,Sample store
+45217,117 Main St,Sandusky,OH,44000,41.420323396162566,-82.68142166812257,Angelo,Angelo,Scheduled,Sample store
+45218,118 Main St,Akron,OH,44000,41.02861156022314,-81.4604473673427,Norris,Norris,Completed,Sample store
+45219,119 Main St,Mansfield,OH,44000,40.760324665401356,-82.41598406773623,Brandon Keller,Parker,Completed,Sample store
+45220,120 Main St,Cleveland,OH,44000,41.60388214958287,-81.65759842992925,Brandon Keller,Brandon Keller,Scheduled,Sample store
+45221,121 Main St,Mentor,OH,44000,41.59659264279039,-81.3546619678866,Christopher,Christopher,Not Started,Sample store
+45222,122 Main St,Sandusky,OH,44000,41.48737869716772,-82.71933881979997,Angelo,Angelo,Not Started,Sample store
+45223,123 Main St,Akron,OH,44000,41.15517933610677,-81.60359714282384,Norris,Norris,Completed,Sample store
+45224,124 Main St,Mansfield,OH,44000,40.84322743108188,-82.53757915487607,Brandon Keller,Parker,Scheduled,Sample store
+45225,125 Main St,Cleveland,OH,44000,41.53595773022023,-81.69249024189271,Brandon Keller,Brandon Keller,Not Started,Sample store
+45226,126 Main St,Mentor,OH,44000,41.663929164252266,-81.42479906327847,Christopher,Christopher,Not Started,Sample store
+45227,127 Main St,Sandusky,OH,44000,41.42126260828797,-82.79702911799333,Angelo,Angelo,Not Started,Sample store
+45228,128 Main St,Akron,OH,44000,41.188567144104404,-81.51806799215082,Norris,Norris,Not Started,Sample store
+45229,129 Main St,Mansfield,OH,44000,40.717643915875186,-82.6045045990563,Brandon Keller,Parker,Not Started,Sample store
+45230,130 Main St,Cleveland,OH,44000,41.49492895288818,-81.73732587660783,Brandon Keller,Brandon Keller,Completed,Sample store
+45231,131 Main St,Mentor,OH,44000,41.61880095383409,-81.29414410833175,Christopher,Christopher,Completed,Sample store
+45232,132 Main St,Sandusky,OH,44000,41.34461791853474,-82.59535704995739,Angelo,Angelo,Completed,Sample store
+45233,133 Main St,Akron,OH,44000,41.170090953719054,-81.60935596410928,Norris,Norris,Not Started,Sample store
+45234,134 Main St,Mansfield,OH,44000,40.874374653115396,-82.5190628638688,Brandon Keller,Parker,Not Started,Sample store
+45235,135 Main St,Cleveland,OH,44000,41.605153799226436,-81.64054963204666,Brandon Keller,Brandon Keller,Not Started,Sample store
+45236,136 Main St,Mentor,OH,44000,41.61498721565257,-81.44713582329848,Christopher,Christopher,Completed,Sample store
+45237,137 Main St,Sandusky,OH,44000,41.35928653766783,-82.7431313581729,Angelo,Angelo,Completed,Sample store
+45238,138 Main St,Akron,OH,44000,41.00255491352346,-81.60143809180022,Norris,Norris,Not Started,Sample store
+45239,139 Main St,Mansfield,OH,44000,40.711064592163396,-82.39963089900995,Brandon Keller,Parker,Scheduled,Sample store
+45240,140 Main St,Cleveland,OH,44000,41.410858972580954,-81.6419866820807,Brandon Keller,Brandon Keller,Completed,Sample store
+45241,141 Main St,Mentor,OH,44000,41.555687586774425,-81.24418011656425,Christopher,Christopher,Not Started,Sample store
+45242,142 Main St,Sandusky,OH,44000,41.444892504653694,-82.78481180465822,Angelo,Angelo,Not Started,Sample store
+45243,143 Main St,Akron,OH,44000,40.970347395921245,-81.49238837289802,Norris,Norris,Not Started,Sample store
+45244,144 Main St,Mansfield,OH,44000,40.76142737790614,-82.52864506212663,Brandon Keller,Parker,Not Started,Sample store
+45245,145 Main St,Cleveland,OH,44000,41.450969535549724,-81.63218655057356,Brandon Keller,Brandon Keller,Not Started,Sample store
+45246,146 Main St,Mentor,OH,44000,41.58528597226691,-81.38153480343563,Christopher,Christopher,Completed,Sample store
+45247,147 Main St,Sandusky,OH,44000,41.37914411662149,-82.79997373984662,Angelo,Angelo,Scheduled,Sample store
+45248,148 Main St,Akron,OH,44000,41.19182861285508,-81.49621938001947,Norris,Norris,Scheduled,Sample store
+45249,149 Main St,Mansfield,OH,44000,40.75656898310966,-82.43604102118292,Brandon Keller,Parker,Not Started,Sample store
+45250,150 Main St,Cleveland,OH,44000,41.46205812877258,-81.60271942348528,Brandon Keller,Brandon Keller,Completed,Sample store
+45251,151 Main St,Mentor,OH,44000,41.54858417274436,-81.43788507729131,Christopher,Christopher,Completed,Sample store
+45252,152 Main St,Sandusky,OH,44000,41.44439407737962,-82.78299560956496,Angelo,Angelo,Not Started,Sample store
+45253,153 Main St,Akron,OH,44000,41.09474605311759,-81.51637654081422,Norris,Norris,Not Started,Sample store
+45254,154 Main St,Mansfield,OH,44000,40.64162908757948,-82.58386321571427,Brandon Keller,Parker,Not Started,Sample store
+45255,155 Main St,Cleveland,OH,44000,41.503055571005746,-81.80408774410728,Brandon Keller,Brandon Keller,Not Started,Sample store
+45256,156 Main St,Mentor,OH,44000,41.777202167419176,-81.45886279117528,Christopher,Christopher,Scheduled,Sample store
+45257,157 Main St,Sandusky,OH,44000,41.53214860300037,-82.78848911078296,Angelo,Angelo,Not Started,Sample store
+45258,158 Main St,Akron,OH,44000,41.019444561225015,-81.42956530487125,Norris,Norris,Not Started,Sample store
+45259,159 Main St,Mansfield,OH,44000,40.85162720835336,-82.46169026861119,Brandon Keller,Parker,Not Started,Sample store
+45260,160 Main St,Cleveland,OH,44000,41.43900444666248,-81.78599241878008,Brandon Keller,Brandon Keller,Not Started,Sample store
+45261,161 Main St,Mentor,OH,44000,41.750514224933426,-81.30933136720547,Christopher,Christopher,Scheduled,Sample store
+45262,162 Main St,Sandusky,OH,44000,41.431294504128296,-82.77715277921911,Angelo,Angelo,Completed,Sample store
+45263,163 Main St,Akron,OH,44000,40.9712591937059,-81.43923904840918,Norris,Norris,Scheduled,Sample store
+45264,164 Main St,Mansfield,OH,44000,40.78685690127388,-82.3943545980452,Brandon Keller,Parker,Completed,Sample store
+45265,165 Main St,Cleveland,OH,44000,41.542982194820326,-81.8046330981957,Brandon Keller,Brandon Keller,Completed,Sample store
+45266,166 Main St,Mentor,OH,44000,41.764162126119395,-81.33401170555662,Christopher,Christopher,Scheduled,Sample store
+45267,167 Main St,Sandusky,OH,44000,41.50284715454073,-82.77770951722933,Angelo,Angelo,Not Started,Sample store
+45268,168 Main St,Akron,OH,44000,41.10884866542683,-81.57026690050985,Norris,Norris,Completed,Sample store
+45269,169 Main St,Mansfield,OH,44000,40.72541817689169,-82.55896583352019,Brandon Keller,Parker,Scheduled,Sample store
+45270,170 Main St,Cleveland,OH,44000,41.525600975161204,-81.79784952309299,Brandon Keller,Brandon Keller,Completed,Sample store
+45271,171 Main St,Mentor,OH,44000,41.73486476547977,-81.27845900501264,Christopher,Christopher,Not Started,Sample store
+45272,172 Main St,Sandusky,OH,44000,41.40138797342498,-82.71947623243643,Angelo,Angelo,Not Started,Sample store
+45273,173 Main St,Akron,OH,44000,41.01675589023339,-81.58501848922212,Norris,Norris,Completed,Sample store
+45274,174 Main St,Mansfield,OH,44000,40.7896189611447,-82.62409641396235,Brandon Keller,Parker,Completed,Sample store

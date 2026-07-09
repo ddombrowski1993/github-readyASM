@@ -1,0 +1,11 @@
+[client]
+showSidebarNavigation = false
+
+[server]
+headless = true
+port = 5000
+# Replit serves the preview through a reverse proxy/iframe, so CORS and XSRF
+# token validation must be disabled — requests arrive from a different origin
+# and the built-in checks would block them. Application-level auth handles security.
+enableCORS = false
+enableXsrfProtection = false

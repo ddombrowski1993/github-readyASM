@@ -1,0 +1,4 @@
+store_number,store_name,address,city,state,zip,latitude,longitude,assigned_pmt,assigned_brand,pmt_team,brand_team,priority,notes
+45200,Sample Cleveland Store,100 Main St,Cleveland,OH,44114,41.4993,-81.6944,Brandon Keller,Angelo,Akron/Canton Team,Cleveland Team,Medium,Sample store
+45201,Sample Mentor Store,101 Lake Rd,Mentor,OH,44060,41.6662,-81.3396,Christopher,Angelo,Cleveland Team,Cleveland Team,High,East side sample
+45202,Sample Westlake Store,102 Center Ridge Rd,Westlake,OH,44145,41.4553,-81.9179,Brandon Keller,Angelo,Cleveland Team,Cleveland Team,Medium,West side sample

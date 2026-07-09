@@ -1,0 +1,2 @@
+store_number,issue_title,issue_description,category,priority,vendor,next_followup_date,due_date,status,notes
+45200,Landscape cleanup needed,Weeds need vendor follow-up,Landscaping,High,Vendor A,2026-06-20,2026-06-25,Open,Sample follow-up

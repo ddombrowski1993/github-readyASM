@@ -1,0 +1,3 @@
+first_name,last_name,full_name,employee_number,role,team,phone,email,hire_date,truck_number,home_city,home_state,home_latitude,home_longitude,active,notes
+Jane,Tech,Jane Tech,E1001,PMT,Cleveland Team,,,2026-01-01,T-100,Cleveland,OH,41.4993,-81.6944,true,Sample employee
+John,PMT,John PMT,E1002,PMT,Akron/Canton Team,,,2026-01-01,T-101,Akron,OH,41.0814,-81.5190,true,Sample employee
