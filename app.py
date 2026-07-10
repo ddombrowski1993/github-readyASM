@@ -185,6 +185,24 @@ st.markdown(
         color: #102a43;
         font-weight: 700;
     }
+    div[data-testid="stPageLink"] {
+        margin-top: 0.55rem;
+        margin-bottom: 0.75rem;
+    }
+    div[data-testid="stPageLink"] a {
+        min-height: 40px;
+        height: auto;
+        white-space: normal;
+        line-height: 1.2;
+        align-items: center;
+    }
+    .asm-metric-card {
+        margin-bottom: 0.55rem;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stPageLink"] {
+        margin-top: 0;
+        margin-bottom: 0;
+    }
     </style>
     <div class="dashboard-action-strip">Use the buttons under each number to jump directly to the records behind it.</div>
     """,
@@ -288,8 +306,16 @@ daily_work = safe_query(
         sum(case when work_type = 'Calibration' and schedule_date >= :week_start and schedule_date < :week_end and status = 'Completed' then 1 else 0 end) as calibration_completed_week,
         sum(case when work_type = 'Brand Enhancement' and schedule_date >= :week_start and schedule_date < :week_end and status in ('Scheduled','In Progress') then 1 else 0 end) as brand_remaining_week,
         sum(case when work_type = 'Calibration' and schedule_date >= :week_start and schedule_date < :week_end and status in ('Scheduled','In Progress') then 1 else 0 end) as calibration_remaining_week,
-        sum(case when work_type = 'Brand Enhancement' and status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled') then 1 else 0 end) as brand_delayed,
-        sum(case when work_type = 'Calibration' and status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled') then 1 else 0 end) as calibration_delayed,
+        sum(case when work_type = 'Brand Enhancement' and (
+            status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled')
+            or coalesce(rain_delay, false) = true
+            or (original_schedule_date is not null and original_schedule_date <> schedule_date and status <> 'Completed')
+        ) then 1 else 0 end) as brand_delayed,
+        sum(case when work_type = 'Calibration' and (
+            status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled')
+            or coalesce(rain_delay, false) = true
+            or (original_schedule_date is not null and original_schedule_date <> schedule_date and status <> 'Completed')
+        ) then 1 else 0 end) as calibration_delayed,
         sum(case when work_type = 'Deferred Work Order' and schedule_date >= :week_start and schedule_date < :week_end and status not in ('Cancelled','Skipped') then 1 else 0 end) as deferred_wo_week
     from schedule_items
     """,
@@ -350,14 +376,14 @@ with today_cols[2]:
     metric_help_card(
         "Brand Delayed / Needs Rescheduled",
         int(daily_row.get("brand_delayed", 0) or 0),
-        "All Brand Enhancement schedule items with exception statuses such as Needs Rescheduled, Rescheduled, Rain Delay, Not Completed, Skipped, or Cancelled.",
+        "All Brand Enhancement schedule items with exception statuses, rain-delay flags, or active rows pushed from their original date.",
     )
 today_cols[2].page_link("pages/12_View_Schedule.py", label="Review Brand Issues")
 with today_cols[3]:
     metric_help_card(
         "Calibration Delayed / Needs Rescheduled",
         int(daily_row.get("calibration_delayed", 0) or 0),
-        "All Calibration schedule items with exception statuses such as Needs Rescheduled, Rescheduled, Rain Delay, Not Completed, Skipped, or Cancelled.",
+        "All Calibration schedule items with exception statuses, rain-delay flags, or active rows pushed from their original date.",
     )
 today_cols[3].page_link("pages/12_View_Schedule.py", label="Review Calibration Issues")
 

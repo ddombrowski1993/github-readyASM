@@ -946,10 +946,14 @@ def require_login():
             overflow-y: auto !important;
         }
         [data-testid="stAppViewContainer"], section.main, [data-testid="stMain"] {
-            height: auto !important;
+            height: 100vh !important;
             min-height: 100vh !important;
             overflow-x: hidden !important;
-            overflow-y: auto !important;
+            overflow-y: scroll !important;
+        }
+        [data-testid="stMainBlockContainer"] {
+            min-height: 135vh !important;
+            padding-bottom: 35vh !important;
         }
         header[data-testid="stHeader"] {
             background: transparent;
@@ -979,7 +983,8 @@ def require_login():
         .block-container {
             max-width: 820px;
             padding-top: 5vh;
-            padding-bottom: 10vh;
+            padding-bottom: 35vh;
+            min-height: 135vh;
             position: relative;
             z-index: 2;
         }
@@ -1063,7 +1068,7 @@ def require_login():
             box-shadow: 0 18px 48px rgba(15, 23, 42, 0.14);
             max-height: min(58vh, 680px);
             overflow-y: auto;
-            overscroll-behavior: contain;
+            overscroll-behavior: auto;
             padding: 1.35rem 1.5rem 1.5rem 1.5rem;
             scrollbar-color: #64748b #e2e8f0;
             scrollbar-gutter: stable;
@@ -1172,7 +1177,7 @@ def require_login():
         @media (max-height: 760px) {
             .block-container {
                 padding-top: 1rem;
-                padding-bottom: 8rem;
+                padding-bottom: 35vh;
             }
             .login-hero {
                 padding: 1.2rem 1.5rem 1rem 1.5rem;
@@ -1185,6 +1190,7 @@ def require_login():
             }
             div[data-testid="stForm"] {
                 max-height: min(62vh, 640px);
+                overflow-y: auto;
                 padding: 1rem 1.2rem 1.2rem 1.2rem;
             }
         }

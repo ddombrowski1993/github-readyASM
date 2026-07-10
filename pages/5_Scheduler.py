@@ -144,6 +144,15 @@ def projected_completion_date(start_date, workdays, days_needed):
     return None
 
 
+def next_or_same_schedule_workday(start_date, workdays):
+    if not workdays:
+        return start_date
+    current = start_date
+    while current.strftime("%A") not in workdays or is_company_holiday(current):
+        current += timedelta(days=1)
+    return current
+
+
 def schedule_items_for_day(work_date, team_id=None):
     return safe_query(
         """
@@ -201,10 +210,28 @@ def schedule_runs():
     )
 
 
+def schedule_run_ids_for_team(team_id):
+    if team_id is None:
+        return set()
+    df = safe_query(
+        """
+        select distinct schedule_id
+        from schedule_items
+        where work_type = 'Brand Enhancement'
+          and team_id = :team_id
+          and schedule_id is not null
+        """,
+        {"team_id": int(team_id)},
+    )
+    if df.empty or "schedule_id" not in df.columns:
+        return set()
+    return {int(value) for value in df["schedule_id"].dropna().tolist()}
+
+
 def schedule_items_for_schedule(schedule_id):
     return safe_query(
         """
-        select si.id, si.schedule_date, si.sequence_number as stop, s.store_number, s.address, s.city,
+        select si.id, si.team_id, si.schedule_date, si.sequence_number as stop, s.store_number, s.address, s.city,
                t.team_name, si.work_type, si.status, coalesce(si.completion_notes, si.weather_notes, '') as notes
         from schedule_items si
         left join stores s on s.id = si.store_id
@@ -438,14 +465,13 @@ page_header(
 )
 
 
-def remember_adjustment_result(message, level="success"):
-    st.session_state["be_adjustment_result"] = {"message": str(message), "level": level}
+def remember_adjustment_result(message, level="success", **details):
+    st.session_state["be_adjustment_result"] = {"message": str(message), "level": level, **details}
+    st.session_state["be_show_revised_schedule"] = False
+    st.session_state["be_adjustment_acknowledged"] = False
 
 
-def show_adjustment_result():
-    result = st.session_state.pop("be_adjustment_result", None)
-    if not result:
-        return
+def render_adjustment_details(result):
     level = result.get("level", "success")
     message = result.get("message", "")
     if level == "warning":
@@ -454,6 +480,179 @@ def show_adjustment_result():
         st.error(message)
     else:
         st.success(message)
+    detail_rows = [
+        ("Reason", result.get("reason")),
+        ("Affected date", result.get("affected_date")),
+        ("Schedule pushed to", result.get("target_date")),
+        ("New projected finish", result.get("projected_finish")),
+        ("Brand stops pushed", result.get("pushed_count")),
+        ("Deferred WOs added", result.get("deferred_added")),
+    ]
+    detail_rows = [(label, value) for label, value in detail_rows if value not in (None, "")]
+    if detail_rows:
+        detail_df = pd.DataFrame(
+            [{"Detail": str(label), "Value": str(value)} for label, value in detail_rows]
+        )
+        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+
+def render_revised_schedule(result, max_rows=300):
+    revised = revised_schedule_for_result(result)
+    if revised.empty:
+        st.info("No schedule rows were found for this schedule.")
+        return
+    st.markdown("**Revised Schedule**")
+    render_plain_table(revised, max_rows=max_rows)
+
+
+def revised_schedule_for_result(result):
+    if not result.get("schedule_id"):
+        return pd.DataFrame()
+    revised = schedule_items_for_schedule(int(result["schedule_id"]))
+    if revised.empty:
+        return revised
+    team_id = result.get("team_id")
+    if team_id is not None and "team_id" in revised.columns:
+        revised = revised[revised["team_id"].astype("Int64") == int(team_id)].copy()
+    return revised
+
+
+def render_adjustment_schedule_check(result):
+    if not (result.get("schedule_id") and result.get("workdays")):
+        return
+    revised = schedule_items_for_schedule(int(result["schedule_id"]))
+    if revised.empty or "schedule_date" not in revised.columns:
+        return
+    checked = revised.copy()
+    checked["_schedule_date"] = pd.to_datetime(checked["schedule_date"], errors="coerce").dt.date
+    brand_checked = checked[checked["work_type"].eq("Brand Enhancement")] if "work_type" in checked.columns else checked
+    affected_date = result.get("affected_date")
+    if affected_date:
+        affected_date = pd.to_datetime(affected_date, errors="coerce")
+        if pd.notna(affected_date):
+            brand_checked = brand_checked[brand_checked["_schedule_date"] >= affected_date.date()]
+    if "status" in brand_checked.columns:
+        brand_checked = brand_checked[brand_checked["status"].isin(["Scheduled", "Needs Rescheduled", "Rain Delay", "Rescheduled", "Not Completed"])]
+    invalid_days = brand_checked[
+        brand_checked["_schedule_date"].notna()
+        & (
+            ~brand_checked["_schedule_date"].apply(lambda value: value.strftime("%A") if pd.notna(value) else "").isin(result["workdays"])
+            | brand_checked["_schedule_date"].apply(lambda value: bool(pd.notna(value) and is_company_holiday(value)))
+        )
+    ].drop(columns=["_schedule_date"], errors="ignore")
+    if invalid_days.empty:
+        st.success("Schedule check passed: no Brand Enhancement stops are scheduled outside the selected work days or on company holidays.")
+    else:
+        st.error("Schedule check found stops outside the selected work days or on company holidays.")
+        render_plain_table(invalid_days, max_rows=100)
+
+
+_dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+
+
+def acknowledge_schedule_push(show_schedule=False):
+    st.session_state["be_adjustment_acknowledged"] = True
+    if show_schedule:
+        st.session_state["be_show_revised_schedule"] = True
+
+
+def rerun_full_app():
+    try:
+        st.rerun(scope="app")
+    except TypeError:
+        st.rerun()
+
+
+def reset_brand_adjustment_form():
+    for key_name in [
+        "be_adjustment_result",
+        "be_show_revised_schedule",
+        "be_adjustment_acknowledged",
+        "be_adjustment_run_id",
+        "be_adjustment_type",
+        "be_pause_start",
+        "be_resume_date",
+        "be_resume_capacity",
+        "be_resume_weekdays",
+        "be_pause_notes",
+        "be_confirm_pause_revision",
+        "be_adjust_date",
+        "be_source_date",
+        "be_pull_limit",
+        "be_cascade_weekdays_pull",
+        "be_cascade_capacity_pull",
+        "be_adjust_notes_pull",
+        "be_pull_items",
+        "be_target_date",
+        "be_cascade_weekdays",
+        "be_cascade_capacity",
+        "be_adjust_notes",
+        "be_selected_day_items",
+        "be_add_deferred_during_push",
+        "be_selected_dwo",
+    ]:
+        st.session_state.pop(key_name, None)
+
+
+if _dialog:
+    @_dialog("Schedule Push Saved")
+    def adjustment_acknowledgement_dialog():
+        result = st.session_state.get("be_adjustment_result")
+        if not result:
+            return
+        render_adjustment_details(result)
+        if st.session_state.get("be_show_revised_schedule"):
+            render_revised_schedule(result, max_rows=150)
+            render_adjustment_schedule_check(result)
+            st.info("Review the revised schedule, then click OK to close this popup.")
+        else:
+            st.info("Click OK to acknowledge this schedule change, or export the new schedule to share with the team.")
+        export_df = revised_schedule_for_result(result)
+        ok_cols = st.columns(2)
+        if ok_cols[0].button("OK", type="primary", key="be_adjustment_ok"):
+            acknowledge_schedule_push()
+            rerun_full_app()
+        if result.get("schedule_id"):
+            ok_cols[1].download_button(
+                "Export New Schedule Excel",
+                data=excel_bytes(export_df),
+                file_name=f"brand_revised_schedule_{int(result['schedule_id'])}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                disabled=export_df.empty,
+                key="be_adjustment_export_revised_schedule",
+            )
+else:
+    adjustment_acknowledgement_dialog = None
+
+
+def show_adjustment_result():
+    result = st.session_state.get("be_adjustment_result")
+    if not result:
+        return
+    if not st.session_state.get("be_adjustment_acknowledged", True) and adjustment_acknowledgement_dialog:
+        adjustment_acknowledgement_dialog()
+        return
+    with st.container(border=True):
+        render_adjustment_details(result)
+        if not st.session_state.get("be_adjustment_acknowledged", True):
+            st.info("Click OK to acknowledge this schedule change.")
+            if st.button("OK", type="primary", key="be_adjustment_ok_fallback"):
+                st.session_state["be_adjustment_acknowledged"] = True
+                rerun_full_app()
+            return
+        action_cols = st.columns(3)
+        if action_cols[0].button("View Revised Schedule", key="be_view_revised_schedule"):
+            st.session_state["be_show_revised_schedule"] = True
+            rerun_full_app()
+        action_cols[1].page_link("pages/12_View_Schedule.py", label="Open View Schedule")
+        if action_cols[2].button("Dismiss", key="be_dismiss_adjustment_result"):
+            st.session_state.pop("be_adjustment_result", None)
+            st.session_state["be_show_revised_schedule"] = False
+            st.session_state["be_adjustment_acknowledged"] = True
+            rerun_full_app()
+        if st.session_state.get("be_show_revised_schedule") and result.get("schedule_id"):
+            render_revised_schedule(result, max_rows=300)
+        render_adjustment_schedule_check(result)
 step_flow(
     ["Select area", "Validate stores", "Configure", "Generate draft", "Review & export", "Publish"],
     hint="Choose the Brand Enhancement area and crew, confirm store assignments, then generate. Use the tabs below to manage or export after publishing.",
@@ -513,6 +712,7 @@ team_df = teams()
 brand_team_df = team_df[team_df["team_type"].isin(["Brand Enhancement", "Other"])] if not team_df.empty else team_df
 today = date.today()
 work_type = "Brand Enhancement"
+default_schedule_start = next_or_same_schedule_workday(today, ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
 
 if brand_team_df.empty:
     with st.container(border=True):
@@ -530,6 +730,11 @@ tab_build, tab_manage, tab_export = st.tabs([
 with tab_build:
     with st.container(border=True):
         step_header(1, "Select What You Are Scheduling", "Choose the Brand Enhancement area, crew, and schedule period.", "blue")
+        if st.session_state.get("be_schedule_month") and st.session_state.get("be_schedule_month") < today:
+            st.session_state["be_schedule_month"] = default_schedule_start
+            st.session_state["be_start"] = default_schedule_start
+            st.session_state["be_end"] = default_schedule_start + timedelta(days=4)
+            st.session_state.pop("be_planning_range_signature", None)
         s1, s2, s3 = st.columns(3)
         team_id = s1.selectbox(
             "Brand Enhancement area / crew",
@@ -539,7 +744,7 @@ with tab_build:
         )
         selected_team = brand_team_df.set_index("id").loc[team_id]
         planning_range = s2.selectbox("Schedule period", ["Custom date range", "Through end of year"], key="be_planning_range")
-        schedule_month = s3.date_input("Schedule month starts", value=date(today.year, today.month, 1), key="be_schedule_month")
+        schedule_month = s3.date_input("Schedule starts", value=default_schedule_start, key="be_schedule_month")
 
         range_signature = (planning_range, schedule_month.isoformat())
         if st.session_state.get("be_planning_range_signature") != range_signature:
@@ -785,30 +990,32 @@ with tab_build:
 
 with tab_manage:
     with st.container(border=True):
-        step_header(1, "Schedule Adjustment Center", "Manage an already-published schedule. Select one schedule/team, choose what happened, preview the impact, then apply the revision.", "gray")
+        step_header(1, "Schedule Adjustment Center", "Manage an already-published schedule. Choose the team/area first, then select a schedule and apply the revision.", "gray")
         show_adjustment_result()
+        team_options = [None] + brand_team_df["id"].tolist()
+        selected_adjust_team = st.selectbox(
+            "Manage Step 1 - Choose Team / Area",
+            team_options,
+            format_func=lambda x: "All Brand Enhancement teams" if x is None else brand_team_df.set_index("id").loc[x, "team_name"],
+            key="be_adjustment_team_scope",
+            on_change=reset_brand_adjustment_form,
+        )
+        st.caption("Choose Cleveland, Columbus, or another Brand Enhancement area first. Changing this resets the adjustment form below.")
         runs = schedule_runs()
+        if selected_adjust_team is not None and not runs.empty:
+            team_run_ids = schedule_run_ids_for_team(selected_adjust_team)
+            runs = runs[runs["id"].astype(int).isin(team_run_ids)].copy()
         if runs.empty:
-            st.info("No Brand Enhancement schedule runs found.")
+            st.info("No Brand Enhancement schedule runs found for the selected team/area.")
         else:
             run_id = st.selectbox(
-                "Manage Step 1 - Select Published Schedule",
+                "Manage Step 2 - Select Published Schedule",
                 runs["id"].tolist(),
                 format_func=lambda x: f"#{x} - {runs.set_index('id').loc[x, 'schedule_name']} ({runs.set_index('id').loc[x, 'status']})",
                 key="be_adjustment_run_id",
             )
             run_row = runs.set_index("id").loc[run_id]
             run_items = schedule_items_for_schedule(run_id)
-            default_team_id = run_row.get("team_id")
-            team_options = [None] + brand_team_df["id"].tolist()
-            default_team_index = team_options.index(default_team_id) if pd.notna(default_team_id) and default_team_id in team_options else 0
-            selected_adjust_team = st.selectbox(
-                "Manage Step 1A - Team for adjustment and revision history",
-                team_options,
-                index=default_team_index,
-                format_func=lambda x: "All Brand Enhancement teams" if x is None else brand_team_df.set_index("id").loc[x, "team_name"],
-                key="be_adjustment_team_scope",
-            )
             summary_items = run_items[run_items["team_name"].eq(brand_team_df.set_index("id").loc[selected_adjust_team, "team_name"])] if selected_adjust_team is not None and not run_items.empty else run_items
             summary = selected_schedule_summary(run_id, run_row, summary_items, team_id=selected_adjust_team)
             change_log = schedule_change_log(run_id, team_id=selected_adjust_team)
@@ -910,9 +1117,17 @@ with tab_manage:
                     m2.info("All Brand Enhancement teams" if adjust_team is None else brand_team_df.set_index("id").loc[adjust_team, "team_name"])
                     capacity = m3.number_input("Daily capacity", min_value=1, max_value=40, value=2, key="be_cascade_capacity")
                     cdate1, cdate2 = st.columns(2)
-                    target_date = cdate1.date_input("Resume/push work starting on", value=adjust_date + timedelta(days=1), key="be_target_date")
+                    target_date = cdate1.date_input(
+                        "Resume/push work starting on",
+                        value=next_or_same_schedule_workday(adjust_date + timedelta(days=1), ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]),
+                        key="be_target_date",
+                    )
                     cascade_weekdays = cdate2.multiselect("Work days after this change", WEEKDAYS, default=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"], key="be_cascade_weekdays")
-                    notes = st.text_area("Reason / notes", value=adjustment_type, key="be_adjust_notes")
+                    effective_target_date = next_or_same_schedule_workday(target_date, cascade_weekdays)
+                    if cascade_weekdays and effective_target_date != target_date:
+                        st.warning(f"{target_date} is not one of the selected work days or is a company holiday. The schedule will start on {effective_target_date}.")
+                    notes = st.text_area("Reason / notes", value="", key="be_adjust_notes")
+                    note_text = notes.strip()
                     day_schedule = schedule_items_for_day(adjust_date, adjust_team)
                     normal_open_ids = day_schedule.loc[(day_schedule["status"] != "Completed") & (day_schedule["work_type"] == "Brand Enhancement"), "id"].tolist() if not day_schedule.empty else []
                     completed_past_ids = day_schedule.loc[(adjust_date < today) & (day_schedule["status"] == "Completed") & (day_schedule["work_type"] == "Brand Enhancement"), "id"].tolist() if not day_schedule.empty else []
@@ -968,7 +1183,7 @@ with tab_manage:
                         "Use the apply button below this preview to actually save the push/deferred WO assignment."
                     )
                     push_item_ids = selected_day_items if adjustment_type in {"Rain Delay", "Snow Delay", "Deferred Work Orders Completed Instead"} else selected_day_items
-                    cascade_preview = preview_cascade_plan(run_items, push_item_ids, target_date, int(capacity), cascade_weekdays)
+                    cascade_preview = preview_cascade_plan(run_items, push_item_ids, effective_target_date, int(capacity), cascade_weekdays)
                     projected_finish = cascade_preview["new_date"].max() if not cascade_preview.empty else None
                     cascade_count = len(cascade_preview)
                     if not cascade_preview.empty:
@@ -986,7 +1201,7 @@ with tab_manage:
                     else:
                         st.info("No unfinished Brand Enhancement stores are available to push from this date.")
                     st.info(
-                        f"Adjustment: {adjustment_type}. Affected date: {adjust_date}. Resume date: {target_date}. "
+                        f"Adjustment: {adjustment_type}. Affected date: {adjust_date}. Resume date: {effective_target_date}. "
                         f"This will reflow {cascade_count} unfinished Brand Enhancement store(s). "
                         f"Previous estimated completion: {summary['current_finish']}. "
                         f"New estimated completion after revision: {projected_finish or summary['current_finish']}."
@@ -1018,55 +1233,96 @@ with tab_manage:
                                 st.write(f"- {blocker}")
                         else:
                             st.write("No blockers found. The submit button should be enabled.")
-                    if add_deferred:
-                        st.caption("If the Brand stores were already pushed, use this button to assign Deferred WOs to the selected date without moving any normal Brand stops.")
-                        if st.button("Assign Deferred WOs Only to This Date", type="secondary", key="be_assign_deferred_only"):
-                            if not selected_dwo:
-                                st.error("No Deferred WOs are selected. Pick at least one Deferred WO from the dropdown above.")
-                            else:
-                                added = schedule_deferred_work_orders(
-                                    selected_dwo,
-                                    adjust_date,
-                                    team_id=adjust_team,
-                                    employee_id=None,
-                                    notes=notes or "Deferred WO assigned to this date. Mark completion from the Deferred Work Orders page.",
-                                    schedule_id=int(run_id),
-                                )
-                                remember_adjustment_result(f"Saved: {added} deferred WO(s) were assigned to {adjust_date}. No Brand Enhancement stops were moved.")
-                                st.rerun()
                     if adjustment_type in {"Rain Delay", "Snow Delay"}:
                         weather_submit_disabled = (not push_item_ids and not selected_dwo) or (bool(push_item_ids) and not cascade_weekdays) or not confirm_revision
-                        if st.button("Mark Day as Weather Delay, Add Deferred Work if Selected, and Push Selected Normal Work", disabled=weather_submit_disabled, type="primary"):
+                        if push_item_ids and selected_dwo:
+                            weather_button_label = "Apply Weather Delay, Push Schedule, And Add Deferred WOs"
+                        elif push_item_ids:
+                            weather_button_label = "Apply Weather Delay And Push Schedule"
+                        else:
+                            weather_button_label = "Assign Deferred WOs To This Date"
+                        if st.button(weather_button_label, disabled=weather_submit_disabled, type="primary", key="be_apply_weather_revision"):
                             if push_item_ids:
-                                mark_weather_delay(adjust_team, adjust_date, notes or adjustment_type, work_type=work_type, schedule_id=int(run_id))
-                                count = cascade_schedule_items(push_item_ids, target_date, int(capacity), cascade_weekdays, adjust_team, "Scheduled", notes or adjustment_type, adjustment_type, work_type=work_type, schedule_id=int(run_id))
+                                mark_weather_delay(adjust_team, adjust_date, note_text, work_type=work_type, schedule_id=int(run_id))
+                                count = cascade_schedule_items(push_item_ids, effective_target_date, int(capacity), cascade_weekdays, adjust_team, "Scheduled", note_text, adjustment_type, work_type=work_type, schedule_id=int(run_id))
                             else:
                                 count = 0
-                            added = schedule_deferred_work_orders(selected_dwo, adjust_date, team_id=adjust_team, employee_id=None, notes=notes or adjustment_type, schedule_id=int(run_id)) if selected_dwo else 0
+                            added = schedule_deferred_work_orders(selected_dwo, adjust_date, team_id=adjust_team, employee_id=None, notes=note_text, schedule_id=int(run_id)) if selected_dwo else 0
+                            result_details = {
+                                "schedule_id": int(run_id),
+                                "team_id": int(adjust_team) if adjust_team is not None else None,
+                                "reason": adjustment_type,
+                                "affected_date": adjust_date,
+                                "target_date": effective_target_date if count else "",
+                                "projected_finish": projected_finish or summary["current_finish"],
+                                "pushed_count": count,
+                                "deferred_added": added,
+                                "workdays": cascade_weekdays,
+                            }
                             if count:
-                                remember_adjustment_result(f"Saved: {count} selected stop(s) started the cascade, {cascade_count} total Brand Enhancement store(s) were reflowed, and {added} deferred WO(s) were assigned to {adjust_date}.")
+                                remember_adjustment_result(
+                                    f"Schedule pushed because of {adjustment_type}. Work resumes on {effective_target_date}.",
+                                    **result_details,
+                                )
                             else:
-                                remember_adjustment_result(f"Saved: {added} deferred WO(s) were assigned to {adjust_date}. No Brand Enhancement stops were moved.")
+                                remember_adjustment_result(
+                                    f"Saved: {added} deferred WO(s) were assigned to {adjust_date}. No Brand Enhancement stops were moved.",
+                                    **result_details,
+                                )
                             st.rerun()
                     elif adjustment_type == "Deferred Work Orders Completed Instead":
                         deferred_submit_disabled = not selected_dwo or not confirm_revision or (bool(push_item_ids) and not cascade_weekdays)
                         if st.button("Assign Deferred WOs to This Date and Push Selected Normal Work", disabled=deferred_submit_disabled, type="primary"):
-                            pushed = cascade_schedule_items(push_item_ids, target_date, int(capacity), cascade_weekdays, adjust_team, "Scheduled", notes or "Deferred WOs assigned in place of normal stores.", adjustment_type, work_type=work_type, schedule_id=int(run_id)) if push_item_ids else 0
-                            added = schedule_deferred_work_orders(selected_dwo, adjust_date, team_id=adjust_team, employee_id=None, notes=notes or "Deferred WO assigned to this date. Mark completion from the Deferred Work Orders page.", schedule_id=int(run_id))
+                            pushed = cascade_schedule_items(push_item_ids, effective_target_date, int(capacity), cascade_weekdays, adjust_team, "Scheduled", note_text, adjustment_type, work_type=work_type, schedule_id=int(run_id)) if push_item_ids else 0
+                            added = schedule_deferred_work_orders(selected_dwo, adjust_date, team_id=adjust_team, employee_id=None, notes=note_text, schedule_id=int(run_id))
+                            result_details = {
+                                "schedule_id": int(run_id),
+                                "team_id": int(adjust_team) if adjust_team is not None else None,
+                                "reason": adjustment_type,
+                                "affected_date": adjust_date,
+                                "target_date": effective_target_date if pushed else "",
+                                "projected_finish": projected_finish or summary["current_finish"],
+                                "pushed_count": pushed,
+                                "deferred_added": added,
+                                "workdays": cascade_weekdays,
+                            }
                             if pushed:
-                                remember_adjustment_result(f"Saved: {pushed} selected stop(s) started the cascade, {cascade_count} total Brand Enhancement store(s) were reflowed, and {added} deferred WO(s) were assigned to {adjust_date}. Mark deferred WO completion from the Deferred Work Orders page.")
+                                remember_adjustment_result(
+                                    f"Schedule pushed because deferred WOs were completed instead. Work resumes on {effective_target_date}.",
+                                    **result_details,
+                                )
                             else:
-                                remember_adjustment_result(f"Saved: {added} deferred WO(s) were assigned to {adjust_date}. No Brand Enhancement stops were moved. Mark deferred WO completion from the Deferred Work Orders page.")
+                                remember_adjustment_result(
+                                    f"Saved: {added} deferred WO(s) were assigned to {adjust_date}. No Brand Enhancement stops were moved.",
+                                    **result_details,
+                                )
                             st.rerun()
                     elif adjustment_type in {"Crew Call-Off", "Team Unavailable", "Other"}:
                         other_submit_disabled = (not selected_day_items and not selected_dwo) or (bool(selected_day_items) and not cascade_weekdays) or not confirm_revision
                         if st.button("Add Deferred Work if Selected and Push Selected Normal Work", disabled=other_submit_disabled, type="primary"):
-                            count = cascade_schedule_items(selected_day_items, target_date, int(capacity), cascade_weekdays, adjust_team, "Scheduled", notes or adjustment_type, adjustment_type, work_type=work_type, schedule_id=int(run_id)) if selected_day_items else 0
-                            added = schedule_deferred_work_orders(selected_dwo, adjust_date, team_id=adjust_team, employee_id=None, notes=notes or adjustment_type, schedule_id=int(run_id)) if selected_dwo else 0
+                            count = cascade_schedule_items(selected_day_items, effective_target_date, int(capacity), cascade_weekdays, adjust_team, "Scheduled", note_text, adjustment_type, work_type=work_type, schedule_id=int(run_id)) if selected_day_items else 0
+                            added = schedule_deferred_work_orders(selected_dwo, adjust_date, team_id=adjust_team, employee_id=None, notes=note_text, schedule_id=int(run_id)) if selected_dwo else 0
+                            result_details = {
+                                "schedule_id": int(run_id),
+                                "team_id": int(adjust_team) if adjust_team is not None else None,
+                                "reason": adjustment_type,
+                                "affected_date": adjust_date,
+                                "target_date": effective_target_date if count else "",
+                                "projected_finish": projected_finish or summary["current_finish"],
+                                "pushed_count": count,
+                                "deferred_added": added,
+                                "workdays": cascade_weekdays,
+                            }
                             if count:
-                                remember_adjustment_result(f"Saved: {count} selected stop(s) started the cascade, {cascade_count} total Brand Enhancement store(s) were reflowed, and {added} deferred WO(s) were assigned to {adjust_date}.")
+                                remember_adjustment_result(
+                                    f"Schedule pushed because of {adjustment_type}. Work resumes on {effective_target_date}.",
+                                    **result_details,
+                                )
                             else:
-                                remember_adjustment_result(f"Saved: {added} deferred WO(s) were assigned to {adjust_date}. No Brand Enhancement stops were moved.")
+                                remember_adjustment_result(
+                                    f"Saved: {added} deferred WO(s) were assigned to {adjust_date}. No Brand Enhancement stops were moved.",
+                                    **result_details,
+                                )
                             st.rerun()
                     elif adjustment_type == "Manual Schedule Adjustment":
                         if st.button("Mark Selected Stops Not Completed", disabled=not selected_day_items or not confirm_revision, type="primary"):

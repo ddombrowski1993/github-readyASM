@@ -421,10 +421,19 @@ def next_work_date(current_date, enabled_weekdays):
     return next_date
 
 
+def next_or_same_work_date(current_date, enabled_weekdays):
+    if not enabled_weekdays:
+        return current_date
+    while current_date.strftime("%A") not in enabled_weekdays or is_company_holiday(current_date):
+        current_date += timedelta(days=1)
+    return current_date
+
+
 def cascade_schedule_items(item_ids, target_date, stores_per_day, weekdays, team_id=None, status="Scheduled", notes="", reason="moved", work_type=None, schedule_id=None):
     if not item_ids or not weekdays:
         return 0
     selected_ids = {int(item_id) for item_id in item_ids}
+    target_date = next_or_same_work_date(target_date, weekdays)
     with session_scope() as session:
         selected_items = session.scalars(select(ScheduleItem).where(ScheduleItem.id.in_(selected_ids))).all()
         if not selected_items:

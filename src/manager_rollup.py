@@ -132,8 +132,34 @@ def _workspace_counts(account):
         counts["Calibration Completed This Week"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'Calibration' and status = 'Completed' and schedule_date >= ? and schedule_date < ?", (week_start.isoformat(), week_end.isoformat()))
         counts["Brand Remaining This Week"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'Brand Enhancement' and schedule_date >= ? and schedule_date < ? and status in ('Scheduled','In Progress')", (week_start.isoformat(), week_end.isoformat()))
         counts["Calibration Remaining This Week"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'Calibration' and schedule_date >= ? and schedule_date < ? and status in ('Scheduled','In Progress')", (week_start.isoformat(), week_end.isoformat()))
-        counts["Brand Delayed"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'Brand Enhancement' and status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled')")
-        counts["Calibration Delayed"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'Calibration' and status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled')")
+        counts["Brand Delayed"] = _scalar(
+            conn,
+            "schedule_items",
+            """
+            select count(*)
+            from schedule_items
+            where work_type = 'Brand Enhancement'
+              and (
+                status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled')
+                or coalesce(rain_delay, 0) = 1
+                or (original_schedule_date is not null and original_schedule_date <> schedule_date and status <> 'Completed')
+              )
+            """,
+        )
+        counts["Calibration Delayed"] = _scalar(
+            conn,
+            "schedule_items",
+            """
+            select count(*)
+            from schedule_items
+            where work_type = 'Calibration'
+              and (
+                status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Skipped','Cancelled')
+                or coalesce(rain_delay, 0) = 1
+                or (original_schedule_date is not null and original_schedule_date <> schedule_date and status <> 'Completed')
+              )
+            """,
+        )
         counts["PMT Scheduled This Month"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'PMT' and schedule_date >= ? and schedule_date < ?", (current_month_start.isoformat(), next_month_start.isoformat()))
         counts["PMT Completed This Month"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'PMT' and status = 'Completed' and schedule_date >= ? and schedule_date < ?", (current_month_start.isoformat(), next_month_start.isoformat()))
         counts["PMT Not Completed This Month"] = _scalar(conn, "schedule_items", "select count(*) from schedule_items where work_type = 'PMT' and status in ('Not Completed','Needs Rescheduled','Rescheduled','Rain Delay','Skipped') and schedule_date >= ? and schedule_date < ?", (current_month_start.isoformat(), next_month_start.isoformat()))

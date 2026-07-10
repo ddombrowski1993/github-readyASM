@@ -292,7 +292,6 @@ def route_preview_png(stores_df, width=1100, height=520):
 
     for start, end in zip(points, points[1:]):
         _draw_line(pixels, width, height, start[0], start[1], end[0], end[1], (17, 24, 39), 4)
-    label_every = 1 if len(points) <= 120 else max(2, len(points) // 80)
     for index, (x, y) in enumerate(points):
         color = (37, 99, 235)
         if index == 0:
@@ -300,8 +299,7 @@ def route_preview_png(stores_df, width=1100, height=520):
         elif index == len(points) - 1:
             color = (220, 38, 38)
         _draw_circle(pixels, width, height, x, y, 8, color)
-        if index == 0 or index == len(points) - 1 or index % label_every == 0:
-            _draw_label_box(pixels, width, height, str(index + 1), x + 10, y - 22)
+        _draw_label_box(pixels, width, height, str(index + 1), x + 10, y - 22)
     if points:
         _draw_label_box(pixels, width, height, "S", points[0][0] - 24, points[0][1] + 12)
         _draw_label_box(pixels, width, height, "E", points[-1][0] - 24, points[-1][1] + 12)
@@ -327,15 +325,14 @@ def render_route_preview(stores_df, height=520):
         cities = _unique_preview_values(route_df.get("city", pd.Series(dtype=str)), limit=6)
         first_store = route_df.iloc[0].get("store_number", "") if not route_df.empty else ""
         last_store = route_df.iloc[-1].get("store_number", "") if not route_df.empty else ""
-        label_every = 1 if len(route_df) <= 120 else max(2, len(route_df) // 80)
         summary_cols = st.columns(4)
         summary_cols[0].metric("Route Stops", len(route_df))
         summary_cols[1].metric("Start Store", first_store or "-")
         summary_cols[2].metric("End Store", last_store or "-")
-        summary_cols[3].metric("Number Labels", "All" if label_every == 1 else f"Every {label_every}")
+        summary_cols[3].metric("Number Labels", "All")
         st.info(
             "Static backup route preview: green = start, red = end, blue = stops. "
-            + (f"Large route, showing every {label_every} stop number plus start/end." if label_every > 1 else "Every stop is numbered.")
+            "Every stop is numbered."
         )
         st.caption(
             f"Route picture: {len(route_df)} stops"
@@ -587,7 +584,7 @@ def render_store_map(
         marker_parent = MarkerCluster(name="Stores", disableClusteringAtZoom=11).add_to(fmap)
     route_path_enabled = show_route_path and len(stores_df) >= 2
     if show_route_path and len(stores_df) > int(max_route_points):
-        st.caption(f"Route labels are reduced because this map has {len(stores_df)} stops. Store points and route line are still shown.")
+        st.caption(f"This map has {len(stores_df)} stops. Every stop is numbered; route direction arrows are hidden on large routes.")
     if route_path_enabled:
         route_df = stores_df.copy()
         sort_cols = [col for col in ["schedule_date", "sequence_number", "store_number"] if col in route_df.columns]
@@ -614,10 +611,7 @@ def render_store_map(
                     offset=7,
                     attributes={"fill": "#111827", "font-weight": "bold", "font-size": "16"},
                 ).add_to(fmap)
-        label_every = 1 if len(route_df) <= 60 else max(2, len(route_df) // 50)
         for stop_number, (_, row) in enumerate(route_df.iterrows(), start=1):
-            if stop_number not in {1, len(route_df)} and (stop_number - 1) % label_every != 0:
-                continue
             folium.Marker(
                 [float(row["latitude"]), float(row["longitude"])],
                 icon=folium.DivIcon(

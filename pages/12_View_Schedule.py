@@ -6,7 +6,7 @@ import streamlit as st
 st.set_page_config(page_title="View Schedule", layout="wide")
 
 from src.database import safe_query, teams, using_sqlite
-from src.exports import download_table
+from src.exports import download_table, excel_bytes
 from src.manager_rollup import manager_rollup_query
 from src.pdf_reports import build_pdf_report, pdf_bytes
 from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, section_header, sidebar_nav
@@ -323,6 +323,70 @@ def build_all_in_one_schedule(start_date, end_date, row_mode):
     return pd.DataFrame(rows, columns=columns)
 
 
+def pmt_schedule_runs():
+    return safe_query(
+        """
+        select r.id, r.run_name, r.created_at, r.cycle_start, r.cycle_end,
+               r.months, r.technician_count, r.store_count, r.status
+        from pmt_schedule_runs r
+        order by r.created_at desc, r.id desc
+        """
+    )
+
+
+def pmt_run_export(run_id):
+    df = safe_query(
+        """
+        select si.schedule_date, si.sequence_number, e.full_name as technician,
+               s.store_number, s.address, s.city, s.state, s.zip,
+               si.status, si.cycle_label, coalesce(si.completion_notes, '') as notes
+        from schedule_items si
+        left join employees e on e.id = si.employee_id
+        left join stores s on s.id = si.store_id
+        where si.pmt_schedule_run_id = :run_id
+          and si.work_type = 'PMT'
+        order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
+        """,
+        {"run_id": int(run_id)},
+    )
+    if df.empty:
+        return df
+    df = add_schedule_day(df)
+    df["service_month"] = pd.to_datetime(df["schedule_date"], errors="coerce").dt.strftime("%B %Y").fillna("")
+    display_cols = [
+        "service_month",
+        "schedule_date",
+        "day_of_week",
+        "sequence_number",
+        "technician",
+        "store_number",
+        "address",
+        "city",
+        "state",
+        "zip",
+        "status",
+        "cycle_label",
+        "notes",
+    ]
+    return df[[col for col in display_cols if col in df.columns]].rename(
+        columns={
+            "service_month": "Service Month",
+            "schedule_date": "Schedule Date",
+            "day_of_week": "Day",
+            "sequence_number": "Stop Number",
+            "technician": "Technician",
+            "store_number": "Store",
+            "address": "Address",
+            "city": "City",
+            "state": "State",
+            "zip": "ZIP",
+            "status": "Status",
+            "cycle_label": "Cycle",
+            "notes": "Notes",
+        }
+    )
+
+
 def scope_for(view):
     if view == "Brand Enhancement":
         return "and si.work_type = 'Brand Enhancement'", "and s.assigned_brand_team_id is not null"
@@ -557,3 +621,39 @@ if export_cols[1].button(f"Generate {view} PDF", disabled=agenda.empty):
     path = build_pdf_report("Weekly Schedule", agenda, "schedule_agenda.pdf", f"{view}: {start_filter} to {end_filter}")
     st.download_button("Download PDF", data=pdf_bytes(path), file_name="schedule_agenda.pdf")
 download_table(agenda, "schedule_agenda")
+
+if pmt_view:
+    st.markdown("**PMT Published Run Export**")
+    pmt_runs = pmt_schedule_runs()
+    if pmt_runs.empty:
+        st.info("No published PMT schedule runs are available to export yet.")
+    else:
+        selected_pmt_run = st.selectbox(
+            "PMT schedule run",
+            pmt_runs["id"].tolist(),
+            format_func=lambda value: f"#{value} - {pmt_runs.set_index('id').loc[value, 'run_name']}",
+            key="view_schedule_pmt_export_run",
+        )
+        pmt_export = pmt_run_export(selected_pmt_run)
+        run_row = pmt_runs.set_index("id").loc[selected_pmt_run]
+        st.caption(
+            f"Run period: {run_row.get('cycle_start', '')} to {run_row.get('cycle_end', '')} | "
+            f"Stores: {int(run_row.get('store_count') or 0)} | Technicians: {int(run_row.get('technician_count') or 0)}"
+        )
+        pmt_export_cols = st.columns(2)
+        pmt_export_cols[0].download_button(
+            "Export Selected PMT Run Excel",
+            data=excel_bytes(pmt_export),
+            file_name=f"pmt_schedule_run_{selected_pmt_run}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=pmt_export.empty,
+            key=f"view_schedule_pmt_run_excel_{selected_pmt_run}",
+        )
+        pmt_export_cols[1].download_button(
+            "Export Selected PMT Run CSV",
+            data=pmt_export.to_csv(index=False).encode("utf-8"),
+            file_name=f"pmt_schedule_run_{selected_pmt_run}.csv",
+            mime="text/csv",
+            disabled=pmt_export.empty,
+            key=f"view_schedule_pmt_run_csv_{selected_pmt_run}",
+        )
