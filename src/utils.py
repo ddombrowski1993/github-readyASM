@@ -926,8 +926,24 @@ def require_login():
         return True
     if st.session_state.get("authenticated") and not st.session_state.get("account_slug"):
         sign_out()
-    init_auth_db()
-    first_account = user_count() == 0
+    try:
+        init_auth_db()
+        first_account = user_count() == 0
+    except Exception as exc:
+        st.markdown(
+            """
+            <div style="background:#ffffff;border:2px solid #dc2626;border-radius:8px;padding:1rem 1.25rem;margin:1rem 0;color:#111827;max-width:760px;">
+              <h2 style="margin:0 0 .5rem 0;font-size:1.35rem;">Login temporarily unavailable</h2>
+              <p style="margin:.25rem 0;">The persistent database could not be loaded. Existing information has not been intentionally deleted.</p>
+              <p style="margin:.25rem 0;">The app will not open first-account setup or create a temporary local database while production storage is unavailable.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.error("The persistent database is currently unavailable. Existing information has not been intentionally deleted.")
+        st.info("No new first account can be created until the configured database connection is restored.")
+        st.code(str(exc))
+        return False
     st.markdown(
         """
         <style>
@@ -964,7 +980,7 @@ def require_login():
             overflow: hidden;
             pointer-events: none;
             position: fixed;
-            z-index: 0;
+            z-index: -1;
         }
         .login-background-scene::after {
             background:
@@ -981,12 +997,14 @@ def require_login():
             width: 100%;
         }
         .block-container {
-            max-width: 820px;
-            padding-top: 5vh;
-            padding-bottom: 35vh;
-            min-height: 135vh;
+            background: transparent !important;
+            left: 2rem;
+            max-width: min(820px, calc(100vw - 4rem));
+            min-height: auto;
+            padding: 1.25rem 1rem 2rem 1rem;
             position: relative;
-            z-index: 2;
+            top: 0;
+            z-index: 20;
         }
         .login-hero {
             backdrop-filter: blur(16px);
@@ -996,7 +1014,9 @@ def require_login():
             box-shadow: 0 18px 48px rgba(15, 23, 42, 0.16);
             margin: 0 0 1rem 0;
             padding: 2.4rem 3rem 1.8rem 3rem;
+            position: relative;
             text-align: center;
+            z-index: 30;
         }
         .login-hero h1 {
             color: #0f172a;
@@ -1026,6 +1046,8 @@ def require_login():
             box-shadow: 0 18px 48px rgba(15, 23, 42, 0.16);
             margin-top: 0.75rem;
             padding: 1.35rem 1.5rem 1.25rem 1.5rem;
+            position: relative;
+            z-index: 30;
         }
         .login-card h3 {
             color: #1e293b;
@@ -1047,6 +1069,8 @@ def require_login():
             gap: 0.45rem;
             margin: 0.75rem 0 0.75rem 0;
             padding: 0.55rem;
+            position: relative;
+            z-index: 35;
         }
         .stTabs [data-baseweb="tab"] {
             border-radius: 10px;
@@ -1070,9 +1094,11 @@ def require_login():
             overflow-y: auto;
             overscroll-behavior: auto;
             padding: 1.35rem 1.5rem 1.5rem 1.5rem;
+            position: relative;
             scrollbar-color: #64748b #e2e8f0;
             scrollbar-gutter: stable;
             scrollbar-width: auto;
+            z-index: 35;
         }
         div[data-testid="stForm"]::-webkit-scrollbar {
             width: 12px;
@@ -1154,8 +1180,9 @@ def require_login():
                 max-width: 94vw;
                 padding-left: 1rem;
                 padding-right: 1rem;
-                padding-top: 3.5vh;
-                padding-bottom: 12vh;
+                padding-top: 1rem;
+                padding-bottom: 2rem;
+                left: 0;
             }
             .login-hero {
                 padding: 1.55rem 1.15rem 1.25rem 1.15rem;
@@ -1177,7 +1204,7 @@ def require_login():
         @media (max-height: 760px) {
             .block-container {
                 padding-top: 1rem;
-                padding-bottom: 35vh;
+                padding-bottom: 2rem;
             }
             .login-hero {
                 padding: 1.2rem 1.5rem 1rem 1.5rem;

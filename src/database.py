@@ -1,4 +1,4 @@
-import os
+import re
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -17,7 +17,14 @@ from src.models import (
     ScheduleItem,
     Store,
 )
-from src.auth import current_account_db_path
+from src.auth import (
+    DatabaseUnavailable,
+    configured_database_url,
+    current_account_db_path,
+    current_account_schema,
+    is_production,
+    using_hosted_database,
+)
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -27,13 +34,17 @@ load_dotenv()
 
 
 def get_database_url():
+    env_url = configured_database_url()
+    if env_url:
+        return env_url
+    if is_production():
+        raise DatabaseUnavailable(
+            "Production requires DATABASE_URL. Refusing to create or use a local SQLite database."
+        )
     account_path = current_account_db_path()
     if account_path:
         account_path.parent.mkdir(exist_ok=True)
         return f"sqlite:///{account_path.as_posix()}"
-    env_url = os.getenv("DATABASE_URL", "").strip()
-    if env_url:
-        return env_url
     return f"sqlite:///{LOCAL_DATABASE_PATH.as_posix()}"
 
 
@@ -42,29 +53,78 @@ def using_sqlite():
 
 
 @st.cache_resource(show_spinner=False)
-def get_engine(url=None):
+def get_engine(url=None, schema=None):
     url = url or get_database_url()
+    schema = schema if schema is not None else current_account_schema()
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    if schema and url.startswith("postgresql"):
+        connect_args = {"options": f"-csearch_path={schema},public"}
     return create_engine(url, pool_pre_ping=True, future=True, connect_args=connect_args)
 
 
+def _quote_identifier(identifier):
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", identifier or ""):
+        raise DatabaseUnavailable("Invalid database schema identifier.")
+    return f'"{identifier}"'
+
+
+def ensure_workspace_schema():
+    schema = current_account_schema()
+    if not schema or not using_hosted_database():
+        return None
+    engine = get_engine(get_database_url(), schema="")
+    with engine.begin() as conn:
+        conn.execute(text(f"create schema if not exists {_quote_identifier(schema)}"))
+    return schema
+
+
 def get_database_status():
-    url = get_database_url()
     try:
-        engine = get_engine(url)
+        url = get_database_url()
+        schema = ensure_workspace_schema()
+        engine = get_engine(url, schema=schema)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return {"configured": True, "connected": True, "error": None}
+            database_name = conn.execute(text("select current_database()")).scalar() if not url.startswith("sqlite") else Path(url.replace("sqlite:///", "")).name
+            users_found = None
+            stores_found = None
+            schedules_found = None
+            try:
+                users_found = conn.execute(text("select count(*) from public.app_users")).scalar() if using_hosted_database() else None
+            except Exception:
+                users_found = None
+            for table_name, key in [("stores", "stores_found"), ("schedules", "schedules_found")]:
+                try:
+                    value = conn.execute(text(f"select count(*) from {table_name}")).scalar()
+                    if key == "stores_found":
+                        stores_found = value
+                    else:
+                        schedules_found = value
+                except Exception:
+                    pass
+        return {
+            "configured": True,
+            "connected": True,
+            "error": None,
+            "database_type": "PostgreSQL" if url.startswith("postgresql") else "SQLite",
+            "database_name": database_name,
+            "schema": schema or "local",
+            "users_found": users_found,
+            "stores_found": stores_found,
+            "schedules_found": schedules_found,
+            "hosted_database": using_hosted_database(),
+        }
     except Exception as exc:
-        return {"configured": True, "connected": False, "error": str(exc)}
+        return {"configured": bool(configured_database_url()) or not is_production(), "connected": False, "error": str(exc)}
 
 
 def show_database_setup():
-    st.warning("Database connection failed.")
+    st.error("The persistent database is currently unavailable.")
     st.markdown(
         """
-The app can use its local database automatically. If you prefer PostgreSQL,
-set a connection string in `.env`.
+No new data will be saved until the connection is restored. Existing information has not been intentionally deleted.
+
+For production, configure a hosted PostgreSQL database through Streamlit Secrets or environment variables. The app will not silently create a temporary SQLite database in production.
 
 Local `.env` example:
 
@@ -75,14 +135,17 @@ DATABASE_URL=postgresql+psycopg2://postgres:your_password@localhost:5432/asm_com
 Streamlit Community Cloud secrets example:
 
 ```toml
+FIELD_PLANNER_ENV = "production"
 DATABASE_URL = "postgresql+psycopg2://user:password@host:5432/database"
+FIELD_PLANNER_DATABASE_INSTANCE_ID = "your-stable-production-id"
 ```
 """
     )
 
 
 def init_db():
-    engine = get_engine(get_database_url())
+    schema = ensure_workspace_schema()
+    engine = get_engine(get_database_url(), schema=schema)
     Base.metadata.create_all(engine)
     ensure_schema_updates(engine)
     seed_core_data()

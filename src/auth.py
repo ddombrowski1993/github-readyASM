@@ -3,19 +3,80 @@ import os
 import re
 import secrets
 import shutil
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+from sqlalchemy import create_engine, inspect, text
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
 LEGACY_DATABASE_PATH = APP_DIR / "asm_command_center.db"
 
 
+class DatabaseUnavailable(RuntimeError):
+    pass
+
+
+def _local_streamlit_secrets_file_exists():
+    candidates = [
+        Path.cwd() / ".streamlit" / "secrets.toml",
+        APP_DIR / ".streamlit" / "secrets.toml",
+        Path.home() / ".streamlit" / "secrets.toml",
+    ]
+    return any(path.exists() for path in candidates)
+
+
 def _secret_or_env(name, default=""):
-    return str(os.getenv(name, default) or "").strip()
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    if _local_streamlit_secrets_file_exists():
+        try:
+            if name in st.secrets:
+                return str(st.secrets[name] or "").strip()
+        except Exception:
+            pass
+    return str(default or "").strip()
+
+
+def configured_database_url():
+    return _secret_or_env("DATABASE_URL")
+
+
+def deployment_environment():
+    return (
+        _secret_or_env("FIELD_PLANNER_ENV")
+        or _secret_or_env("APP_ENV")
+        or _secret_or_env("ENVIRONMENT")
+        or ""
+    ).strip().lower()
+
+
+def is_production():
+    return deployment_environment() in {"prod", "production", "streamlit", "hosted"}
+
+
+def using_hosted_database():
+    return bool(configured_database_url())
+
+
+def _safe_identifier(value, prefix="fp"):
+    cleaned = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
+    if not cleaned:
+        cleaned = "default"
+    if cleaned[0].isdigit():
+        cleaned = f"{prefix}_{cleaned}"
+    return cleaned[:55]
+
+
+def current_account_schema():
+    if not using_hosted_database():
+        return None
+    account_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
+    if not account_slug:
+        return None
+    return _safe_identifier(f"fp_{account_slug}")
 
 
 def data_dir():
@@ -49,19 +110,125 @@ def clear_transient_session_state():
             st.session_state.pop(key, None)
 
 
-def _connect():
+def _auth_database_url():
+    hosted_url = configured_database_url()
+    if hosted_url:
+        return hosted_url
+    if is_production():
+        raise DatabaseUnavailable(
+            "Production requires DATABASE_URL. The app stopped before creating a local SQLite database."
+        )
     AUTH_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(AUTH_DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return f"sqlite:///{AUTH_DATABASE_PATH.as_posix()}"
+
+
+@st.cache_resource(show_spinner=False)
+def _auth_engine(url):
+    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    return create_engine(url, pool_pre_ping=True, future=True, connect_args=connect_args)
+
+
+def _engine():
+    return _auth_engine(_auth_database_url())
+
+
+def _row_dict(row):
+    return dict(row._mapping) if row else None
+
+
+def _rows_dict(rows):
+    return [dict(row._mapping) for row in rows]
+
+
+def _verify_database_identity(engine):
+    if not using_hosted_database():
+        return
+    expected = _secret_or_env("FIELD_PLANNER_DATABASE_INSTANCE_ID")
+    allow_bootstrap = _secret_or_env("FIELD_PLANNER_ALLOW_DATABASE_METADATA_BOOTSTRAP").lower() == "true"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                create table if not exists app_metadata (
+                    metadata_key varchar(120) primary key,
+                    metadata_value text not null,
+                    updated_at timestamp not null
+                )
+                """
+            )
+        )
+        saved = conn.execute(
+            text("select metadata_value from app_metadata where metadata_key = 'database_instance_id'")
+        ).scalar()
+        if not expected:
+            if not saved:
+                conn.execute(
+                    text(
+                        """
+                        insert into app_metadata (metadata_key, metadata_value, updated_at)
+                        values ('application_name', 'Field Planner', :now),
+                               ('environment', :environment, :now)
+                        on conflict (metadata_key) do update
+                        set metadata_value = excluded.metadata_value, updated_at = excluded.updated_at
+                        """
+                    ),
+                    {"environment": deployment_environment() or "production", "now": datetime.utcnow()},
+                )
+            return
+        if not saved:
+            if allow_bootstrap:
+                now = datetime.utcnow()
+                conn.execute(
+                    text(
+                        """
+                        insert into app_metadata (metadata_key, metadata_value, updated_at)
+                        values ('application_name', 'Field Planner', :now),
+                               ('environment', :environment, :now),
+                               ('database_instance_id', :expected, :now)
+                        on conflict (metadata_key) do update
+                        set metadata_value = excluded.metadata_value, updated_at = excluded.updated_at
+                        """
+                    ),
+                    {"expected": expected, "environment": deployment_environment() or "production", "now": now},
+                )
+                return
+            raise DatabaseUnavailable(
+                "Connected database is missing the Field Planner production identifier. Refusing to write to an unknown database."
+            )
+        if saved != expected:
+            raise DatabaseUnavailable(
+                "Connected database identifier does not match FIELD_PLANNER_DATABASE_INSTANCE_ID. Refusing to use the wrong database."
+            )
 
 
 def init_auth_db():
-    ACCOUNT_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
-    with _connect() as conn:
-        conn.execute(
-            """
-            create table if not exists app_users (
+    if not using_hosted_database():
+        ACCOUNT_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
+    engine = _engine()
+    _verify_database_identity(engine)
+    with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            conn.execute(
+                text(
+                    """
+                    create table if not exists app_users (
+                        id serial primary key,
+                        username text not null unique,
+                        first_name text not null default '',
+                        last_name text not null default '',
+                        email text not null,
+                        password_hash text not null,
+                        account_slug text not null unique,
+                        created_at timestamp not null
+                    )
+                    """
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    create table if not exists app_users (
                 id integer primary key autoincrement,
                 username text not null unique,
                 first_name text not null default '',
@@ -72,53 +239,50 @@ def init_auth_db():
                 created_at text not null
             )
             """
-        )
-        existing_columns = {row["name"] for row in conn.execute("pragma table_info(app_users)").fetchall()}
-        if "first_name" not in existing_columns:
-            conn.execute("alter table app_users add column first_name text not null default ''")
-        if "last_name" not in existing_columns:
-            conn.execute("alter table app_users add column last_name text not null default ''")
-        if "secret_question" not in existing_columns:
-            conn.execute("alter table app_users add column secret_question text not null default ''")
-        if "secret_answer_hash" not in existing_columns:
-            conn.execute("alter table app_users add column secret_answer_hash text not null default ''")
-        if "account_role" not in existing_columns:
-            conn.execute("alter table app_users add column account_role text not null default 'User'")
-        if "manager_user_id" not in existing_columns:
-            conn.execute("alter table app_users add column manager_user_id integer")
-        if "active" not in existing_columns:
-            conn.execute("alter table app_users add column active integer not null default 1")
-        if "updated_at" not in existing_columns:
-            conn.execute("alter table app_users add column updated_at text")
-        if "last_login" not in existing_columns:
-            conn.execute("alter table app_users add column last_login text")
-        profile_columns = {
-            "position_title": "text not null default ''",
-            "s_number": "text not null default ''",
-            "street_address": "text not null default ''",
-            "city": "text not null default ''",
-            "state": "text not null default ''",
-            "zip_code": "text not null default ''",
-            "home_latitude": "real",
-            "home_longitude": "real",
-        }
-        for column_name, column_type in profile_columns.items():
+                )
+            )
+    existing_columns = {column["name"] for column in inspect(engine).get_columns("app_users")}
+    column_specs = {
+        "first_name": "text not null default ''",
+        "last_name": "text not null default ''",
+        "secret_question": "text not null default ''",
+        "secret_answer_hash": "text not null default ''",
+        "account_role": "text not null default 'User'",
+        "manager_user_id": "integer",
+        "active": "integer not null default 1",
+        "updated_at": "timestamp" if engine.dialect.name == "postgresql" else "text",
+        "last_login": "timestamp" if engine.dialect.name == "postgresql" else "text",
+        "position_title": "text not null default ''",
+        "s_number": "text not null default ''",
+        "street_address": "text not null default ''",
+        "city": "text not null default ''",
+        "state": "text not null default ''",
+        "zip_code": "text not null default ''",
+        "home_latitude": "real",
+        "home_longitude": "real",
+    }
+    with engine.begin() as conn:
+        for column_name, column_type in column_specs.items():
             if column_name not in existing_columns:
-                conn.execute(f"alter table app_users add column {column_name} {column_type}")
+                conn.execute(text(f"alter table app_users add column {column_name} {column_type}"))
+        if "first_name" not in existing_columns:
+            pass
         conn.execute(
-            """
+            text(
+                """
             update app_users
             set account_role = 'Admin', active = 1
-            where lower(email) = lower(?)
+            where lower(email) = lower(:email)
             """,
-            ("daniel.dombrowski@7-11.com",),
+            ),
+            {"email": "daniel.dombrowski@7-11.com"},
         )
 
 
 def user_count():
     init_auth_db()
-    with _connect() as conn:
-        return int(conn.execute("select count(*) from app_users").fetchone()[0])
+    with _engine().connect() as conn:
+        return int(conn.execute(text("select count(*) from app_users")).scalar() or 0)
 
 
 def slugify(username):
@@ -132,21 +296,25 @@ def account_db_path(account_slug):
 
 def auth_storage_status():
     init_auth_db()
+    hosted = using_hosted_database()
     app_dir_resolved = APP_DIR.resolve()
     auth_resolved = AUTH_DATABASE_PATH.resolve()
-    account_resolved = ACCOUNT_DATABASE_DIR.resolve()
-    local_app_storage = app_dir_resolved in auth_resolved.parents or auth_resolved == app_dir_resolved
+    local_app_storage = False if hosted else app_dir_resolved in auth_resolved.parents or auth_resolved == app_dir_resolved
     return {
-        "auth_database": str(AUTH_DATABASE_PATH),
-        "account_database_dir": str(ACCOUNT_DATABASE_DIR),
+        "auth_database": "Hosted SQL database" if hosted else str(AUTH_DATABASE_PATH),
+        "account_database_dir": "PostgreSQL account schemas" if hosted else str(ACCOUNT_DATABASE_DIR),
         "user_count": user_count(),
-        "account_database_count": len(list(ACCOUNT_DATABASE_DIR.glob("*.db"))) if ACCOUNT_DATABASE_DIR.exists() else 0,
+        "account_database_count": user_count() if hosted else len(list(ACCOUNT_DATABASE_DIR.glob("*.db"))) if ACCOUNT_DATABASE_DIR.exists() else 0,
         "local_app_storage": local_app_storage,
         "configured_data_dir": _secret_or_env("FIELD_PLANNER_DATA_DIR") or "",
+        "hosted_database": hosted,
+        "environment": deployment_environment() or "local",
     }
 
 
 def current_account_db_path():
+    if using_hosted_database():
+        return None
     account_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
     if not account_slug:
         return None
@@ -238,58 +406,65 @@ def create_user(
 
     base_slug = slugify(username)
     account_slug = base_slug
-    with _connect() as conn:
+    engine = _engine()
+    with engine.begin() as conn:
         existing = conn.execute(
-            "select 1 from app_users where lower(username) = lower(?)",
-            (username,),
+            text("select 1 from app_users where lower(username) = lower(:username)"),
+            {"username": username},
         ).fetchone()
         if existing:
             return False, "That username already exists."
-        existing_email = conn.execute("select 1 from app_users where lower(email) = lower(?)", (email,)).fetchone()
+        existing_email = conn.execute(text("select 1 from app_users where lower(email) = lower(:email)"), {"email": email}).fetchone()
         if existing_email:
             return False, "That email address already has an account."
-        existing_s = conn.execute("select 1 from app_users where upper(coalesce(s_number, '')) = upper(?)", (s_number,)).fetchone()
+        existing_s = conn.execute(text("select 1 from app_users where upper(coalesce(s_number, '')) = upper(:s_number)"), {"s_number": s_number}).fetchone()
         if existing_s:
             return False, "That S Number is already used by another account."
         suffix = 2
-        while conn.execute("select 1 from app_users where account_slug = ?", (account_slug,)).fetchone():
+        while conn.execute(text("select 1 from app_users where account_slug = :account_slug"), {"account_slug": account_slug}).fetchone():
             account_slug = f"{base_slug}_{suffix}"
             suffix += 1
         account_role = "Admin" if email.lower() == "daniel.dombrowski@7-11.com" else "User"
-        now = datetime.utcnow().isoformat()
+        now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
         conn.execute(
-            """
-            insert into app_users (
-                username, first_name, last_name, email, password_hash, account_slug, created_at,
-                secret_question, secret_answer_hash, account_role, active, updated_at,
-                position_title, s_number, street_address, city, state, zip_code
-            )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                username,
-                first_name,
-                last_name,
-                email,
-                hash_password(password),
-                account_slug,
-                now,
-                secret_question.strip(),
-                hash_password(normalize_secret_answer(secret_answer)),
-                account_role,
-                1,
-                now,
-                position_title,
-                s_number,
-                street_address,
-                city,
-                state,
-                zip_code,
+            text(
+                """
+                insert into app_users (
+                    username, first_name, last_name, email, password_hash, account_slug, created_at,
+                    secret_question, secret_answer_hash, account_role, active, updated_at,
+                    position_title, s_number, street_address, city, state, zip_code
+                )
+                values (
+                    :username, :first_name, :last_name, :email, :password_hash, :account_slug, :created_at,
+                    :secret_question, :secret_answer_hash, :account_role, :active, :updated_at,
+                    :position_title, :s_number, :street_address, :city, :state, :zip_code
+                )
+                """
             ),
+            {
+                "username": username,
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
+                "password_hash": hash_password(password),
+                "account_slug": account_slug,
+                "created_at": now,
+                "secret_question": secret_question.strip(),
+                "secret_answer_hash": hash_password(normalize_secret_answer(secret_answer)),
+                "account_role": account_role,
+                "active": 1,
+                "updated_at": now,
+                "position_title": position_title,
+                "s_number": s_number,
+                "street_address": street_address,
+                "city": city,
+                "state": state,
+                "zip_code": zip_code,
+            },
         )
 
     db_path = account_db_path(account_slug)
-    if user_count() == 1 and LEGACY_DATABASE_PATH.exists() and not db_path.exists():
+    if not using_hosted_database() and user_count() == 1 and LEGACY_DATABASE_PATH.exists() and not db_path.exists():
         shutil.copy2(LEGACY_DATABASE_PATH, db_path)
     return True, "Account created."
 
@@ -318,21 +493,36 @@ def update_user_profile(user_id, first_name, last_name, position_title, s_number
             return False, message
     if len(state) < 2:
         return False, "Please enter a two-letter state."
-    with _connect() as conn:
+    engine = _engine()
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
         duplicate = conn.execute(
-            "select id from app_users where upper(coalesce(s_number, '')) = upper(?) and id <> ?",
-            (s_number, int(user_id)),
+            text("select id from app_users where upper(coalesce(s_number, '')) = upper(:s_number) and id <> :user_id"),
+            {"s_number": s_number, "user_id": int(user_id)},
         ).fetchone()
         if duplicate:
             return False, "That S Number is already used by another account."
         conn.execute(
-            """
+            text(
+                """
             update app_users
-            set first_name = ?, last_name = ?, position_title = ?, s_number = ?,
-                street_address = ?, city = ?, state = ?, zip_code = ?, updated_at = ?
-            where id = ?
+            set first_name = :first_name, last_name = :last_name, position_title = :position_title, s_number = :s_number,
+                street_address = :street_address, city = :city, state = :state, zip_code = :zip_code, updated_at = :updated_at
+            where id = :user_id
             """,
-            (first_name, last_name, position_title, s_number, street_address, city, state, zip_code, datetime.utcnow().isoformat(), int(user_id)),
+            ),
+            {
+                "first_name": first_name,
+                "last_name": last_name,
+                "position_title": position_title,
+                "s_number": s_number,
+                "street_address": street_address,
+                "city": city,
+                "state": state,
+                "zip_code": zip_code,
+                "updated_at": now,
+                "user_id": int(user_id),
+            },
         )
     return True, "Profile updated."
 
@@ -340,32 +530,37 @@ def update_user_profile(user_id, first_name, last_name, position_title, s_number
 def authenticate(username, password):
     init_auth_db()
     login = username.strip()
-    with _connect() as conn:
+    engine = _engine()
+    with engine.connect() as conn:
         user = conn.execute(
-            """
+            text(
+                """
             select *
             from app_users
-            where lower(username) = lower(?)
-               or lower(email) = lower(?)
+            where lower(username) = lower(:login)
+               or lower(email) = lower(:login)
             """,
-            (login, login),
+            ),
+            {"login": login},
         ).fetchone()
+    user = _row_dict(user)
     if not user or not verify_password(password, user["password_hash"]):
         return None
-    if int(user["active"] if "active" in user.keys() else 1) != 1:
+    if int(user.get("active", 1)) != 1:
         return None
-    with _connect() as conn:
-        conn.execute("update app_users set last_login = ? where id = ?", (datetime.utcnow().isoformat(), int(user["id"])))
-    user_dict = dict(user)
-    user_dict["last_login"] = datetime.utcnow().isoformat()
-    return user_dict
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        conn.execute(text("update app_users set last_login = :last_login where id = :user_id"), {"last_login": now, "user_id": int(user["id"])})
+    user["last_login"] = now
+    return user
 
 
 def list_app_users():
     init_auth_db()
-    with _connect() as conn:
+    with _engine().connect() as conn:
         rows = conn.execute(
-            """
+            text(
+                """
             select u.id, u.username, u.first_name, u.last_name, u.email, u.account_slug,
                    coalesce(u.position_title, '') as position_title,
                    coalesce(u.s_number, '') as s_number,
@@ -382,15 +577,16 @@ def list_app_users():
             left join app_users m on m.id = u.manager_user_id
             order by u.account_role, u.email
             """
+            )
         ).fetchall()
-    return [dict(row) for row in rows]
+    return _rows_dict(rows)
 
 
 def get_user_by_id(user_id):
     init_auth_db()
-    with _connect() as conn:
-        user = conn.execute("select * from app_users where id = ?", (int(user_id),)).fetchone()
-    return dict(user) if user else None
+    with _engine().connect() as conn:
+        user = conn.execute(text("select * from app_users where id = :user_id"), {"user_id": int(user_id)}).fetchone()
+    return _row_dict(user)
 
 
 def update_user_access(user_id, account_role, manager_user_id=None):
@@ -399,10 +595,12 @@ def update_user_access(user_id, account_role, manager_user_id=None):
     manager_user_id = int(manager_user_id) if manager_user_id else None
     if account_role in ("Admin", "Manager"):
         manager_user_id = None
-    with _connect() as conn:
+    engine = _engine()
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
         conn.execute(
-            "update app_users set account_role = ?, manager_user_id = ?, updated_at = ? where id = ?",
-            (account_role, manager_user_id, datetime.utcnow().isoformat(), int(user_id)),
+            text("update app_users set account_role = :account_role, manager_user_id = :manager_user_id, updated_at = :updated_at where id = :user_id"),
+            {"account_role": account_role, "manager_user_id": manager_user_id, "updated_at": now, "user_id": int(user_id)},
         )
 
 
@@ -411,10 +609,12 @@ def update_user_status(user_id, active):
     user = get_user_by_id(user_id)
     if user and user.get("email", "").lower() == "daniel.dombrowski@7-11.com" and not active:
         return False, "The owner admin account cannot be disabled."
-    with _connect() as conn:
+    engine = _engine()
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
         conn.execute(
-            "update app_users set active = ?, updated_at = ? where id = ?",
-            (1 if active else 0, datetime.utcnow().isoformat(), int(user_id)),
+            text("update app_users set active = :active, updated_at = :updated_at where id = :user_id"),
+            {"active": 1 if active else 0, "updated_at": now, "user_id": int(user_id)},
         )
     return True, "Account reactivated." if active else "Account disabled."
 
@@ -438,10 +638,12 @@ def claim_user_for_manager(user_id, manager_user_id):
     existing_manager_id = target.get("manager_user_id")
     if existing_manager_id and int(existing_manager_id) != int(manager_user_id):
         return False, "That user is already assigned to another manager."
-    with _connect() as conn:
+    engine = _engine()
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
         conn.execute(
-            "update app_users set manager_user_id = ?, updated_at = ? where id = ?",
-            (int(manager_user_id), datetime.utcnow().isoformat(), int(user_id)),
+            text("update app_users set manager_user_id = :manager_user_id, updated_at = :updated_at where id = :user_id"),
+            {"manager_user_id": int(manager_user_id), "updated_at": now, "user_id": int(user_id)},
         )
     return True, "User claimed. Their workspace will now appear in your sidebar workspace switcher."
 
@@ -456,10 +658,12 @@ def release_user_from_manager(user_id, manager_user_id, admin_override=False):
         return False, "That user is not assigned to a manager."
     if not admin_override and int(existing_manager_id) != int(manager_user_id):
         return False, "You can only release users assigned to you."
-    with _connect() as conn:
+    engine = _engine()
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
         conn.execute(
-            "update app_users set manager_user_id = null, updated_at = ? where id = ?",
-            (datetime.utcnow().isoformat(), int(user_id)),
+            text("update app_users set manager_user_id = null, updated_at = :updated_at where id = :user_id"),
+            {"updated_at": now, "user_id": int(user_id)},
         )
     return True, "User released."
 
@@ -506,12 +710,12 @@ def can_access_account_slug(account_slug):
 
 def find_user_by_email(email):
     init_auth_db()
-    with _connect() as conn:
+    with _engine().connect() as conn:
         user = conn.execute(
-            "select * from app_users where lower(email) = lower(?)",
-            (email.strip(),),
+            text("select * from app_users where lower(email) = lower(:email)"),
+            {"email": email.strip()},
         ).fetchone()
-    return dict(user) if user else None
+    return _row_dict(user)
 
 
 def reset_password_with_secret(email, secret_answer, new_password):
@@ -525,10 +729,12 @@ def reset_password_with_secret(email, secret_answer, new_password):
         return False, "This account does not have a recovery question set."
     if not verify_password(normalize_secret_answer(secret_answer), user["secret_answer_hash"]):
         return False, "Secret answer did not match."
-    with _connect() as conn:
+    engine = _engine()
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
         conn.execute(
-            "update app_users set password_hash = ?, updated_at = ? where id = ?",
-            (hash_password(new_password), datetime.utcnow().isoformat(), int(user["id"])),
+            text("update app_users set password_hash = :password_hash, updated_at = :updated_at where id = :user_id"),
+            {"password_hash": hash_password(new_password), "updated_at": now, "user_id": int(user["id"])},
         )
     return True, f"Password reset. Sign in with username {user['username']} or email {user['email']}."
 

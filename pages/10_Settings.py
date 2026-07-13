@@ -268,6 +268,15 @@ with tabs[0]:
     st.subheader("Database Status")
     st.write("Configured:", status["configured"])
     st.write("Connected:", status["connected"])
+    if status.get("connected"):
+        metric_cols = st.columns(5)
+        metric_cols[0].metric("Database Type", status.get("database_type", "Unknown"))
+        metric_cols[1].metric("Database Name", status.get("database_name", "Unknown"))
+        metric_cols[2].metric("Schema", status.get("schema", "Unknown"))
+        metric_cols[3].metric("Stores Found", status.get("stores_found") if status.get("stores_found") is not None else "N/A")
+        metric_cols[4].metric("Schedules Found", status.get("schedules_found") if status.get("schedules_found") is not None else "N/A")
+        if status.get("users_found") is not None:
+            st.metric("Users Found", status.get("users_found"))
     if status["error"]:
         st.code(status["error"])
     if st.button("Create/Update Tables"):

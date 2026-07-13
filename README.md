@@ -2,7 +2,7 @@
 
 A Streamlit field-operations app for employees, stores, maps, schedules, call offs/PTO, follow-ups, deferred work orders, file uploads, and PDF/Excel reports.
 
-This version runs as a Streamlit app. By default it can use local SQLite files for development, and it can also use PostgreSQL through `DATABASE_URL` for a hosted deployment.
+This version runs as a Streamlit app. Local development can use SQLite files. Hosted production must use one external PostgreSQL database through `DATABASE_URL`; production will not silently fall back to SQLite.
 
 ## Folder Structure
 
@@ -38,7 +38,7 @@ streamlit run app.py
 
 Or double-click `start_windows.bat`.
 
-The app will create local SQLite database files as needed. To use PostgreSQL instead, create a database, copy `.env.example` to `.env`, and set:
+The app will create local SQLite database files as needed when no `DATABASE_URL` is configured and `FIELD_PLANNER_ENV` is not production. To test PostgreSQL locally, create a database, copy `.env.example` to `.env`, and set:
 
 ```bash
 DATABASE_URL=postgresql+psycopg2://postgres:your_password@localhost:5432/asm_command_center
@@ -49,10 +49,28 @@ DATABASE_URL=postgresql+psycopg2://postgres:your_password@localhost:5432/asm_com
 Add secrets:
 
 ```toml
+FIELD_PLANNER_ENV = "production"
 DATABASE_URL = "postgresql+psycopg2://user:password@host:5432/database"
+FIELD_PLANNER_DATABASE_INSTANCE_ID = "field-planner-production"
 ```
 
-Use a hosted PostgreSQL database. Streamlit Community Cloud does not provide a built-in persistent PostgreSQL database.
+Use a hosted PostgreSQL database outside the Streamlit app container. Streamlit Community Cloud does not provide a built-in persistent PostgreSQL database.
+
+Production persistence rules:
+
+- `DATABASE_URL` is required in production.
+- Login accounts are stored in `public.app_users` in the hosted database.
+- Each account workspace uses a stable PostgreSQL schema named from the account slug, for example `fp_jane_manager`.
+- The app verifies `FIELD_PLANNER_DATABASE_INSTANCE_ID` before writing. If the connected database does not contain the expected identifier, startup stops instead of creating a new empty workspace.
+- To initialize the metadata only after you have verified the correct hosted database, temporarily set `FIELD_PLANNER_ALLOW_DATABASE_METADATA_BOOTSTRAP = "true"`, start the app once, then remove that secret.
+- If the database connection fails, the app shows a persistence error and does not show first-account setup.
+
+Recommended hosted database backup process:
+
+- Enable automated backups or point-in-time recovery with the PostgreSQL provider.
+- Before code updates, export from Settings > Backup for each active workspace.
+- For a full provider backup, use the database provider snapshot/export tool or `pg_dump` against the same `DATABASE_URL`.
+- Restore provider backups through the database provider first; use Settings > Backup restore only for workspace-level merge recovery.
 
 ## Clean Upload Package
 
@@ -71,10 +89,10 @@ Generated files are also excluded from the clean package:
 
 ## What Works In This Starter
 
-- Automatic table creation for PostgreSQL.
+- Automatic table creation for PostgreSQL without dropping existing records.
 - Setup screen when database configuration is missing.
 - Login screen with separate username/email/password accounts.
-- Separate local account databases so each user's stores, teams, schedules, reports, and dashboard stay apart.
+- Separate local account databases for development, and separate PostgreSQL account schemas for hosted production.
 - Employee/team CRUD, imports, inactive/reactivation flow.
 - Store import with update-by-store-number behavior.
 - Folium/OpenStreetMap map center with assignment/status coloring.
