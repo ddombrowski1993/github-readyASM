@@ -179,6 +179,7 @@ def geocode_address(address="", city="", state="", zip_code=""):
     expanded_full_query = build_address(expanded_address, city, state, zip_code)
     expanded_clean_query = build_address(expanded_street_without_unit, city, state, zip_code)
     city_zip_query = build_address(city, state, zip_code)
+    city_state_query = build_address(city, state, "")
 
     if not full_query and not city_zip_query:
         return None
@@ -195,16 +196,17 @@ def geocode_address(address="", city="", state="", zip_code=""):
     if street_without_unit and city and state:
         for street in [street_without_unit, expanded_street_without_unit]:
             if street:
-                census_searches.append(
-                    {
-                        "street": street,
-                        "city": city,
-                        "state": state,
-                        "zip": zip_code,
-                        "benchmark": "Public_AR_Current",
-                        "format": "json",
-                    }
-                )
+                for search_zip in [zip_code, ""]:
+                    census_searches.append(
+                        {
+                            "street": street,
+                            "city": city,
+                            "state": state,
+                            "zip": search_zip,
+                            "benchmark": "Public_AR_Current",
+                            "format": "json",
+                        }
+                    )
     for params in census_searches:
         try:
             result = census_geocode_query(params)
@@ -212,7 +214,9 @@ def geocode_address(address="", city="", state="", zip_code=""):
             continue
         if result:
             return result
-    for query in [clean_full_query, expanded_clean_query, full_query, expanded_full_query]:
+    no_zip_query = build_address(street_without_unit, city, state, "")
+    expanded_no_zip_query = build_address(expanded_street_without_unit, city, state, "")
+    for query in [clean_full_query, expanded_clean_query, no_zip_query, expanded_no_zip_query, full_query, expanded_full_query, city_state_query]:
         try:
             result = census_geocode_oneline(query)
         except Exception:
@@ -224,19 +228,20 @@ def geocode_address(address="", city="", state="", zip_code=""):
     if street_without_unit and city and state:
         for street in [street_without_unit, expanded_street_without_unit]:
             if street:
-                searches.append(
-                    {
-                        "street": street,
-                        "city": city,
-                        "state": state,
-                        "postalcode": zip_code,
-                        "country": "United States",
-                        "format": "json",
-                        "limit": 1,
-                        "countrycodes": "us",
-                    }
-                )
-    for query in [full_query, clean_full_query, expanded_full_query, expanded_clean_query, f"{expanded_clean_query}, United States", city_zip_query]:
+                for search_zip in [zip_code, ""]:
+                    searches.append(
+                        {
+                            "street": street,
+                            "city": city,
+                            "state": state,
+                            "postalcode": search_zip,
+                            "country": "United States",
+                            "format": "json",
+                            "limit": 1,
+                            "countrycodes": "us",
+                        }
+                    )
+    for query in [full_query, clean_full_query, expanded_full_query, expanded_clean_query, no_zip_query, expanded_no_zip_query, f"{expanded_clean_query}, United States", city_state_query, city_zip_query]:
         if query and query not in [item.get("q") for item in searches]:
             searches.append({"q": query, "format": "json", "limit": 1, "countrycodes": "us"})
 

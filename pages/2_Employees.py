@@ -292,6 +292,36 @@ with tab_list:
     else:
         st.caption("Use this when you have street, city, state, and zip but no latitude/longitude.")
         st.dataframe(coord_df, use_container_width=True, hide_index=True)
+        if st.button("Find Coordinates For All Missing Employee Addresses", type="primary"):
+            found = 0
+            not_found = []
+            with session_scope() as session:
+                for _, row in coord_df.iterrows():
+                    emp = session.get(Employee, int(row["id"]))
+                    if not emp or (emp.home_latitude is not None and emp.home_longitude is not None):
+                        continue
+                    result = geocode_address(emp.home_address, emp.home_city, emp.home_state, emp.home_zip)
+                    if result:
+                        emp.home_latitude = float(result["latitude"])
+                        emp.home_longitude = float(result["longitude"])
+                        found += 1
+                    else:
+                        not_found.append(
+                            {
+                                "Employee": emp.full_name,
+                                "Address": ", ".join(
+                                    part
+                                    for part in [emp.home_address, emp.home_city, emp.home_state, emp.home_zip]
+                                    if str(part or "").strip()
+                                ),
+                            }
+                        )
+            if found:
+                st.success(f"Saved coordinates for {found} employee(s).")
+            if not_found:
+                st.warning("These addresses still could not be found. Enter coordinates manually or correct the address.")
+                st.dataframe(pd.DataFrame(not_found), use_container_width=True, hide_index=True)
+            st.rerun()
         fix_id = st.selectbox(
             "Employee to geocode",
             coord_df["id"].tolist(),
