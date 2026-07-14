@@ -5,6 +5,7 @@ import secrets
 import shutil
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -50,8 +51,26 @@ def configured_database_url():
 def normalize_database_url(url):
     normalized = str(url or "").strip()
     if normalized.lower().startswith("postgres://"):
-        return f"postgresql://{normalized[len('postgres://'):]}"
+        normalized = f"postgresql://{normalized[len('postgres://'):]}"
+    if is_postgresql_url(normalized):
+        normalized = remove_startup_search_path_options(normalized)
     return normalized
+
+
+def remove_startup_search_path_options(url):
+    try:
+        parts = urlsplit(url)
+        query_items = parse_qsl(parts.query, keep_blank_values=True)
+    except Exception:
+        return url
+    cleaned_items = [
+        (key, value)
+        for key, value in query_items
+        if not (key.lower() == "options" and "search_path" in str(value).lower())
+    ]
+    if len(cleaned_items) == len(query_items):
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(cleaned_items), parts.fragment))
 
 
 def is_postgresql_url(url):
