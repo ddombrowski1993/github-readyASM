@@ -208,6 +208,14 @@ def _engine():
     return _auth_engine(_auth_database_url())
 
 
+def _public_table(table_name):
+    return f"public.{table_name}" if using_hosted_database() else table_name
+
+
+def _inspect_schema(engine):
+    return "public" if engine.dialect.name == "postgresql" else None
+
+
 def _row_dict(row):
     return dict(row._mapping) if row else None
 
@@ -221,11 +229,12 @@ def _verify_database_identity(engine):
         return
     expected = _secret_or_env("FIELD_PLANNER_DATABASE_INSTANCE_ID")
     allow_bootstrap = _secret_or_env("FIELD_PLANNER_ALLOW_DATABASE_METADATA_BOOTSTRAP").lower() == "true"
+    metadata_table = _public_table("app_metadata")
     with engine.begin() as conn:
         conn.execute(
             text(
-                """
-                create table if not exists app_metadata (
+                f"""
+                create table if not exists {metadata_table} (
                     metadata_key varchar(120) primary key,
                     metadata_value text not null,
                     updated_at timestamp not null
@@ -234,14 +243,14 @@ def _verify_database_identity(engine):
             )
         )
         saved = conn.execute(
-            text("select metadata_value from app_metadata where metadata_key = 'database_instance_id'")
+            text(f"select metadata_value from {metadata_table} where metadata_key = 'database_instance_id'")
         ).scalar()
         if not expected:
             if not saved:
                 conn.execute(
                     text(
-                        """
-                        insert into app_metadata (metadata_key, metadata_value, updated_at)
+                        f"""
+                        insert into {metadata_table} (metadata_key, metadata_value, updated_at)
                         values ('application_name', 'Field Planner', :now),
                                ('environment', :environment, :now)
                         on conflict (metadata_key) do update
@@ -256,8 +265,8 @@ def _verify_database_identity(engine):
                 now = datetime.utcnow()
                 conn.execute(
                     text(
-                        """
-                        insert into app_metadata (metadata_key, metadata_value, updated_at)
+                        f"""
+                        insert into {metadata_table} (metadata_key, metadata_value, updated_at)
                         values ('application_name', 'Field Planner', :now),
                                ('environment', :environment, :now),
                                ('database_instance_id', :expected, :now)
@@ -283,12 +292,13 @@ def init_auth_db():
     try:
         engine = _engine()
         _verify_database_identity(engine)
+        users_table = _public_table("app_users")
         with engine.begin() as conn:
             if engine.dialect.name == "postgresql":
                 conn.execute(
                     text(
-                        """
-                        create table if not exists app_users (
+                        f"""
+                        create table if not exists {users_table} (
                             id serial primary key,
                             username text not null unique,
                             first_name text not null default '',
@@ -304,8 +314,8 @@ def init_auth_db():
             else:
                 conn.execute(
                     text(
-                        """
-                        create table if not exists app_users (
+                        f"""
+                        create table if not exists {users_table} (
                     id integer primary key autoincrement,
                     username text not null unique,
                     first_name text not null default '',
@@ -318,7 +328,7 @@ def init_auth_db():
                 """
                     )
                 )
-        existing_columns = {column["name"] for column in inspect(engine).get_columns("app_users")}
+        existing_columns = {column["name"] for column in inspect(engine).get_columns("app_users", schema=_inspect_schema(engine))}
         column_specs = {
             "first_name": "text not null default ''",
             "last_name": "text not null default ''",
@@ -341,13 +351,13 @@ def init_auth_db():
         with engine.begin() as conn:
             for column_name, column_type in column_specs.items():
                 if column_name not in existing_columns:
-                    conn.execute(text(f"alter table app_users add column {column_name} {column_type}"))
+                    conn.execute(text(f"alter table {users_table} add column {column_name} {column_type}"))
             if "first_name" not in existing_columns:
                 pass
             conn.execute(
                 text(
-                    """
-                update app_users
+                    f"""
+                update {users_table}
                 set account_role = 'Admin', active = 1
                 where lower(email) = lower(:email)
                 """,
@@ -364,8 +374,9 @@ def init_auth_db():
 
 def user_count():
     init_auth_db()
+    users_table = _public_table("app_users")
     with _engine().connect() as conn:
-        return int(conn.execute(text("select count(*) from app_users")).scalar() or 0)
+        return int(conn.execute(text(f"select count(*) from {users_table}")).scalar() or 0)
 
 
 def slugify(username):
@@ -492,29 +503,30 @@ def create_user(
     base_slug = slugify(username)
     account_slug = base_slug
     engine = _engine()
+    users_table = _public_table("app_users")
     with engine.begin() as conn:
         existing = conn.execute(
-            text("select 1 from app_users where lower(username) = lower(:username)"),
+            text(f"select 1 from {users_table} where lower(username) = lower(:username)"),
             {"username": username},
         ).fetchone()
         if existing:
             return False, "That username already exists."
-        existing_email = conn.execute(text("select 1 from app_users where lower(email) = lower(:email)"), {"email": email}).fetchone()
+        existing_email = conn.execute(text(f"select 1 from {users_table} where lower(email) = lower(:email)"), {"email": email}).fetchone()
         if existing_email:
             return False, "That email address already has an account."
-        existing_s = conn.execute(text("select 1 from app_users where upper(coalesce(s_number, '')) = upper(:s_number)"), {"s_number": s_number}).fetchone()
+        existing_s = conn.execute(text(f"select 1 from {users_table} where upper(coalesce(s_number, '')) = upper(:s_number)"), {"s_number": s_number}).fetchone()
         if existing_s:
             return False, "That S Number is already used by another account."
         suffix = 2
-        while conn.execute(text("select 1 from app_users where account_slug = :account_slug"), {"account_slug": account_slug}).fetchone():
+        while conn.execute(text(f"select 1 from {users_table} where account_slug = :account_slug"), {"account_slug": account_slug}).fetchone():
             account_slug = f"{base_slug}_{suffix}"
             suffix += 1
         account_role = "Admin" if email.lower() == "daniel.dombrowski@7-11.com" else "User"
         now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
         conn.execute(
             text(
-                """
-                insert into app_users (
+                f"""
+                insert into {users_table} (
                     username, first_name, last_name, email, password_hash, account_slug, created_at,
                     secret_question, secret_answer_hash, account_role, active, updated_at,
                     position_title, s_number, street_address, city, state, zip_code
@@ -579,18 +591,19 @@ def update_user_profile(user_id, first_name, last_name, position_title, s_number
     if len(state) < 2:
         return False, "Please enter a two-letter state."
     engine = _engine()
+    users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         duplicate = conn.execute(
-            text("select id from app_users where upper(coalesce(s_number, '')) = upper(:s_number) and id <> :user_id"),
+            text(f"select id from {users_table} where upper(coalesce(s_number, '')) = upper(:s_number) and id <> :user_id"),
             {"s_number": s_number, "user_id": int(user_id)},
         ).fetchone()
         if duplicate:
             return False, "That S Number is already used by another account."
         conn.execute(
             text(
-                """
-            update app_users
+                f"""
+            update {users_table}
             set first_name = :first_name, last_name = :last_name, position_title = :position_title, s_number = :s_number,
                 street_address = :street_address, city = :city, state = :state, zip_code = :zip_code, updated_at = :updated_at
             where id = :user_id
@@ -616,12 +629,13 @@ def authenticate(username, password):
     init_auth_db()
     login = username.strip()
     engine = _engine()
+    users_table = _public_table("app_users")
     with engine.connect() as conn:
         user = conn.execute(
             text(
-                """
+                f"""
             select *
-            from app_users
+            from {users_table}
             where lower(username) = lower(:login)
                or lower(email) = lower(:login)
             """,
@@ -635,17 +649,18 @@ def authenticate(username, password):
         return None
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
-        conn.execute(text("update app_users set last_login = :last_login where id = :user_id"), {"last_login": now, "user_id": int(user["id"])})
+        conn.execute(text(f"update {users_table} set last_login = :last_login where id = :user_id"), {"last_login": now, "user_id": int(user["id"])})
     user["last_login"] = now
     return user
 
 
 def list_app_users():
     init_auth_db()
+    users_table = _public_table("app_users")
     with _engine().connect() as conn:
         rows = conn.execute(
             text(
-                """
+                f"""
             select u.id, u.username, u.first_name, u.last_name, u.email, u.account_slug,
                    coalesce(u.position_title, '') as position_title,
                    coalesce(u.s_number, '') as s_number,
@@ -658,8 +673,8 @@ def list_app_users():
                    u.manager_user_id, u.last_login, u.updated_at,
                    m.email as manager_email, m.first_name || ' ' || m.last_name as manager_name,
                    u.created_at
-            from app_users u
-            left join app_users m on m.id = u.manager_user_id
+            from {users_table} u
+            left join {users_table} m on m.id = u.manager_user_id
             order by u.account_role, u.email
             """
             )
@@ -669,8 +684,9 @@ def list_app_users():
 
 def get_user_by_id(user_id):
     init_auth_db()
+    users_table = _public_table("app_users")
     with _engine().connect() as conn:
-        user = conn.execute(text("select * from app_users where id = :user_id"), {"user_id": int(user_id)}).fetchone()
+        user = conn.execute(text(f"select * from {users_table} where id = :user_id"), {"user_id": int(user_id)}).fetchone()
     return _row_dict(user)
 
 
@@ -681,10 +697,11 @@ def update_user_access(user_id, account_role, manager_user_id=None):
     if account_role in ("Admin", "Manager"):
         manager_user_id = None
     engine = _engine()
+    users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         conn.execute(
-            text("update app_users set account_role = :account_role, manager_user_id = :manager_user_id, updated_at = :updated_at where id = :user_id"),
+            text(f"update {users_table} set account_role = :account_role, manager_user_id = :manager_user_id, updated_at = :updated_at where id = :user_id"),
             {"account_role": account_role, "manager_user_id": manager_user_id, "updated_at": now, "user_id": int(user_id)},
         )
 
@@ -695,10 +712,11 @@ def update_user_status(user_id, active):
     if user and user.get("email", "").lower() == "daniel.dombrowski@7-11.com" and not active:
         return False, "The owner admin account cannot be disabled."
     engine = _engine()
+    users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         conn.execute(
-            text("update app_users set active = :active, updated_at = :updated_at where id = :user_id"),
+            text(f"update {users_table} set active = :active, updated_at = :updated_at where id = :user_id"),
             {"active": 1 if active else 0, "updated_at": now, "user_id": int(user_id)},
         )
     return True, "Account reactivated." if active else "Account disabled."
@@ -724,10 +742,11 @@ def claim_user_for_manager(user_id, manager_user_id):
     if existing_manager_id and int(existing_manager_id) != int(manager_user_id):
         return False, "That user is already assigned to another manager."
     engine = _engine()
+    users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         conn.execute(
-            text("update app_users set manager_user_id = :manager_user_id, updated_at = :updated_at where id = :user_id"),
+            text(f"update {users_table} set manager_user_id = :manager_user_id, updated_at = :updated_at where id = :user_id"),
             {"manager_user_id": int(manager_user_id), "updated_at": now, "user_id": int(user_id)},
         )
     return True, "User claimed. Their workspace will now appear in your sidebar workspace switcher."
@@ -744,10 +763,11 @@ def release_user_from_manager(user_id, manager_user_id, admin_override=False):
     if not admin_override and int(existing_manager_id) != int(manager_user_id):
         return False, "You can only release users assigned to you."
     engine = _engine()
+    users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         conn.execute(
-            text("update app_users set manager_user_id = null, updated_at = :updated_at where id = :user_id"),
+            text(f"update {users_table} set manager_user_id = null, updated_at = :updated_at where id = :user_id"),
             {"updated_at": now, "user_id": int(user_id)},
         )
     return True, "User released."
@@ -795,9 +815,10 @@ def can_access_account_slug(account_slug):
 
 def find_user_by_email(email):
     init_auth_db()
+    users_table = _public_table("app_users")
     with _engine().connect() as conn:
         user = conn.execute(
-            text("select * from app_users where lower(email) = lower(:email)"),
+            text(f"select * from {users_table} where lower(email) = lower(:email)"),
             {"email": email.strip()},
         ).fetchone()
     return _row_dict(user)
@@ -815,10 +836,11 @@ def reset_password_with_secret(email, secret_answer, new_password):
     if not verify_password(normalize_secret_answer(secret_answer), user["secret_answer_hash"]):
         return False, "Secret answer did not match."
     engine = _engine()
+    users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         conn.execute(
-            text("update app_users set password_hash = :password_hash, updated_at = :updated_at where id = :user_id"),
+            text(f"update {users_table} set password_hash = :password_hash, updated_at = :updated_at where id = :user_id"),
             {"password_hash": hash_password(new_password), "updated_at": now, "user_id": int(user["id"])},
         )
     return True, f"Password reset. Sign in with username {user['username']} or email {user['email']}."

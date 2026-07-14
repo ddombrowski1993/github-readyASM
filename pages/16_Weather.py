@@ -3,7 +3,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Weather", layout="wide")
 
-from src.database import teams
+from src.database import safe_query
 from src.exports import csv_bytes, excel_bytes
 from src.manager_rollup import manager_rollup_query
 from src.utils import apply_theme, ensure_database_or_stop, is_all_managed_view, page_header, section_header, sidebar_nav
@@ -199,17 +199,33 @@ def render_weather_page(weather_forecast, weather_errors):
     e2.download_button("Export Filtered Weather to CSV", data=csv_bytes(export_df), file_name="filtered_weather.csv", disabled=export_df.empty)
 
 
+def brand_weather_team_query():
+    return """
+        select distinct t.id, t.team_name, t.team_type, t.city, t.state, t.active
+        from teams t
+        where t.active = 1
+          and (
+            t.team_type = 'Brand Enhancement'
+            or (
+              coalesce(t.team_type, '') in ('', 'Other')
+              and exists (
+                select 1
+                from stores s
+                where s.active = 1
+                  and s.assigned_brand_team_id = t.id
+              )
+            )
+          )
+        order by t.team_name
+    """
+
+
 if is_all_managed_view():
     page_header("Weather", "Manager roll-up weather outlook for Brand Enhancement areas across managed workspaces.")
     st.info("Viewing Data For: All Managed Users. Filter by owner/user below, or select one managed user from the sidebar to edit that workspace.")
     brand_team_df = manager_rollup_query(
         st.session_state.get("user_id"),
-        """
-        select id, team_name, team_type, city, state, active
-        from teams
-        where active = 1 and team_type in ('Brand Enhancement', 'Other')
-        order by team_name
-        """,
+        brand_weather_team_query(),
     )
     weather_forecast, weather_errors = weekly_weather_for_brand_areas(brand_team_df)
     render_weather_page(weather_forecast, weather_errors)
@@ -223,7 +239,6 @@ page_header(
     actions=[("Open Brand Enhancement Scheduler", "pages/5_Scheduler.py")],
 )
 
-team_df = teams()
-brand_team_df = team_df[team_df["team_type"].isin(["Brand Enhancement", "Other"])] if not team_df.empty else team_df
+brand_team_df = safe_query(brand_weather_team_query())
 weather_forecast, weather_errors = weekly_weather_for_brand_areas(brand_team_df)
 render_weather_page(weather_forecast, weather_errors)

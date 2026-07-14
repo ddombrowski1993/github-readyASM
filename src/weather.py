@@ -102,18 +102,25 @@ def fallback_weather_areas():
     return []
 
 
+def clean_weather_text(value):
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "null"} else text
+
+
 def city_candidate_from_team(team):
-    city = str(team.get("city", "") or "").strip()
+    city = clean_weather_text(team.get("city", ""))
     if city:
         return city
-    team_name = str(team.get("team_name", "") or "").strip()
+    team_name = clean_weather_text(team.get("team_name", ""))
     cleaned = re.sub(r"\b(brand enhancement|team|crew|area|region|market)\b", "", team_name, flags=re.I)
     cleaned = " ".join(cleaned.replace("-", " ").split())
     return cleaned
 
 
 def split_city_candidates(value):
-    raw = str(value or "").strip()
+    raw = clean_weather_text(value)
     if not raw:
         return []
     parts = re.split(r"\s*(?:/|,|;|\band\b|\+)\s*", raw, flags=re.I)
