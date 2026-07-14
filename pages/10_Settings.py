@@ -469,7 +469,7 @@ with tabs[4]:
             manager_ids,
             index=manager_ids.index(current_manager),
             format_func=lambda value: "No manager" if value is None else next((user["email"] for user in manager_candidates if user["id"] == value), str(value)),
-            disabled=role in ("Manager", "Admin"),
+            disabled=role == "Admin",
         )
         st.caption("Managers can switch into assigned user workspaces from the sidebar. Admins can access all workspaces.")
         if st.button("Save Account Access", type="primary"):

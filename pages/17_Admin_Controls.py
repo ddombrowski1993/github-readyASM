@@ -97,7 +97,7 @@ manager_id = st.selectbox(
     manager_ids,
     index=manager_ids.index(current_manager),
     format_func=lambda value: "No manager" if value is None else next((user["email"] for user in manager_candidates if user["id"] == value), str(value)),
-    disabled=new_role in ("Manager", "Admin"),
+    disabled=new_role == "Admin",
     key="admin_controls_manager_select",
 )
 st.caption("Managers can switch into assigned user workspaces from the sidebar. Admins can access all workspaces.")
@@ -165,7 +165,7 @@ if reset_password_submitted:
 section_header("Manager Assignments", "Assign user/admin accounts under a Manager account for roll-up visibility.", "green")
 users = list_app_users()
 manager_accounts = [user for user in users if user["account_role"] in ("Manager", "Admin") and int(user.get("active", 1)) == 1]
-manageable_accounts = [user for user in users if user["account_role"] in ("User", "Admin") and int(user.get("active", 1)) == 1]
+manageable_accounts = [user for user in users if user["account_role"] in ("User", "Manager", "Admin") and int(user.get("active", 1)) == 1]
 assigned_rows = [
     {
         "Managed Person": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user["email"],

@@ -709,7 +709,7 @@ def update_user_access(user_id, account_role, manager_user_id=None):
     init_auth_db()
     account_role = account_role if account_role in ("Admin", "Manager", "User") else "User"
     manager_user_id = int(manager_user_id) if manager_user_id else None
-    if account_role in ("Admin", "Manager"):
+    if account_role == "Admin":
         manager_user_id = None
     engine = _engine()
     users_table = _public_table("app_users")
@@ -767,8 +767,8 @@ def claim_user_for_manager(user_id, manager_user_id):
         return False, "You cannot claim your own account."
     if int(target.get("active", 1)) != 1:
         return False, "Only active users can be claimed."
-    if target.get("account_role") not in ("User", "Admin"):
-        return False, "Only User or Admin accounts can be claimed by a manager."
+    if target.get("account_role") not in ("User", "Manager", "Admin"):
+        return False, "Only User, Manager, or Admin accounts can be claimed by a manager."
     if manager.get("account_role") not in ("Admin", "Manager"):
         return False, "Only Manager or Admin accounts can claim users."
     existing_manager_id = target.get("manager_user_id")

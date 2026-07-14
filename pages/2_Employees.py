@@ -98,7 +98,7 @@ if st.session_state.get("account_role") == "Manager" and st.session_state.get("m
     active_users = [user for user in users if int(user.get("active", 1)) == 1]
     available_to_claim = [
         user for user in active_users
-        if user["account_role"] in ("User", "Admin")
+        if user["account_role"] in ("User", "Manager", "Admin")
         and int(user["id"]) != int(current_user_id)
         and not user.get("manager_user_id")
     ]
@@ -698,7 +698,7 @@ if tab_user_accounts is not None:
             manager_label = manager_name or user.get("manager_email") or ""
             if int(user["id"]) == int(current_user_id):
                 claim_status = "Your account"
-            elif user["account_role"] not in ("User", "Admin"):
+            elif user["account_role"] not in ("User", "Manager", "Admin"):
                 claim_status = f"{user['account_role']} account"
             elif user.get("manager_user_id") == current_user_id:
                 claim_status = "Claimed by you"
@@ -738,7 +738,7 @@ if tab_user_accounts is not None:
 
         available_to_claim = [
             user for user in active_users
-            if user["account_role"] in ("User", "Admin")
+            if user["account_role"] in ("User", "Manager", "Admin")
             and int(user["id"]) != int(current_user_id)
             and not user.get("manager_user_id")
         ]
