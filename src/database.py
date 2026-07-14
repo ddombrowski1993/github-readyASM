@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -61,10 +61,23 @@ def using_sqlite():
 def get_engine(url=None, schema=None):
     url = url or get_database_url()
     schema = schema if schema is not None else current_account_schema()
-    connect_args = {}
+    engine = create_engine(url, pool_pre_ping=True, future=True, connect_args={})
     if schema and url.startswith("postgresql"):
-        connect_args = {"options": f"-csearch_path={schema},public"}
-    return create_engine(url, pool_pre_ping=True, future=True, connect_args=connect_args)
+        quoted_schema = _quote_identifier(schema)
+
+        @event.listens_for(engine, "connect")
+        def set_search_path(dbapi_connection, connection_record):
+            previous_autocommit = getattr(dbapi_connection, "autocommit", None)
+            if previous_autocommit is not None:
+                dbapi_connection.autocommit = True
+            try:
+                with dbapi_connection.cursor() as cursor:
+                    cursor.execute(f"set search_path to {quoted_schema}, public")
+            finally:
+                if previous_autocommit is not None:
+                    dbapi_connection.autocommit = previous_autocommit
+
+    return engine
 
 
 def _quote_identifier(identifier):
