@@ -510,7 +510,7 @@ def stores_df(rollup=False):
         left join employees p on p.id = s.assigned_pmt_employee_id
         left join employees b on b.id = s.assigned_brand_employee_id
         left join employees c on c.id = s.assigned_calibration_employee_id
-        where s.active = 1
+        where s.active = true
         order by s.store_number
         """,
         rollup=rollup,

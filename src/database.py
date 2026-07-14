@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -32,6 +33,7 @@ from src.auth import (
 APP_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(APP_DIR / ".env")
 load_dotenv()
+LOGGER = logging.getLogger(__name__)
 
 
 def get_database_url():
@@ -238,14 +240,15 @@ def ensure_undo_table(engine=None):
 
 
 def ensure_schema_updates(engine):
-    if not using_sqlite():
-        return
     existing = {column["name"] for column in inspect(engine).get_columns("stores")}
     employee_existing = {column["name"] for column in inspect(engine).get_columns("employees")}
     schedule_item_existing = {column["name"] for column in inspect(engine).get_columns("schedule_items")}
     store_columns = {
+        "store_name": "VARCHAR(200)",
         "assigned_calibration_employee_id": "INTEGER",
         "assigned_calibration_team_id": "INTEGER",
+        "store_status": "VARCHAR(80) DEFAULT 'Not Started'",
+        "priority": "VARCHAR(40) DEFAULT 'Medium'",
     }
     employee_columns = {
         "monthly_pmt_store_target": "INTEGER DEFAULT 10",
@@ -436,7 +439,8 @@ def safe_query(sql, params=None):
     engine = get_engine(get_database_url())
     try:
         return pd.read_sql(text(sql), engine, params=params or {})
-    except SQLAlchemyError as exc:
+    except Exception as exc:
+        LOGGER.exception("Database query failed. SQL=%s params=%s", sql, params or {})
         st.error(f"Database query failed: {exc}")
         return pd.DataFrame()
 
