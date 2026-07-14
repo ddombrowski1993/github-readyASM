@@ -14,13 +14,16 @@ from src.auth import (
     ACCOUNT_DATABASE_DIR,
     account_db_path,
     authenticate,
-    auth_lookup_diagnostics,
     get_user_by_id,
     list_app_users,
     update_user_access,
-    update_user_password,
     update_user_profile,
 )
+try:
+    from src.auth import auth_lookup_diagnostics, update_user_password
+except ImportError:
+    auth_lookup_diagnostics = None
+    update_user_password = None
 from src.city_anchors import city_anchor_index, city_anchor_rows
 from src.database import apply_automatic_schedule_completion, get_database_status, get_engine, init_db, log_action, safe_query, session_scope
 from src.geocoding import geocode_address
@@ -456,12 +459,15 @@ with tabs[4]:
         st.dataframe(user_rows, use_container_width=True, hide_index=True)
         lookup_value = st.text_input("Find login account by username/email", value="", placeholder="jeff.k@7-11.com")
         if lookup_value.strip():
-            diagnostics = auth_lookup_diagnostics(lookup_value)
-            st.caption(f"Normalized search: `{diagnostics['normalized_search']}`. Login accounts checked: {diagnostics['user_count']}.")
-            if diagnostics["matches"]:
-                st.dataframe(pd.DataFrame(diagnostics["matches"]), use_container_width=True, hide_index=True)
+            if auth_lookup_diagnostics:
+                diagnostics = auth_lookup_diagnostics(lookup_value)
+                st.caption(f"Normalized search: `{diagnostics['normalized_search']}`. Login accounts checked: {diagnostics['user_count']}.")
+                if diagnostics["matches"]:
+                    st.dataframe(pd.DataFrame(diagnostics["matches"]), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No matching login account was found in the auth table.")
             else:
-                st.warning("No matching login account was found in the auth table.")
+                st.warning("Account lookup diagnostics are not available in the loaded auth module. Reboot the app after deployment finishes.")
         user_options = [user["id"] for user in users]
         selected_user_id = st.selectbox(
             "Account",
@@ -501,6 +507,8 @@ with tabs[4]:
             password_user = next((user for user in users if user["id"] == password_user_id), {})
             if temp_password != confirm_temp_password:
                 st.error("Passwords do not match.")
+            elif not update_user_password:
+                st.error("Admin password reset is not available in the loaded auth module. Reboot the app after deployment finishes.")
             else:
                 ok, message = update_user_password(password_user_id, temp_password)
                 if ok:
