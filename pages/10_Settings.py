@@ -14,6 +14,7 @@ from src.auth import (
     ACCOUNT_DATABASE_DIR,
     account_db_path,
     authenticate,
+    auth_lookup_diagnostics,
     get_user_by_id,
     list_app_users,
     update_user_access,
@@ -453,6 +454,14 @@ with tabs[4]:
             for user in users
         ]
         st.dataframe(user_rows, use_container_width=True, hide_index=True)
+        lookup_value = st.text_input("Find login account by username/email", value="", placeholder="jeff.k@7-11.com")
+        if lookup_value.strip():
+            diagnostics = auth_lookup_diagnostics(lookup_value)
+            st.caption(f"Normalized search: `{diagnostics['normalized_search']}`. Login accounts checked: {diagnostics['user_count']}.")
+            if diagnostics["matches"]:
+                st.dataframe(pd.DataFrame(diagnostics["matches"]), use_container_width=True, hide_index=True)
+            else:
+                st.warning("No matching login account was found in the auth table.")
         user_options = [user["id"] for user in users]
         selected_user_id = st.selectbox(
             "Account",

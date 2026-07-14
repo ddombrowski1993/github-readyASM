@@ -4,7 +4,7 @@ st.set_page_config(page_title="Admin Controls", layout="wide")
 
 import pandas as pd
 
-from src.auth import auth_storage_status, claim_user_for_manager, list_app_users, release_user_from_manager, update_user_access, update_user_password, update_user_profile, update_user_status
+from src.auth import auth_lookup_diagnostics, auth_storage_status, claim_user_for_manager, list_app_users, release_user_from_manager, update_user_access, update_user_password, update_user_profile, update_user_status
 from src.database import log_action
 from src.utils import apply_theme, page_header, require_login, require_page_access, section_header, sidebar_nav
 
@@ -72,6 +72,14 @@ for user in users:
         }
     )
 st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+lookup_value = st.text_input("Find login account by username/email", value="", placeholder="jeff.k@7-11.com")
+if lookup_value.strip():
+    diagnostics = auth_lookup_diagnostics(lookup_value)
+    st.caption(f"Normalized search: `{diagnostics['normalized_search']}`. Login accounts checked: {diagnostics['user_count']}.")
+    if diagnostics["matches"]:
+        st.dataframe(pd.DataFrame(diagnostics["matches"]), use_container_width=True, hide_index=True)
+    else:
+        st.warning("No matching login account was found in the auth table.")
 
 section_header("Change User Role", "Promote users to Manager/Admin or demote them back to User.", "blue")
 user_ids = [user["id"] for user in users]

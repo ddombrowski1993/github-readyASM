@@ -5,7 +5,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.auth import authenticate, accessible_accounts_for_current_user, can_access_account_slug, create_user, find_user_by_email, init_auth_db, reset_password_with_secret, sign_in, sign_out, user_count
+from src.auth import authenticate, authenticate_with_reason, accessible_accounts_for_current_user, can_access_account_slug, create_user, find_user_by_email, init_auth_db, reset_password_with_secret, sign_in, sign_out, user_count
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -1339,12 +1339,12 @@ def require_login():
             password = st.text_input("Password", type="password", key="login_password")
             login_submitted = st.form_submit_button("Sign In", type="primary")
         if login_submitted:
-            user = authenticate(username, password)
+            user, login_message = authenticate_with_reason(username, password)
             if user:
                 sign_in(user)
                 st.cache_resource.clear()
                 st.rerun()
-            st.error("Incorrect username or password.")
+            st.error(login_message or "Incorrect username or password.")
     with create_tab:
         st.markdown(
             '<div class="login-card"><h3>Create your workspace</h3><p>Enter your employee profile, home base, login, and recovery information.</p></div>',

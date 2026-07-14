@@ -244,13 +244,46 @@ def find_user_by_login_identifier(identifier):
     users_table = _public_table("app_users")
     with _engine().connect() as conn:
         rows = conn.execute(text(f"select * from {users_table}")).fetchall()
+    matches = []
     for row in _rows_dict(rows):
         if login_key in {
             normalize_login_identifier(row.get("username")),
             normalize_login_identifier(row.get("email")),
         }:
-            return row
-    return None
+            matches.append(row)
+    if not matches:
+        return None
+    matches.sort(key=lambda row: (int(row.get("active", 1) or 0), int(row.get("id", 0) or 0)), reverse=True)
+    return matches[0]
+
+
+def auth_lookup_diagnostics(identifier):
+    init_auth_db()
+    login_key = normalize_login_identifier(identifier)
+    users_table = _public_table("app_users")
+    with _engine().connect() as conn:
+        rows = _rows_dict(conn.execute(text(f"select * from {users_table} order by id")).fetchall())
+    matches = []
+    for row in rows:
+        username_key = normalize_login_identifier(row.get("username"))
+        email_key = normalize_login_identifier(row.get("email"))
+        if login_key and login_key in {username_key, email_key}:
+            matches.append(
+                {
+                    "id": row.get("id"),
+                    "username": row.get("username"),
+                    "email": row.get("email"),
+                    "normalized_username": username_key,
+                    "normalized_email": email_key,
+                    "account_role": row.get("account_role"),
+                    "active": row.get("active"),
+                    "manager_user_id": row.get("manager_user_id"),
+                    "secret_question_set": bool(row.get("secret_question")),
+                    "last_login": row.get("last_login"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+    return {"searched": identifier, "normalized_search": login_key, "user_count": len(rows), "matches": matches}
 
 
 def _verify_database_identity(engine):
@@ -654,18 +687,25 @@ def update_user_profile(user_id, first_name, last_name, position_title, s_number
     return True, "Profile updated."
 
 
-def authenticate(username, password):
+def authenticate_with_reason(username, password):
     user = find_user_by_login_identifier(username)
-    if not user or not verify_password(password, user["password_hash"]):
-        return None
+    if not user:
+        return None, "No account was found for that username or email."
     if int(user.get("active", 1)) != 1:
-        return None
+        return None, "That account exists but is disabled. Reactivate it in Account Access."
+    if not verify_password(password, user["password_hash"]):
+        return None, "That account exists, but the password is incorrect. Use Admin password reset to set a temporary password."
     engine = _engine()
     users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         conn.execute(text(f"update {users_table} set last_login = :last_login where id = :user_id"), {"last_login": now, "user_id": int(user["id"])})
     user["last_login"] = now
+    return user, ""
+
+
+def authenticate(username, password):
+    user, _message = authenticate_with_reason(username, password)
     return user
 
 
