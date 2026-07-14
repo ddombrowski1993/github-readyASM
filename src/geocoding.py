@@ -76,6 +76,56 @@ def geocode_query(params):
     }
 
 
+def census_geocode_query(params):
+    request = Request(
+        f"https://geocoding.geo.census.gov/geocoder/locations/address?{urlencode(params)}",
+        headers={"User-Agent": "FieldPlanner/1.0 (address lookup)"},
+    )
+    with urlopen(request, timeout=12) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    matches = ((data.get("result") or {}).get("addressMatches") or [])
+    if not matches:
+        return None
+    match = matches[0]
+    coordinates = match.get("coordinates") or {}
+    latitude = coordinates.get("y")
+    longitude = coordinates.get("x")
+    if latitude is None or longitude is None:
+        return None
+    return {
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "display_name": match.get("matchedAddress", build_address(params.get("street", ""), params.get("city", ""), params.get("state", ""), params.get("zip", ""))),
+        "match_quality": "US Census address match",
+    }
+
+
+def census_geocode_oneline(query):
+    if not query:
+        return None
+    request = Request(
+        f"https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?{urlencode({'address': query, 'benchmark': 'Public_AR_Current', 'format': 'json'})}",
+        headers={"User-Agent": "FieldPlanner/1.0 (address lookup)"},
+    )
+    with urlopen(request, timeout=12) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    matches = ((data.get("result") or {}).get("addressMatches") or [])
+    if not matches:
+        return None
+    match = matches[0]
+    coordinates = match.get("coordinates") or {}
+    latitude = coordinates.get("y")
+    longitude = coordinates.get("x")
+    if latitude is None or longitude is None:
+        return None
+    return {
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "display_name": match.get("matchedAddress", query),
+        "match_quality": "US Census address match",
+    }
+
+
 def reverse_geocode_coordinates(latitude, longitude):
     try:
         lat = float(latitude)
@@ -140,6 +190,35 @@ def geocode_address(address="", city="", state="", zip_code=""):
             "display_name": build_address(city, state, "United States"),
             "match_quality": "Offline city estimate",
         }
+
+    census_searches = []
+    if street_without_unit and city and state:
+        for street in [street_without_unit, expanded_street_without_unit]:
+            if street:
+                census_searches.append(
+                    {
+                        "street": street,
+                        "city": city,
+                        "state": state,
+                        "zip": zip_code,
+                        "benchmark": "Public_AR_Current",
+                        "format": "json",
+                    }
+                )
+    for params in census_searches:
+        try:
+            result = census_geocode_query(params)
+        except Exception:
+            continue
+        if result:
+            return result
+    for query in [clean_full_query, expanded_clean_query, full_query, expanded_full_query]:
+        try:
+            result = census_geocode_oneline(query)
+        except Exception:
+            continue
+        if result:
+            return result
 
     searches = []
     if street_without_unit and city and state:
