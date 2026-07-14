@@ -3982,7 +3982,11 @@ home_base = c7.text_input("Home Base / Starting Address optional", placeholder="
 area_color = c8.color_picker("Color", value=stable_color(new_area_name or new_area_group))
 if st.button("Create Area", type="primary", disabled=not new_area_name.strip() or not area_city.strip() or len(area_state.strip()) != 2):
     with session_scope() as session:
-        existing = session.query(Team).filter(Team.team_name == new_area_name.strip()).first()
+        clean_area_name = new_area_name.strip()
+        existing = session.query(Team).filter(Team.team_name == clean_area_name, Team.team_type == new_area_group).first()
+        conflicting_team = None
+        if not existing:
+            conflicting_team = session.query(Team).filter(Team.team_name == clean_area_name, Team.team_type != new_area_group).first()
         if existing:
             existing.active = True
             existing.team_type = new_area_group
@@ -3990,13 +3994,20 @@ if st.button("Create Area", type="primary", disabled=not new_area_name.strip() o
             existing.state = area_state.strip().upper()
             team_id = existing.id
         else:
-            team = Team(team_name=new_area_name.strip(), team_type=new_area_group, city=area_city.strip(), state=area_state.strip().upper(), active=True)
+            team_name = clean_area_name
+            if conflicting_team:
+                team_name = f"{clean_area_name} ({new_area_group})"
+                suffix = 2
+                while session.query(Team).filter(Team.team_name == team_name).first():
+                    team_name = f"{clean_area_name} ({new_area_group} {suffix})"
+                    suffix += 1
+            team = Team(team_name=team_name, team_type=new_area_group, city=area_city.strip(), state=area_state.strip().upper(), active=True)
             session.add(team)
             session.flush()
             team_id = team.id
         session.add(
             MapArea(
-                area_name=new_area_name.strip(),
+                area_name=clean_area_name,
                 area_type=new_area_group,
                 team_id=team_id,
                 employee_id=int(tech_1) if tech_1 else None,
@@ -4179,8 +4190,8 @@ if st.button("Preview Auto Assign", disabled=not included_team_ids or not anchor
     st.session_state["auto_assign_method"] = "Neighbor-balanced nearest city/state anchor"
 
 reset_cols = st.columns([0.35, 0.65])
-confirm_clear_assignments = reset_cols[1].checkbox(f"I understand this clears existing {auto_group} assignments")
-if reset_cols[0].button("Clear Current Group Assignments", disabled=not confirm_clear_assignments, type="secondary"):
+confirm_clear_assignments = reset_cols[1].text_input(f"Type CLEAR to clear existing {auto_group} assignments", key="confirm_clear_group_assignments")
+if reset_cols[0].button("Clear Current Group Assignments", disabled=confirm_clear_assignments.strip().upper() != "CLEAR", type="secondary"):
     with session_scope() as session:
         for store in session.query(Store).all():
             clear_store_group(store, auto_group)

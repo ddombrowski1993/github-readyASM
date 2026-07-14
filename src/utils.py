@@ -963,16 +963,19 @@ def sidebar_nav():
     st.sidebar.divider()
     undo_snapshot = latest_undo_snapshot()
     if undo_snapshot:
-        st.sidebar.caption(f"Undo last change: {undo_snapshot.get('action_label') or undo_snapshot.get('table_names', '')}")
+        with st.sidebar.expander("Undo Last Change", expanded=False):
+            st.caption(f"Last change: {undo_snapshot.get('action_label') or undo_snapshot.get('table_names', '')}")
+            st.warning("Undo restores whole saved tables to their prior state. Records created after that undo point can be removed.")
+            confirm_undo = st.text_input("Type UNDO to confirm", key="global_undo_confirm")
+            if st.button("Run Undo", disabled=confirm_undo.strip().upper() != "UNDO", key="global_undo_last_change"):
+                ok, message = restore_latest_undo_snapshot()
+                if ok:
+                    st.sidebar.success(message)
+                    st.cache_resource.clear()
+                    st.rerun()
+                st.sidebar.error(message)
     else:
         st.sidebar.caption("No undo point saved yet.")
-    if st.sidebar.button("Undo Last Change", disabled=not undo_snapshot, key="global_undo_last_change"):
-        ok, message = restore_latest_undo_snapshot()
-        if ok:
-            st.sidebar.success(message)
-            st.cache_resource.clear()
-            st.rerun()
-        st.sidebar.error(message)
 
 
 def require_login():
