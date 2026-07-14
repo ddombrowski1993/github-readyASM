@@ -71,8 +71,7 @@ def _get_engine(url, schema):
     if schema and url.startswith("postgresql"):
         quoted_schema = _quote_identifier(schema)
 
-        @event.listens_for(engine, "connect")
-        def set_search_path(dbapi_connection, connection_record):
+        def apply_search_path(dbapi_connection):
             previous_autocommit = getattr(dbapi_connection, "autocommit", None)
             if previous_autocommit is not None:
                 dbapi_connection.autocommit = True
@@ -82,6 +81,14 @@ def _get_engine(url, schema):
             finally:
                 if previous_autocommit is not None:
                     dbapi_connection.autocommit = previous_autocommit
+
+        @event.listens_for(engine, "connect")
+        def set_search_path_on_connect(dbapi_connection, connection_record):
+            apply_search_path(dbapi_connection)
+
+        @event.listens_for(engine, "checkout")
+        def set_search_path_on_checkout(dbapi_connection, connection_record, connection_proxy):
+            apply_search_path(dbapi_connection)
 
     return engine
 
