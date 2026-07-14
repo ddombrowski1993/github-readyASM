@@ -300,7 +300,7 @@ with tab_list:
                     emp = session.get(Employee, int(row["id"]))
                     if not emp or (emp.home_latitude is not None and emp.home_longitude is not None):
                         continue
-                    result = geocode_address(emp.home_address, emp.home_city, emp.home_state, emp.home_zip)
+                    result, diagnostics = geocode_address(emp.home_address, emp.home_city, emp.home_state, emp.home_zip, return_diagnostics=True)
                     if result:
                         emp.home_latitude = float(result["latitude"])
                         emp.home_longitude = float(result["longitude"])
@@ -314,6 +314,7 @@ with tab_list:
                                     for part in [emp.home_address, emp.home_city, emp.home_state, emp.home_zip]
                                     if str(part or "").strip()
                                 ),
+                                "Last Result": diagnostics[-1]["Result"] if diagnostics else "No lookup was attempted",
                             }
                         )
             if found:
@@ -330,13 +331,17 @@ with tab_list:
         )
         if st.button("Find Coordinates From Home Address", type="secondary"):
             selected = coord_df.set_index("id").loc[fix_id]
+            diagnostics = []
             if not any(str(selected.get(column, "") or "").strip() for column in ["home_address", "home_city", "home_state", "home_zip"]):
                 result = None
                 st.warning("This employee does not have enough address information to geocode.")
             else:
-                result = geocode_address(selected["home_address"], selected["home_city"], selected["home_state"], selected["home_zip"])
+                result, diagnostics = geocode_address(selected["home_address"], selected["home_city"], selected["home_state"], selected["home_zip"], return_diagnostics=True)
             if not result:
                 st.error("Could not find coordinates for that address. Check spelling or enter latitude/longitude manually.")
+                if diagnostics:
+                    with st.expander("Coordinate lookup details", expanded=True):
+                        st.dataframe(pd.DataFrame(diagnostics), use_container_width=True, hide_index=True)
             else:
                 with session_scope() as session:
                     emp = session.get(Employee, int(fix_id))

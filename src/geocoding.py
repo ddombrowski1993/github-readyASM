@@ -165,7 +165,26 @@ def reverse_geocode_coordinates(latitude, longitude):
     }
 
 
-def geocode_address(address="", city="", state="", zip_code=""):
+def geocode_address(address="", city="", state="", zip_code="", return_diagnostics=False):
+    diagnostics = []
+
+    def attempt(label, callback):
+        try:
+            result = callback()
+        except Exception as exc:
+            diagnostics.append({"Attempt": label, "Result": f"Error: {type(exc).__name__}: {exc}"})
+            return None
+        if result:
+            diagnostics.append({"Attempt": label, "Result": f"Matched: {result.get('display_name', '')}"})
+        else:
+            diagnostics.append({"Attempt": label, "Result": "No match"})
+        return result
+
+    def finish(result):
+        if return_diagnostics:
+            return result, diagnostics
+        return result
+
     address = clean_address_piece(address)
     city = clean_address_piece(city)
     state = clean_address_piece(state)
@@ -182,15 +201,16 @@ def geocode_address(address="", city="", state="", zip_code=""):
     city_state_query = build_address(city, state, "")
 
     if not full_query and not city_zip_query:
-        return None
+        diagnostics.append({"Attempt": "Input validation", "Result": "No address, city/state, or ZIP was provided"})
+        return finish(None)
     if fallback_center and not address and not zip_code:
         latitude, longitude = fallback_center
-        return {
+        return finish({
             "latitude": latitude,
             "longitude": longitude,
             "display_name": build_address(city, state, "United States"),
             "match_quality": "Offline city estimate",
-        }
+        })
 
     census_searches = []
     if street_without_unit and city and state:
@@ -208,21 +228,18 @@ def geocode_address(address="", city="", state="", zip_code=""):
                         }
                     )
     for params in census_searches:
-        try:
-            result = census_geocode_query(params)
-        except Exception:
-            continue
+        result = attempt(
+            f"US Census street lookup: {build_address(params.get('street'), params.get('city'), params.get('state'), params.get('zip'))}",
+            lambda params=params: census_geocode_query(params),
+        )
         if result:
-            return result
+            return finish(result)
     no_zip_query = build_address(street_without_unit, city, state, "")
     expanded_no_zip_query = build_address(expanded_street_without_unit, city, state, "")
     for query in [clean_full_query, expanded_clean_query, no_zip_query, expanded_no_zip_query, full_query, expanded_full_query, city_state_query]:
-        try:
-            result = census_geocode_oneline(query)
-        except Exception:
-            continue
+        result = attempt(f"US Census one-line lookup: {query}", lambda query=query: census_geocode_oneline(query))
         if result:
-            return result
+            return finish(result)
 
     searches = []
     if street_without_unit and city and state:
@@ -246,19 +263,19 @@ def geocode_address(address="", city="", state="", zip_code=""):
             searches.append({"q": query, "format": "json", "limit": 1, "countrycodes": "us"})
 
     for index, params in enumerate(searches):
-        try:
-            result = geocode_query(params)
-        except Exception:
-            continue
+        result = attempt(
+            f"OpenStreetMap lookup: {params.get('q') or build_address(params.get('street'), params.get('city'), params.get('state'), params.get('postalcode'))}",
+            lambda params=params: geocode_query(params),
+        )
         if result:
             result["match_quality"] = "City/ZIP estimate" if index == len(searches) - 1 and not params.get("street") else "Address match"
-            return result
+            return finish(result)
     if fallback_center:
         latitude, longitude = fallback_center
-        return {
+        return finish({
             "latitude": latitude,
             "longitude": longitude,
             "display_name": build_address(city, state, "United States"),
             "match_quality": "Offline city estimate",
-        }
-    return None
+        })
+    return finish(None)
