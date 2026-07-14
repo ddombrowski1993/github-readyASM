@@ -126,6 +126,55 @@ def census_geocode_oneline(query):
     }
 
 
+def local_coordinate_estimate(city="", state="", zip_code=""):
+    try:
+        from src.database import safe_query
+    except Exception:
+        return None
+    city = clean_address_piece(city)
+    state = clean_address_piece(state)
+    zip_code = clean_address_piece(zip_code)
+    if zip_code:
+        estimate = safe_query(
+            """
+            select avg(latitude) as latitude, avg(longitude) as longitude, count(*) as matches
+            from stores
+            where latitude is not null
+              and longitude is not null
+              and nullif(trim(coalesce(zip, '')), '') = :zip_code
+              and (:state = '' or lower(trim(coalesce(state, ''))) = lower(:state))
+            """,
+            {"zip_code": zip_code, "state": state},
+        )
+        if not estimate.empty and int(estimate.iloc[0]["matches"] or 0) > 0:
+            return {
+                "latitude": float(estimate.iloc[0]["latitude"]),
+                "longitude": float(estimate.iloc[0]["longitude"]),
+                "display_name": f"{zip_code} local estimate from {int(estimate.iloc[0]['matches'])} saved store(s)",
+                "match_quality": "Local ZIP estimate",
+            }
+    if city:
+        estimate = safe_query(
+            """
+            select avg(latitude) as latitude, avg(longitude) as longitude, count(*) as matches
+            from stores
+            where latitude is not null
+              and longitude is not null
+              and lower(trim(coalesce(city, ''))) = lower(:city)
+              and (:state = '' or lower(trim(coalesce(state, ''))) = lower(:state))
+            """,
+            {"city": city, "state": state},
+        )
+        if not estimate.empty and int(estimate.iloc[0]["matches"] or 0) > 0:
+            return {
+                "latitude": float(estimate.iloc[0]["latitude"]),
+                "longitude": float(estimate.iloc[0]["longitude"]),
+                "display_name": f"{city}, {state} local estimate from {int(estimate.iloc[0]['matches'])} saved store(s)",
+                "match_quality": "Local city estimate",
+            }
+    return None
+
+
 def reverse_geocode_coordinates(latitude, longitude):
     try:
         lat = float(latitude)
@@ -270,6 +319,12 @@ def geocode_address(address="", city="", state="", zip_code="", return_diagnosti
         if result:
             result["match_quality"] = "City/ZIP estimate" if index == len(searches) - 1 and not params.get("street") else "Address match"
             return finish(result)
+    result = attempt(
+        f"Local saved-store estimate: {build_address(city, state, zip_code)}",
+        lambda: local_coordinate_estimate(city, state, zip_code),
+    )
+    if result:
+        return finish(result)
     if fallback_center:
         latitude, longitude = fallback_center
         return finish({

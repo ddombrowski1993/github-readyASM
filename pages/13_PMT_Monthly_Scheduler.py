@@ -19,7 +19,7 @@ from sqlalchemy import select
 from src.database import active_employees, log_action, safe_query, session_scope
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.exports import download_table, excel_bytes
-from src.geocoding import build_address, geocode_address
+from src.geocoding import build_address, geocode_address, local_coordinate_estimate
 from src.imports import normalize_columns
 from src.maps import map_html, render_plain_table, render_route_preview, render_store_map, stable_color
 from src.models import Employee, MapArea, PMTScheduleBacklog, PMTScheduleRun, Schedule, ScheduleItem, Store, Team
@@ -504,51 +504,6 @@ def to_float(value):
         return float(value)
     except ValueError:
         return None
-
-
-def local_coordinate_estimate(city="", state="", zip_code=""):
-    city = clean(city)
-    state = clean(state)
-    zip_code = clean(zip_code)
-    if zip_code:
-        estimate = safe_query(
-            """
-            select avg(latitude) as latitude, avg(longitude) as longitude, count(*) as matches
-            from stores
-            where latitude is not null
-              and longitude is not null
-              and nullif(trim(coalesce(zip, '')), '') = :zip_code
-              and (:state = '' or lower(trim(coalesce(state, ''))) = lower(:state))
-            """,
-            {"zip_code": zip_code, "state": state},
-        )
-        if not estimate.empty and int(estimate.iloc[0]["matches"] or 0) > 0:
-            return {
-                "latitude": float(estimate.iloc[0]["latitude"]),
-                "longitude": float(estimate.iloc[0]["longitude"]),
-                "display_name": f"{zip_code} local estimate from {int(estimate.iloc[0]['matches'])} saved store(s)",
-                "match_quality": "Local ZIP estimate",
-            }
-    if city:
-        estimate = safe_query(
-            """
-            select avg(latitude) as latitude, avg(longitude) as longitude, count(*) as matches
-            from stores
-            where latitude is not null
-              and longitude is not null
-              and lower(trim(coalesce(city, ''))) = lower(:city)
-              and (:state = '' or lower(trim(coalesce(state, ''))) = lower(:state))
-            """,
-            {"city": city, "state": state},
-        )
-        if not estimate.empty and int(estimate.iloc[0]["matches"] or 0) > 0:
-            return {
-                "latitude": float(estimate.iloc[0]["latitude"]),
-                "longitude": float(estimate.iloc[0]["longitude"]),
-                "display_name": f"{city}, {state} local estimate from {int(estimate.iloc[0]['matches'])} saved store(s)",
-                "match_quality": "Local city estimate",
-            }
-    return None
 
 
 def current_assignments_from_database():
