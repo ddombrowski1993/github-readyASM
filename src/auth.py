@@ -737,6 +737,24 @@ def update_user_status(user_id, active):
     return True, "Account reactivated." if active else "Account disabled."
 
 
+def update_user_password(user_id, new_password):
+    init_auth_db()
+    if len(str(new_password or "")) < 6:
+        return False, "Password needs at least 6 characters."
+    user = get_user_by_id(user_id)
+    if not user:
+        return False, "User account was not found."
+    engine = _engine()
+    users_table = _public_table("app_users")
+    now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        conn.execute(
+            text(f"update {users_table} set password_hash = :password_hash, updated_at = :updated_at where id = :user_id"),
+            {"password_hash": hash_password(str(new_password)), "updated_at": now, "user_id": int(user_id)},
+        )
+    return True, "Password updated."
+
+
 def claim_user_for_manager(user_id, manager_user_id):
     init_auth_db()
     target = get_user_by_id(user_id)

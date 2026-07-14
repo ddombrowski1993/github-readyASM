@@ -17,6 +17,7 @@ from src.auth import (
     get_user_by_id,
     list_app_users,
     update_user_access,
+    update_user_password,
     update_user_profile,
 )
 from src.city_anchors import city_anchor_index, city_anchor_rows
@@ -476,6 +477,28 @@ with tabs[4]:
             log_action("account access updated", "app_users", int(selected_user_id), f"{selected_user['email']} -> {role}")
             st.success("Account access updated.")
             st.rerun()
+        st.divider()
+        st.subheader("Reset User Password")
+        with st.form("settings_reset_user_password"):
+            password_user_id = st.selectbox(
+                "Password reset account",
+                user_options,
+                format_func=lambda value: next((f"{user['email']} ({user['username']})" for user in users if user["id"] == value), str(value)),
+            )
+            temp_password = st.text_input("Temporary password", type="password")
+            confirm_temp_password = st.text_input("Confirm temporary password", type="password")
+            reset_password = st.form_submit_button("Set Temporary Password", type="primary")
+        if reset_password:
+            password_user = next((user for user in users if user["id"] == password_user_id), {})
+            if temp_password != confirm_temp_password:
+                st.error("Passwords do not match.")
+            else:
+                ok, message = update_user_password(password_user_id, temp_password)
+                if ok:
+                    log_action("account password reset", "app_users", int(password_user_id), f"{st.session_state.get('user_email')} reset password for {password_user.get('email')}")
+                    st.success(f"{message} Give this temporary password to {password_user.get('email')}.")
+                    st.rerun()
+                st.error(message)
 
 with tabs[5]:
     st.subheader("Managed Account Summary")

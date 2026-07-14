@@ -4,7 +4,7 @@ st.set_page_config(page_title="Admin Controls", layout="wide")
 
 import pandas as pd
 
-from src.auth import auth_storage_status, claim_user_for_manager, list_app_users, release_user_from_manager, update_user_access, update_user_profile, update_user_status
+from src.auth import auth_storage_status, claim_user_for_manager, list_app_users, release_user_from_manager, update_user_access, update_user_password, update_user_profile, update_user_status
 from src.database import log_action
 from src.utils import apply_theme, page_header, require_login, require_page_access, section_header, sidebar_nav
 
@@ -138,6 +138,29 @@ if save_profile:
         st.success(message)
         st.rerun()
     st.error(message)
+
+section_header("Reset User Password", "Set a temporary password when a user cannot access forgot-password recovery.", "yellow")
+with st.form("admin_reset_user_password"):
+    password_user_id = st.selectbox(
+        "Account",
+        user_ids,
+        format_func=lambda value: next((f"{user['email']} ({user['username']})" for user in users if user["id"] == value), str(value)),
+        key="admin_password_reset_user",
+    )
+    temp_password = st.text_input("Temporary password", type="password", key="admin_temp_password")
+    confirm_temp_password = st.text_input("Confirm temporary password", type="password", key="admin_confirm_temp_password")
+    reset_password_submitted = st.form_submit_button("Set Temporary Password", type="primary")
+if reset_password_submitted:
+    password_user = next((user for user in users if user["id"] == password_user_id), {})
+    if temp_password != confirm_temp_password:
+        st.error("Passwords do not match.")
+    else:
+        ok, message = update_user_password(password_user_id, temp_password)
+        if ok:
+            log_action("account password reset", "app_users", int(password_user_id), f"{current_email} reset password for {password_user.get('email')}")
+            st.success(f"{message} Give this temporary password to {password_user.get('email')}.")
+            st.rerun()
+        st.error(message)
 
 section_header("Manager Assignments", "Assign user/admin accounts under a Manager account for roll-up visibility.", "green")
 users = list_app_users()
