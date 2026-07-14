@@ -177,9 +177,27 @@ def _init_db_for_schema(url, schema):
     engine = get_engine(url, schema=schema or None)
     Base.metadata.create_all(engine)
     ensure_undo_table(engine)
+    ensure_performance_indexes(engine)
     ensure_schema_updates(engine)
     seed_core_data()
     return True
+
+
+def ensure_performance_indexes(engine):
+    if engine.dialect.name != "postgresql":
+        return
+    index_statements = [
+        "create index if not exists ix_stores_active_store_number on stores (active, store_number)",
+        "create index if not exists ix_stores_active_city on stores (active, city)",
+        "create index if not exists ix_schedule_items_store_date on schedule_items (store_id, schedule_date desc)",
+        "create index if not exists ix_schedule_items_status_date on schedule_items (status, schedule_date)",
+        "create index if not exists ix_deferred_work_orders_store_status on deferred_work_orders (store_id, status)",
+        "create index if not exists ix_followups_store_status on followups (store_id, status)",
+        "create index if not exists ix_uploaded_files_related on uploaded_files (related_table, related_id)",
+    ]
+    with engine.begin() as conn:
+        for statement in index_statements:
+            conn.execute(text(statement))
 
 
 def ensure_undo_table(engine=None):

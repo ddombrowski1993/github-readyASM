@@ -189,40 +189,50 @@ selected_section = st.radio(
     key="stores_section",
     label_visibility="collapsed",
 )
-stores = safe_query(
-    """
-    select s.id, s.store_number, s.store_name, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
-           p.full_name as assigned_pmt, b.full_name as assigned_brand, c.full_name as assigned_calibration,
-           pt.team_name as pmt_team, bt.team_name as brand_team, ct.team_name as calibration_team,
-           s.store_status, s.priority, s.notes
-    from stores s
-    left join employees p on p.id = s.assigned_pmt_employee_id
-    left join employees b on b.id = s.assigned_brand_employee_id
-    left join employees c on c.id = s.assigned_calibration_employee_id
-    left join teams pt on pt.id = s.assigned_pmt_team_id
-    left join teams bt on bt.id = s.assigned_brand_team_id
-    left join teams ct on ct.id = s.assigned_calibration_team_id
-    where s.active = true
-    order by s.store_number
-    """
-)
 
-city_summary = safe_query(
-    """
-    select trim(city) as city, count(*) as store_count
-    from stores
-    where active = true and nullif(trim(coalesce(city,'')), '') is not null
-    group by trim(city)
-    order by trim(city)
-    """
-)
-missing_city_count = int(
-    safe_query(
+
+def active_store_rows():
+    return safe_query(
+        """
+        select s.id, s.store_number, s.store_name, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
+               p.full_name as assigned_pmt, b.full_name as assigned_brand, c.full_name as assigned_calibration,
+               pt.team_name as pmt_team, bt.team_name as brand_team, ct.team_name as calibration_team,
+               s.store_status, s.priority, s.notes
+        from stores s
+        left join employees p on p.id = s.assigned_pmt_employee_id
+        left join employees b on b.id = s.assigned_brand_employee_id
+        left join employees c on c.id = s.assigned_calibration_employee_id
+        left join teams pt on pt.id = s.assigned_pmt_team_id
+        left join teams bt on bt.id = s.assigned_brand_team_id
+        left join teams ct on ct.id = s.assigned_calibration_team_id
+        where s.active = true
+        order by s.store_number
+        """
+    )
+
+
+def active_store_city_summary():
+    return safe_query(
+        """
+        select trim(city) as city, count(*) as store_count
+        from stores
+        where active = true and nullif(trim(coalesce(city,'')), '') is not null
+        group by trim(city)
+        order by trim(city)
+        """
+    )
+
+
+def missing_city_total():
+    result = safe_query(
         "select count(*) as missing_city_count from stores where active = true and nullif(trim(coalesce(city,'')), '') is null"
-    ).iloc[0]["missing_city_count"]
-)
+    )
+    return int(result.iloc[0]["missing_city_count"]) if not result.empty else 0
 
 if selected_section == "Store List":
+    stores = active_store_rows()
+    city_summary = active_store_city_summary()
+    missing_city_count = missing_city_total()
     if stores.empty:
         st.info("No stores found. Upload stores first, or select a different workspace from the sidebar.")
     c1, c2 = st.columns(2)
@@ -329,7 +339,8 @@ Avoid merged title rows, blank header rows, pivot tables, hidden-only sheets, an
             f"Rows detected: {best['rows']:,}. Columns detected: {best['columns']:,}."
         )
         st.dataframe(mapping_summary(best["mapping"], REQUIRED_FIELDS["stores"]), use_container_width=True, hide_index=True)
-        current_store_numbers = set(stores["store_number"].astype(str).str.strip().tolist()) if not stores.empty else set()
+        active_store_count_df = safe_query("select count(*) as active_store_count from stores where active = true")
+        active_store_count = int(active_store_count_df.iloc[0]["active_store_count"]) if not active_store_count_df.empty else 0
         mapping_options = [""] + incoming.columns.tolist()
         selected_mapping = auto_mapping.copy()
         with st.expander("Advanced Mapping", expanded=needs_mapping):
@@ -383,7 +394,7 @@ Avoid merged title rows, blank header rows, pivot tables, hidden-only sheets, an
         upload_count_cols = st.columns(4)
         upload_count_cols[0].metric("Rows in Upload", f"{summary['rows']:,}")
         upload_count_cols[1].metric("Ready to Import", f"{summary['ready']:,}")
-        upload_count_cols[2].metric("Active Stores Now", len(current_store_numbers))
+        upload_count_cols[2].metric("Active Stores Now", active_store_count)
         with upload_count_cols[3]:
             metric_help_card("Needs Review", f"{summary['needs_review']:,}", "Rows with warnings or mapping/data issues that should be checked before import.")
         st.subheader("Import Preview")
@@ -475,7 +486,23 @@ if selected_section == "Store Details":
         st.info("No store records are available yet. Upload stores before opening store details.")
     selected = st.selectbox("Store", options["id"].tolist() if not options.empty else [], format_func=lambda x: f"{options.set_index('id').loc[x, 'store_number']} - {options.set_index('id').loc[x, 'city']}" if not options.empty else "")
     if selected:
-        detail = stores[stores["id"] == selected]
+        detail = safe_query(
+            """
+            select s.id, s.store_number, s.store_name, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
+                   p.full_name as assigned_pmt, b.full_name as assigned_brand, c.full_name as assigned_calibration,
+                   pt.team_name as pmt_team, bt.team_name as brand_team, ct.team_name as calibration_team,
+                   s.store_status, s.priority, s.notes
+            from stores s
+            left join employees p on p.id = s.assigned_pmt_employee_id
+            left join employees b on b.id = s.assigned_brand_employee_id
+            left join employees c on c.id = s.assigned_calibration_employee_id
+            left join teams pt on pt.id = s.assigned_pmt_team_id
+            left join teams bt on bt.id = s.assigned_brand_team_id
+            left join teams ct on ct.id = s.assigned_calibration_team_id
+            where s.id = :id
+            """,
+            {"id": int(selected)},
+        )
         st.dataframe(detail, use_container_width=True, hide_index=True)
         st.subheader("Open Follow-Ups")
         st.dataframe(safe_query("select * from followups where store_id = :id and status not in ('Completed','Cancelled')", {"id": int(selected)}), use_container_width=True, hide_index=True)
@@ -487,12 +514,15 @@ if selected_section == "Store Details":
         st.dataframe(safe_query("select * from uploaded_files where related_table = 'stores' and related_id = :id", {"id": int(selected)}), use_container_width=True, hide_index=True)
 
 if selected_section == "City Manager":
+    city_summary = active_store_city_summary()
+    missing_city_count = missing_city_total()
     st.subheader("Cities in Store Database")
-    if stores.empty:
+    store_count = int(city_summary["store_count"].sum()) if not city_summary.empty else 0
+    if store_count == 0 and missing_city_count == 0:
         st.info("No stores found. Upload stores with city/state values to use City Manager.")
     m1, m2, m3 = st.columns(3)
     m1.metric("Cities Listed", len(city_summary))
-    m2.metric("Stores With City", int(city_summary["store_count"].sum()) if not city_summary.empty else 0)
+    m2.metric("Stores With City", store_count)
     with m3:
         metric_help_card("Stores Missing City", missing_city_count, "Active stores with blank city. This affects filtering, reports, and assignment cleanup.")
     st.dataframe(city_summary, use_container_width=True, hide_index=True, height=360)
