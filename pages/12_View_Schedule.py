@@ -77,7 +77,6 @@ page_header(
 today = date.today()
 week_default = today - timedelta(days=today.weekday())
 year_end = date(today.year, 12, 31)
-team_df = teams()
 
 
 def weekday_name(value):
@@ -549,6 +548,7 @@ start_filter = c1.date_input("Start date", value=week_default)
 end_filter = c2.date_input("End date", value=week_default + timedelta(days=6))
 status_options = ["All", "Scheduled", "Completed", "Not Completed", "Needs Rescheduled", "Rescheduled", "Skipped", "Cancelled"] if technician_view else ["All", "Scheduled", "Completed", "Not Completed", "Rain Delay", "Needs Rescheduled", "Rescheduled", "Skipped", "Cancelled"]
 status_filter = c3.selectbox("Status", status_options)
+team_df = teams() if not technician_view else pd.DataFrame()
 owner_ids = [None] + team_df["id"].tolist() if not technician_view and not team_df.empty else [None]
 owner_filter = c4.selectbox(
     "Team",
@@ -601,6 +601,7 @@ problems = safe_query(
     )
       {schedule_where}
     order by si.schedule_date desc
+    limit 1000
     """,
 )
 problems = add_schedule_day(problems)

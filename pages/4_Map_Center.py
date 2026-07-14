@@ -2780,7 +2780,6 @@ page_header(
 )
 
 team_df = teams()
-emp_df = active_employees()
 stores_df = stores_query()
 missing_coordinate_stores = stores_df[stores_df[["latitude", "longitude"]].isna().any(axis=1)].copy() if not stores_df.empty else pd.DataFrame()
 
@@ -2828,19 +2827,21 @@ if view_mode == "All Stores Overview":
     o2.metric("Brand Assigned", int(stores_df["assigned_brand_team_id"].notna().sum()) if "assigned_brand_team_id" in stores_df.columns else 0)
     o3.metric("PMT Assigned", int(stores_df["assigned_pmt_employee_id"].notna().sum()) if "assigned_pmt_employee_id" in stores_df.columns else 0)
     o4.metric("Calibration Assigned", int(stores_df["assigned_calibration_team_id"].notna().sum()) if "assigned_calibration_team_id" in stores_df.columns else 0)
-    overview_map, _ = render_area_manager_map(
-        visible_stores,
-        pd.DataFrame(),
-        None,
-        selected_team_id=None,
-        selected_ids=set(),
-        enable_draw=False,
-        key="all_stores_overview_map",
-        teams_df=team_df,
-        team_anchor_stores_df=stores_df,
-    )
-    if overview_map:
-        st.download_button("Export Overview Map", data=map_html(overview_map), file_name="all_stores_overview_map.html")
+    show_overview_map = st.checkbox("Show interactive overview map", value=False, key="show_all_stores_overview_map")
+    if show_overview_map:
+        overview_map, _ = render_area_manager_map(
+            visible_stores,
+            pd.DataFrame(),
+            None,
+            selected_team_id=None,
+            selected_ids=set(),
+            enable_draw=False,
+            key="all_stores_overview_map",
+            teams_df=team_df,
+            team_anchor_stores_df=stores_df,
+        )
+        if overview_map:
+            st.download_button("Export Overview Map", data=map_html(overview_map), file_name="all_stores_overview_map.html")
     if not missing_coordinate_stores.empty:
         with st.expander(f"Stores Missing Coordinates ({len(missing_coordinate_stores)})", expanded=False):
             st.dataframe(missing_coordinate_stores[["store_number", "address", "city", "state", "zip"]], use_container_width=True, hide_index=True)
@@ -3685,18 +3686,23 @@ if selected_group in ("PMT", "Calibration"):
         tech_visible = tech_visible[tech_visible[tech_config["employee_field"]].notna()]
     if search_store.strip():
         tech_visible = tech_visible[tech_visible["store_number"].astype(str).str.contains(search_store.strip(), case=False, na=False)]
-    tech_map, tech_map_data = render_area_manager_map(
-        tech_visible,
-        pd.DataFrame(),
-        selected_group,
-        selected_team_id=None,
-        selected_ids=set(),
-        enable_draw=True,
-        key=f"{selected_group}_assignment_map_{selected_tech_employee or 'all'}_{show_unassigned_tech}_{search_store}",
-        technicians_df=tech_summary,
-    )
-    if tech_map:
-        st.download_button(f"Export {selected_group} Map", data=map_html(tech_map), file_name=f"{selected_group.lower()}_assignment_map.html")
+    show_assignment_map = st.checkbox(f"Show interactive {selected_group} map", value=False, key=f"{selected_group}_show_assignment_map")
+    tech_map_data = {}
+    if show_assignment_map:
+        tech_map, tech_map_data = render_area_manager_map(
+            tech_visible,
+            pd.DataFrame(),
+            selected_group,
+            selected_team_id=None,
+            selected_ids=set(),
+            enable_draw=True,
+            key=f"{selected_group}_assignment_map_{selected_tech_employee or 'all'}_{show_unassigned_tech}_{search_store}",
+            technicians_df=tech_summary,
+        )
+        if tech_map:
+            st.download_button(f"Export {selected_group} Map", data=map_html(tech_map), file_name=f"{selected_group.lower()}_assignment_map.html")
+    else:
+        st.info("Map is hidden for faster page loading. Turn it on when you need map-based editing.")
 
     st.subheader(f"{selected_group} Map-Based Assignment Editing")
     drawings = tech_map_data.get("all_drawings") if tech_map_data else []
@@ -3925,6 +3931,7 @@ st.subheader("Create New Area")
 c1, c2, c3, c4 = st.columns(4)
 new_area_group = c1.selectbox("Group", ["Brand Enhancement", "PMT", "Calibration"], index=["Brand Enhancement", "PMT", "Calibration"].index(selected_group) if selected_group in GROUPS else 0)
 new_area_name = c2.text_input("Area Name", placeholder="Dallas Brand Enhancement")
+emp_df = active_employees()
 tech_options = [None] + emp_df["id"].tolist() if not emp_df.empty else [None]
 tech_1 = c3.selectbox("Technician 1", tech_options, format_func=lambda x: "None" if x is None else emp_df.set_index("id").loc[x, "full_name"], key="new_area_tech_1")
 tech_2 = c4.selectbox("Technician 2 optional", tech_options, format_func=lambda x: "None" if x is None else emp_df.set_index("id").loc[x, "full_name"], key="new_area_tech_2")
@@ -3972,21 +3979,26 @@ if selected_team_id and config:
 
 st.divider()
 st.subheader("Map and Area Editing")
-st.caption("Draw a polygon or rectangle to select stores. Orange dots are inside the current drawing. Red dots are assigned to another area in the same group.")
 map_areas = active_areas(None if view_mode == "All Stores" else selected_group)
-fmap, map_data = render_area_manager_map(
-    visible_stores,
-    map_areas,
-    selected_group,
-    selected_team_id=int(selected_team_id) if selected_team_id else None,
-    selected_ids=selected_store_ids,
-    enable_draw=map_task in ("Create Area", "Edit Selected Area"),
-    key=f"area_manager_{selected_group}_{map_task}_{selected_team_id or 'none'}",
-    teams_df=group_teams,
-    team_anchor_stores_df=stores_df,
-)
-if fmap:
-    st.download_button("Export Map", data=map_html(fmap), file_name="store_area_map.html")
+show_area_editor_map = st.checkbox("Show interactive area map", value=False, key=f"{selected_group}_show_area_editor_map")
+map_data = {}
+if show_area_editor_map:
+    st.caption("Draw a polygon or rectangle to select stores. Orange dots are inside the current drawing. Red dots are assigned to another area in the same group.")
+    fmap, map_data = render_area_manager_map(
+        visible_stores,
+        map_areas,
+        selected_group,
+        selected_team_id=int(selected_team_id) if selected_team_id else None,
+        selected_ids=selected_store_ids,
+        enable_draw=map_task in ("Create Area", "Edit Selected Area"),
+        key=f"area_manager_{selected_group}_{map_task}_{selected_team_id or 'none'}",
+        teams_df=group_teams,
+        team_anchor_stores_df=stores_df,
+    )
+    if fmap:
+        st.download_button("Export Map", data=map_html(fmap), file_name="store_area_map.html")
+else:
+    st.info("Map is hidden for faster page loading. Turn it on when you need drawing-based area editing.")
 
 drawings = map_data.get("all_drawings") if map_data else []
 draw_selected = stores_within_drawings(visible_stores, drawings, close_lines_as_areas=True) if drawings else pd.DataFrame()

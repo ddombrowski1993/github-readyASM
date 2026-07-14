@@ -189,11 +189,20 @@ def ensure_performance_indexes(engine):
     index_statements = [
         "create index if not exists ix_stores_active_store_number on stores (active, store_number)",
         "create index if not exists ix_stores_active_city on stores (active, city)",
+        "create index if not exists ix_stores_active_brand_team on stores (active, assigned_brand_team_id)",
+        "create index if not exists ix_stores_active_pmt_employee on stores (active, assigned_pmt_employee_id)",
+        "create index if not exists ix_stores_active_calibration_employee on stores (active, assigned_calibration_employee_id)",
+        "create index if not exists ix_stores_active_calibration_team on stores (active, assigned_calibration_team_id)",
         "create index if not exists ix_schedule_items_store_date on schedule_items (store_id, schedule_date desc)",
         "create index if not exists ix_schedule_items_status_date on schedule_items (status, schedule_date)",
+        "create index if not exists ix_schedule_items_work_date_status on schedule_items (work_type, schedule_date, status)",
+        "create index if not exists ix_schedule_items_employee_work_status on schedule_items (employee_id, work_type, status)",
+        "create index if not exists ix_schedule_items_team_work_date on schedule_items (team_id, work_type, schedule_date)",
         "create index if not exists ix_deferred_work_orders_store_status on deferred_work_orders (store_id, status)",
         "create index if not exists ix_followups_store_status on followups (store_id, status)",
         "create index if not exists ix_uploaded_files_related on uploaded_files (related_table, related_id)",
+        "create index if not exists ix_map_areas_active_type_team on map_areas (active, area_type, team_id)",
+        "create index if not exists ix_employees_active_role_name on employees (active, role, full_name)",
     ]
     with engine.begin() as conn:
         for statement in index_statements:
