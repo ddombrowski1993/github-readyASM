@@ -7,7 +7,7 @@ import streamlit as st
 st.set_page_config(page_title="Brand Enhancement Scheduler", layout="wide")
 
 
-from src.database import log_action, safe_query, session_scope, teams
+from src.database import log_action, safe_query, session_scope, teams_for_work_group
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.exports import excel_bytes
 from src.maps import map_html, render_plain_table, render_route_preview, render_store_map
@@ -708,8 +708,7 @@ if is_all_managed_view():
         st.dataframe(_be_breakdown, use_container_width=True, hide_index=True)
     st.stop()
 
-team_df = teams()
-brand_team_df = team_df[team_df["team_type"].isin(["Brand Enhancement", "Other"])] if not team_df.empty else team_df
+brand_team_df = teams_for_work_group("Brand Enhancement")
 today = date.today()
 work_type = "Brand Enhancement"
 default_schedule_start = next_or_same_schedule_workday(today, ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])

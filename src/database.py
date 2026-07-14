@@ -529,6 +529,39 @@ def teams(active_only=True):
     return safe_query(f"select id, team_name, team_type, city, state, active from teams {where} order by team_name")
 
 
+def teams_for_work_group(group, active_only=True):
+    assignment_fields = {
+        "Brand Enhancement": "assigned_brand_team_id",
+        "PMT": "assigned_pmt_team_id",
+        "Calibration": "assigned_calibration_team_id",
+    }
+    assignment_field = assignment_fields.get(group)
+    if not assignment_field:
+        return teams(active_only=active_only)
+    active_filter = "t.active = true and" if active_only else ""
+    return safe_query(
+        f"""
+        select distinct t.id, t.team_name, t.team_type, t.city, t.state, t.active
+        from teams t
+        where {active_filter}
+          (
+            t.team_type = :group
+            or (
+              coalesce(t.team_type, '') in ('', 'Other')
+              and exists (
+                select 1
+                from stores s
+                where s.active = true
+                  and s.{assignment_field} = t.id
+              )
+            )
+          )
+        order by t.team_name
+        """,
+        {"group": group},
+    )
+
+
 def stores_for_select():
     return safe_query("select id, store_number, address, city, state from stores where active = true order by store_number")
 

@@ -7,7 +7,7 @@ import streamlit as st
 st.set_page_config(page_title="Employees", layout="wide")
 
 from src.auth import claim_user_for_manager, list_app_users, release_user_from_manager
-from src.database import active_employees, log_action, safe_query, session_scope, teams
+from src.database import active_employees, log_action, safe_query, session_scope, teams, teams_for_work_group
 from src.exports import download_table, excel_bytes
 from src.geocoding import geocode_address
 from src.imports import import_employees, sample_employee_template
@@ -366,7 +366,6 @@ with tab_list:
                 st.rerun()
 
 with tab_add:
-    team_df = teams()
     section_header("Basic Employee Info", "Select the employee's role first. The form will only show fields needed for that role.")
     c1, c2, c3 = st.columns(3)
     first = c1.text_input("First name")
@@ -377,7 +376,7 @@ with tab_add:
     team_id = None
     if role == "Brand Enhancement":
         st.info("Brand Enhancement employees can be assigned to a team.")
-        brand_teams = team_df[team_df["team_type"].isin(["Brand Enhancement", "Other"])] if not team_df.empty else team_df
+        brand_teams = teams_for_work_group("Brand Enhancement")
         team_id = c5.selectbox(
             "Team",
             [None] + brand_teams["id"].tolist() if not brand_teams.empty else [None],
