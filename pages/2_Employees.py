@@ -329,6 +329,21 @@ with tab_list:
             format_func=lambda x: coord_df.set_index("id").loc[x, "full_name"],
             key="employee_geocode_id",
         )
+        selected_for_manual = coord_df.set_index("id").loc[fix_id]
+        manual_cols = st.columns([0.25, 0.25, 0.5])
+        manual_lat = manual_cols[0].number_input("Latitude", value=0.0, format="%.6f", key="employee_manual_home_lat")
+        manual_lon = manual_cols[1].number_input("Longitude", value=0.0, format="%.6f", key="employee_manual_home_lon")
+        if manual_cols[2].button("Save Manual Coordinates", type="secondary"):
+            if manual_lat == 0.0 and manual_lon == 0.0:
+                st.warning("Enter latitude and longitude before saving manual coordinates.")
+            else:
+                with session_scope() as session:
+                    emp = session.get(Employee, int(fix_id))
+                    if emp:
+                        emp.home_latitude = float(manual_lat)
+                        emp.home_longitude = float(manual_lon)
+                st.success(f"Saved manual coordinates for {selected_for_manual['full_name']}.")
+                st.rerun()
         if st.button("Find Coordinates From Home Address", type="secondary"):
             selected = coord_df.set_index("id").loc[fix_id]
             diagnostics = []
