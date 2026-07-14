@@ -88,14 +88,17 @@ with tabs[0]:
 
     coverage = safe_query(
         """
-        select s.id, s.store_number, s.address, s.city, s.state,
-               max(case when sv.status = 'Completed' then sv.visit_date end) as last_completed_visit,
-               min(case when sv.status = 'Planned' and sv.scheduled_date >= :today then sv.scheduled_date end) as next_planned_visit
-        from stores s
-        left join site_visits sv on sv.store_id = s.id
-        where s.active = true
-        group by s.id, s.store_number, s.address, s.city, s.state
-        order by (last_completed_visit is not null), last_completed_visit, s.store_number
+        select *
+        from (
+            select s.id, s.store_number, s.address, s.city, s.state,
+                   max(case when sv.status = 'Completed' then sv.visit_date end) as last_completed_visit,
+                   min(case when sv.status = 'Planned' and sv.scheduled_date >= :today then sv.scheduled_date end) as next_planned_visit
+            from stores s
+            left join site_visits sv on sv.store_id = s.id
+            where s.active = true
+            group by s.id, s.store_number, s.address, s.city, s.state
+        ) coverage
+        order by (coverage.last_completed_visit is not null), coverage.last_completed_visit, coverage.store_number
         """,
         {"today": today},
     )
