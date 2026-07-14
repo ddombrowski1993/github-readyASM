@@ -832,7 +832,43 @@ def sidebar_nav():
         account for account in accounts
         if account.get("manager_user_id") == st.session_state.get("user_id")
     ]
-    if account_role == "Manager" and managed_accounts:
+    if account_role == "Admin" and accounts:
+        active_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
+        if not can_access_account_slug(active_slug):
+            active_slug = st.session_state.get("account_slug")
+        own_slug = st.session_state.get("account_slug")
+        account_slugs = [account["account_slug"] for account in accounts]
+        account_labels = {
+            account["account_slug"]: "My Workspace" if account["account_slug"] == own_slug else f"{account['first_name']} {account['last_name']}".strip() or account["email"]
+            for account in accounts
+        }
+        st.sidebar.markdown("**Admin Impersonate Account**")
+        selected_slug = st.sidebar.selectbox(
+            "View account workspace",
+            account_slugs,
+            index=account_slugs.index(active_slug) if active_slug in account_slugs else 0,
+            format_func=lambda slug: account_labels.get(slug, slug),
+            key="admin_impersonate_workspace_selector",
+        )
+        if selected_slug != st.session_state.get("active_account_slug"):
+            clear_workspace_transient_state()
+            st.session_state["manager_rollup_active"] = False
+            st.session_state["active_account_slug"] = selected_slug
+            st.session_state["active_account_label"] = account_labels.get(selected_slug, selected_slug)
+            st.cache_resource.clear()
+            st.rerun()
+        if selected_slug != own_slug:
+            st.sidebar.warning(f"Viewing as: {account_labels.get(selected_slug, selected_slug)}")
+            if st.sidebar.button("Return to My Workspace", key="admin_stop_impersonating"):
+                clear_workspace_transient_state()
+                st.session_state["manager_rollup_active"] = False
+                st.session_state["active_account_slug"] = own_slug
+                st.session_state["active_account_label"] = "My Workspace"
+                st.cache_resource.clear()
+                st.rerun()
+        else:
+            st.sidebar.caption("Viewing your own workspace.")
+    elif account_role == "Manager" and managed_accounts:
         current_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
         options = ["__manager_rollup__"] + [account["account_slug"] for account in accounts]
         own_slug = st.session_state.get("account_slug")
