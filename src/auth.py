@@ -224,6 +224,14 @@ def _rows_dict(rows):
     return [dict(row._mapping) for row in rows]
 
 
+def _login_match_clause(column_name):
+    return f"lower(trim(coalesce({column_name}, ''))) = lower(trim(:login))"
+
+
+def _email_match_clause(column_name):
+    return f"lower(trim(coalesce({column_name}, ''))) = lower(trim(:email))"
+
+
 def _verify_database_identity(engine):
     if not using_hosted_database():
         return
@@ -359,7 +367,7 @@ def init_auth_db():
                     f"""
                 update {users_table}
                 set account_role = 'Admin', active = 1
-                where lower(email) = lower(:email)
+                where lower(trim(coalesce(email, ''))) = lower(trim(:email))
                 """,
                 ),
                 {"email": "daniel.dombrowski@7-11.com"},
@@ -506,12 +514,12 @@ def create_user(
     users_table = _public_table("app_users")
     with engine.begin() as conn:
         existing = conn.execute(
-            text(f"select 1 from {users_table} where lower(username) = lower(:username)"),
+            text(f"select 1 from {users_table} where lower(trim(coalesce(username, ''))) = lower(trim(:username))"),
             {"username": username},
         ).fetchone()
         if existing:
             return False, "That username already exists."
-        existing_email = conn.execute(text(f"select 1 from {users_table} where lower(email) = lower(:email)"), {"email": email}).fetchone()
+        existing_email = conn.execute(text(f"select 1 from {users_table} where {_email_match_clause('email')}"), {"email": email}).fetchone()
         if existing_email:
             return False, "That email address already has an account."
         existing_s = conn.execute(text(f"select 1 from {users_table} where upper(coalesce(s_number, '')) = upper(:s_number)"), {"s_number": s_number}).fetchone()
@@ -636,8 +644,8 @@ def authenticate(username, password):
                 f"""
             select *
             from {users_table}
-            where lower(username) = lower(:login)
-               or lower(email) = lower(:login)
+            where {_login_match_clause('username')}
+               or {_login_match_clause('email')}
             """,
             ),
             {"login": login},
@@ -818,7 +826,7 @@ def find_user_by_email(email):
     users_table = _public_table("app_users")
     with _engine().connect() as conn:
         user = conn.execute(
-            text(f"select * from {users_table} where lower(email) = lower(:email)"),
+            text(f"select * from {users_table} where {_email_match_clause('email')}"),
             {"email": email.strip()},
         ).fetchone()
     return _row_dict(user)
