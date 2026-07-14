@@ -2326,12 +2326,13 @@ with tab_build:
         if not missing_home.empty:
             with st.expander("Enter Missing Technician Home Coordinates", expanded=True):
                 st.caption("Use address lookup for exact home coordinates. If it cannot find the street, use City/ZIP Estimate so the PMT scheduler can keep moving.")
+                editor_ids = "_".join(str(int(value)) for value in sorted(missing_home["employee_id"].dropna().unique()))
                 edits = st.data_editor(
                     missing_home[["employee_id", "technician_name", "home_address", "home_city", "home_state", "home_zip", "home_latitude", "home_longitude"]],
                     use_container_width=True,
                     hide_index=True,
                     disabled=["employee_id", "technician_name"],
-                    key="pmt_home_coord_editor",
+                    key=f"pmt_home_coord_editor_{editor_ids}",
                 )
                 geo_col, estimate_col, save_col = st.columns(3)
                 if geo_col.button("Find Coordinates From Address", type="primary"):
@@ -2340,6 +2341,11 @@ with tab_build:
                     found_details = []
                     with session_scope() as session:
                         for _, row in edits.iterrows():
+                            employee = session.get(Employee, int(row["employee_id"]))
+                            if not employee:
+                                continue
+                            if employee.home_latitude is not None and employee.home_longitude is not None:
+                                continue
                             if to_float(row.get("home_latitude")) is not None and to_float(row.get("home_longitude")) is not None:
                                 continue
                             result = geocode_address(
@@ -2367,22 +2373,20 @@ with tab_build:
                                     }
                                 )
                                 continue
-                            employee = session.get(Employee, int(row["employee_id"]))
-                            if employee:
-                                employee.home_address = clean(row.get("home_address", "")) or employee.home_address
-                                employee.home_city = clean(row.get("home_city", "")) or employee.home_city
-                                employee.home_state = clean(row.get("home_state", "")) or employee.home_state
-                                employee.home_zip = clean(row.get("home_zip", "")) or employee.home_zip
-                                employee.home_latitude = float(result["latitude"])
-                                employee.home_longitude = float(result["longitude"])
-                                found += 1
-                                found_details.append(
-                                    {
-                                        "Technician": row["technician_name"],
-                                        "Match": result.get("match_quality", "Address match"),
-                                        "Found Location": result.get("display_name", ""),
-                                    }
-                                )
+                            employee.home_address = clean(row.get("home_address", "")) or employee.home_address
+                            employee.home_city = clean(row.get("home_city", "")) or employee.home_city
+                            employee.home_state = clean(row.get("home_state", "")) or employee.home_state
+                            employee.home_zip = clean(row.get("home_zip", "")) or employee.home_zip
+                            employee.home_latitude = float(result["latitude"])
+                            employee.home_longitude = float(result["longitude"])
+                            found += 1
+                            found_details.append(
+                                {
+                                    "Technician": row["technician_name"],
+                                    "Match": result.get("match_quality", "Address match"),
+                                    "Found Location": result.get("display_name", ""),
+                                }
+                            )
                             time.sleep(1)
                     if found:
                         st.success(f"Found and saved coordinates for {found} technician(s).")
@@ -2398,6 +2402,11 @@ with tab_build:
                     estimated_details = []
                     with session_scope() as session:
                         for _, row in edits.iterrows():
+                            employee = session.get(Employee, int(row["employee_id"]))
+                            if not employee:
+                                continue
+                            if employee.home_latitude is not None and employee.home_longitude is not None:
+                                continue
                             if to_float(row.get("home_latitude")) is not None and to_float(row.get("home_longitude")) is not None:
                                 continue
                             result = local_coordinate_estimate(
@@ -2415,23 +2424,21 @@ with tab_build:
                                     }
                                 )
                                 continue
-                            employee = session.get(Employee, int(row["employee_id"]))
-                            if employee:
-                                employee.home_address = clean(row.get("home_address", "")) or employee.home_address
-                                employee.home_city = clean(row.get("home_city", "")) or employee.home_city
-                                employee.home_state = clean(row.get("home_state", "")) or employee.home_state
-                                employee.home_zip = clean(row.get("home_zip", "")) or employee.home_zip
-                                employee.home_latitude = float(result["latitude"])
-                                employee.home_longitude = float(result["longitude"])
-                                estimated += 1
-                                estimated_details.append(
-                                    {
-                                        "Technician": row["technician_name"],
-                                        "Estimate Used": result.get("display_name", ""),
-                                        "Latitude": result["latitude"],
-                                        "Longitude": result["longitude"],
-                                    }
-                                )
+                            employee.home_address = clean(row.get("home_address", "")) or employee.home_address
+                            employee.home_city = clean(row.get("home_city", "")) or employee.home_city
+                            employee.home_state = clean(row.get("home_state", "")) or employee.home_state
+                            employee.home_zip = clean(row.get("home_zip", "")) or employee.home_zip
+                            employee.home_latitude = float(result["latitude"])
+                            employee.home_longitude = float(result["longitude"])
+                            estimated += 1
+                            estimated_details.append(
+                                {
+                                    "Technician": row["technician_name"],
+                                    "Estimate Used": result.get("display_name", ""),
+                                    "Latitude": result["latitude"],
+                                    "Longitude": result["longitude"],
+                                }
+                            )
                     if estimated:
                         st.success(f"Saved city/ZIP coordinate estimates for {estimated} technician(s).")
                         st.dataframe(pd.DataFrame(estimated_details), use_container_width=True, hide_index=True)
