@@ -59,10 +59,14 @@ def using_sqlite():
     return is_sqlite_url(configured_database_url()) and allow_local_sqlite()
 
 
-@st.cache_resource(show_spinner=False)
 def get_engine(url=None, schema=None):
     url = url or get_database_url()
     schema = schema if schema is not None else current_account_schema()
+    return _get_engine(url, schema or "")
+
+
+@st.cache_resource(show_spinner=False)
+def _get_engine(url, schema):
     engine = create_engine(url, pool_pre_ping=True, future=True, connect_args={})
     if schema and url.startswith("postgresql"):
         quoted_schema = _quote_identifier(schema)

@@ -203,7 +203,7 @@ def brand_weather_team_query():
     return """
         select distinct t.id, t.team_name, t.team_type, t.city, t.state, t.active
         from teams t
-        where t.active = 1
+        where t.active is true
           and (
             t.team_type = 'Brand Enhancement'
             or (
@@ -211,7 +211,7 @@ def brand_weather_team_query():
               and exists (
                 select 1
                 from stores s
-                where s.active = 1
+                where s.active is true
                   and s.assigned_brand_team_id = t.id
               )
             )

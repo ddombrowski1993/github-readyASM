@@ -93,8 +93,9 @@ def followup_existing_values(column_name):
 
 
 def followup_custom_options(option_type, active_only=True):
-    status_filter = "and active = 1" if active_only else ""
-    return safe_query(
+    expected_columns = ["id", "option_type", "option_value", "active", "notes"]
+    status_filter = "and active is true" if active_only else ""
+    df = safe_query(
         f"""
         select id, option_type, option_value, active, notes
         from followup_options
@@ -103,6 +104,10 @@ def followup_custom_options(option_type, active_only=True):
         """,
         {"option_type": option_type},
     )
+    for column in expected_columns:
+        if column not in df.columns:
+            df[column] = pd.Series(dtype="object")
+    return df[expected_columns]
 
 
 def followup_dropdown_options(option_type, include_blank=False):
