@@ -629,6 +629,19 @@ WORKSPACE_TRANSIENT_KEYS = {
 }
 WORKSPACE_TRANSIENT_PREFIXES = (
     "auto_assign_",
+    "be_",
+    "pmt_",
+    "calibration_",
+    "site_visit_",
+    "store_list_",
+    "missing_city_",
+    "map_",
+    "new_area_",
+    "target_area",
+    "manual_store",
+    "preview_",
+    "rename_team_",
+    "delete_team_",
 )
 
 
@@ -636,6 +649,18 @@ def clear_workspace_transient_state():
     for key in list(st.session_state.keys()):
         if key in WORKSPACE_TRANSIENT_KEYS or any(key.startswith(prefix) for prefix in WORKSPACE_TRANSIENT_PREFIXES):
             st.session_state.pop(key, None)
+
+
+def switch_workspace(account_slug, account_label, manager_rollup_active=False, selector_key=None):
+    clear_workspace_transient_state()
+    st.session_state["manager_rollup_active"] = bool(manager_rollup_active)
+    st.session_state["active_account_slug"] = account_slug
+    st.session_state["active_account_label"] = account_label
+    if selector_key:
+        st.session_state[selector_key] = account_slug
+    st.cache_resource.clear()
+    st.cache_data.clear()
+    st.rerun()
 
 
 PAGE_PERMISSIONS = {
@@ -817,6 +842,7 @@ def sidebar_nav():
         if st.sidebar.button("Sign out", type="secondary"):
             sign_out()
             st.cache_resource.clear()
+            st.cache_data.clear()
             if hasattr(st, "switch_page"):
                 st.switch_page("app.py")
             st.rerun()
@@ -848,13 +874,7 @@ def sidebar_nav():
         if active_slug != own_slug:
             st.sidebar.warning(f"Viewing as: {account_labels.get(active_slug, active_slug)}")
             if st.sidebar.button("Return to My Workspace", key="admin_stop_impersonating"):
-                clear_workspace_transient_state()
-                st.session_state["manager_rollup_active"] = False
-                st.session_state["active_account_slug"] = own_slug
-                st.session_state["active_account_label"] = "My Workspace"
-                st.session_state["admin_impersonate_workspace_selector"] = own_slug
-                st.cache_resource.clear()
-                st.rerun()
+                switch_workspace(own_slug, "My Workspace", selector_key="admin_impersonate_workspace_selector")
         else:
             st.sidebar.caption("Viewing your own workspace.")
         selected_slug = st.sidebar.selectbox(
@@ -865,12 +885,7 @@ def sidebar_nav():
             key="admin_impersonate_workspace_selector",
         )
         if selected_slug != st.session_state.get("active_account_slug"):
-            clear_workspace_transient_state()
-            st.session_state["manager_rollup_active"] = False
-            st.session_state["active_account_slug"] = selected_slug
-            st.session_state["active_account_label"] = account_labels.get(selected_slug, selected_slug)
-            st.cache_resource.clear()
-            st.rerun()
+            switch_workspace(selected_slug, account_labels.get(selected_slug, selected_slug), selector_key="admin_impersonate_workspace_selector")
     elif account_role == "Manager" and managed_accounts:
         current_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
         options = ["__manager_rollup__"] + [account["account_slug"] for account in accounts]
@@ -892,23 +907,13 @@ def sidebar_nav():
         )
         if selected_slug == "__manager_rollup__":
             if not st.session_state.get("manager_rollup_active"):
-                clear_workspace_transient_state()
-                st.session_state["manager_rollup_active"] = True
-                st.session_state["active_account_slug"] = st.session_state.get("account_slug")
-                st.session_state["active_account_label"] = "All Managed Users"
-                st.cache_resource.clear()
-                st.rerun()
+                switch_workspace(st.session_state.get("account_slug"), "All Managed Users", manager_rollup_active=True)
             st.session_state["active_account_slug"] = st.session_state.get("account_slug")
             st.session_state["active_account_label"] = "All Managed Users"
             st.session_state["manager_rollup_active"] = True
         else:
             if selected_slug != current_slug or st.session_state.get("manager_rollup_active"):
-                clear_workspace_transient_state()
-                st.session_state["manager_rollup_active"] = False
-                st.session_state["active_account_slug"] = selected_slug
-                st.session_state["active_account_label"] = account_labels.get(selected_slug, selected_slug)
-                st.cache_resource.clear()
-                st.rerun()
+                switch_workspace(selected_slug, account_labels.get(selected_slug, selected_slug), selector_key="sidebar_workspace_selector")
     elif len(accounts) > 1:
         active_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
         if not can_access_account_slug(active_slug):
@@ -926,18 +931,16 @@ def sidebar_nav():
             key="sidebar_workspace_selector",
         )
         if selected_slug != st.session_state.get("active_account_slug"):
-            clear_workspace_transient_state()
-            st.session_state["manager_rollup_active"] = False
-            st.session_state["active_account_slug"] = selected_slug
-            st.session_state["active_account_label"] = account_labels.get(selected_slug, selected_slug)
-            st.cache_resource.clear()
-            st.rerun()
+            switch_workspace(selected_slug, account_labels.get(selected_slug, selected_slug), selector_key="sidebar_workspace_selector")
     elif accounts:
         if accounts[0]["account_slug"] != st.session_state.get("active_account_slug"):
             clear_workspace_transient_state()
         st.session_state["active_account_slug"] = accounts[0]["account_slug"]
         st.session_state["active_account_label"] = f"{accounts[0]['first_name']} {accounts[0]['last_name']}".strip() or accounts[0]["email"]
         st.session_state["manager_rollup_active"] = False
+    active_workspace_label = st.session_state.get("active_account_label") or st.session_state.get("active_account_slug") or "Current workspace"
+    if account_role in ("Admin", "Manager"):
+        st.sidebar.caption(f"Active workspace: {active_workspace_label}")
     st.sidebar.markdown('<div class="sidebar-group home"><div class="sidebar-section-title">Home</div></div>', unsafe_allow_html=True)
     st.sidebar.page_link("app.py", label="Dashboard")
     st.sidebar.markdown('<div class="sidebar-group operations"><div class="sidebar-section-title">Main Operations</div></div>', unsafe_allow_html=True)
