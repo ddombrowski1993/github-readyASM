@@ -19,6 +19,7 @@ from src.auth import (
     update_user_access,
     update_user_profile,
 )
+from src.city_anchors import city_anchor_index, city_anchor_rows
 from src.database import apply_automatic_schedule_completion, get_database_status, get_engine, init_db, log_action, safe_query, session_scope
 from src.geocoding import geocode_address
 from src.imports import import_employees, import_stores, sample_employee_template, sample_store_template
@@ -347,7 +348,13 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("City Anchors")
     st.caption("Auto Assign uses these city/state centers when a team anchor is a city instead of an exact street address.")
+    city_anchor_rows.cache_clear()
+    city_anchor_index.cache_clear()
     anchors = all_anchor_rows()
+    state_counts = anchors.groupby("state").size().reset_index(name="anchors").sort_values("state") if not anchors.empty else pd.DataFrame()
+    if not state_counts.empty:
+        with st.expander("Anchor Counts By State", expanded=False):
+            st.dataframe(state_counts, use_container_width=True, hide_index=True)
     a1, a2, a3 = st.columns([0.45, 0.20, 0.35])
     anchor_search = a1.text_input("Search city", key="anchor_search")
     state_filter = a2.text_input("State", max_chars=2, key="anchor_state_filter")
@@ -364,7 +371,7 @@ with tabs[3]:
         use_container_width=True,
         hide_index=True,
     )
-    st.caption(f"Showing {min(len(filtered_anchors), 500)} of {len(anchors)} active anchors. Custom anchors override built-in anchors for the same city/state.")
+    st.caption(f"Showing {min(len(filtered_anchors), 500)} of {len(filtered_anchors)} filtered anchors. Total active anchors: {len(anchors)}. Custom anchors override built-in anchors for the same city/state.")
 
     st.markdown("#### Check or Find an Anchor")
     c1, c2, c3 = st.columns([0.45, 0.15, 0.40])
