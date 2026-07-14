@@ -1595,6 +1595,12 @@ def create_or_update_technician_profile(role, full_name, employee_number="", pho
     clean_name = clean_person_name(full_name)
     if not clean_name:
         return False, "Enter the technician name."
+    save_home_latitude = None
+    save_home_longitude = None
+    if home_latitude is not None and home_longitude is not None and (float(home_latitude) != 0 or float(home_longitude) != 0):
+        save_home_latitude = float(home_latitude)
+        save_home_longitude = float(home_longitude)
+    geocode_notes = []
     with session_scope() as session:
         employee = None
         number = clean_person_name(employee_number)
@@ -1639,9 +1645,21 @@ def create_or_update_technician_profile(role, full_name, employee_number="", pho
             employee.base_city = clean_person_name(base_city)
         if base_state:
             employee.base_state = clean_person_name(base_state).upper()[:2]
-        if home_latitude is not None and home_longitude is not None and (float(home_latitude) != 0 or float(home_longitude) != 0):
-            employee.home_latitude = float(home_latitude)
-            employee.home_longitude = float(home_longitude)
+        if save_home_latitude is not None and save_home_longitude is not None:
+            employee.home_latitude = save_home_latitude
+            employee.home_longitude = save_home_longitude
+        elif employee.home_latitude is None or employee.home_longitude is None:
+            result, quality = geocode_home_or_city(employee)
+            if result:
+                employee.home_latitude = float(result["latitude"])
+                employee.home_longitude = float(result["longitude"])
+                geocode_notes.append(f"home coordinates found from {quality}")
+        if (employee.base_latitude is None or employee.base_longitude is None) and employee.base_city and employee.base_state:
+            base_result = geocode_address("", employee.base_city, employee.base_state, "")
+            if base_result:
+                employee.base_latitude = float(base_result["latitude"])
+                employee.base_longitude = float(base_result["longitude"])
+                geocode_notes.append(f"main city coordinates found from {base_result.get('match_quality', 'City estimate')}")
         if role == "PMT":
             ensure_technician_team(session, employee, role)
     location_parts = []
@@ -1650,7 +1668,8 @@ def create_or_update_technician_profile(role, full_name, employee_number="", pho
     if base_city or base_state:
         location_parts.append(f"base {clean_person_name(base_city)} {clean_person_name(base_state).upper()[:2]}".strip())
     location_text = f" Saved {'; '.join(location_parts)}." if location_parts else ""
-    return True, f"{'Created' if created else 'Updated'} {role} technician {clean_name}.{location_text}"
+    geocode_text = f" {'; '.join(geocode_notes).capitalize()}." if geocode_notes else ""
+    return True, f"{'Created' if created else 'Updated'} {role} technician {clean_name}.{location_text}{geocode_text}"
 
 
 def remove_or_deactivate_technician(employee_id, role, employee_field, team_field):
