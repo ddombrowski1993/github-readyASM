@@ -1397,6 +1397,34 @@ def stores_for_team(stores_df, group, team_id):
     return stores_df[stores_df[config["team_field"]] == team_id].copy()
 
 
+def teams_for_group(team_df, stores_df, group):
+    if team_df.empty or not group:
+        return team_df
+    typed = team_df[team_df["team_type"] == group].copy()
+    legacy = team_df[team_df["team_type"].fillna("").isin(["", "Other"])].copy()
+    if legacy.empty:
+        return typed
+    config = group_config(group)
+    if not config or stores_df.empty or config["team_field"] not in stores_df.columns:
+        return typed
+    assigned_legacy_ids = set(stores_df[config["team_field"]].dropna().astype(int).tolist())
+    legacy = legacy[legacy["id"].astype(int).isin(assigned_legacy_ids)]
+    return pd.concat([typed, legacy], ignore_index=True).drop_duplicates(subset=["id"]).sort_values("team_name")
+
+
+def employees_for_group(group):
+    employee_df = active_employees()
+    if employee_df.empty or not group or "role" not in employee_df.columns:
+        return employee_df
+    role_patterns = {
+        "Brand Enhancement": ["brand enhancement", "brand technician", "assigned brand", "afm"],
+        "PMT": ["pmt", "pmt technician", "pm technician", "preventive maintenance technician", "preventative maintenance technician"],
+        "Calibration": ["calibration", "calibration technician", "cal tech", "calibration tech"],
+    }.get(group, [str(group).strip().lower()])
+    roles = employee_df["role"].fillna("").astype(str).str.strip().str.lower()
+    return employee_df[roles.isin(role_patterns)].copy()
+
+
 def pmt_assignment_export(stores_df):
     if stores_df.empty:
         return stores_df.iloc[0:0].copy()
@@ -2807,7 +2835,7 @@ view_mode = control_cols[0].selectbox("Select Work Group View", ["All Stores Ove
 selected_group = None if view_mode == "All Stores Overview" else view_mode
 config = group_config(selected_group)
 if selected_group:
-    group_teams = team_df[team_df["team_type"].isin([selected_group, "Other"])] if not team_df.empty else team_df
+    group_teams = teams_for_group(team_df, stores_df, selected_group)
     current_area_id = control_cols[1].selectbox(
         "Selected Team / Area",
         [None] + group_teams["id"].tolist() if not group_teams.empty else [None],
@@ -3943,7 +3971,7 @@ st.subheader("Create New Area")
 c1, c2, c3, c4 = st.columns(4)
 new_area_group = c1.selectbox("Group", ["Brand Enhancement", "PMT", "Calibration"], index=["Brand Enhancement", "PMT", "Calibration"].index(selected_group) if selected_group in GROUPS else 0)
 new_area_name = c2.text_input("Area Name", placeholder="Dallas Brand Enhancement")
-emp_df = active_employees()
+emp_df = employees_for_group(new_area_group)
 tech_options = [None] + emp_df["id"].tolist() if not emp_df.empty else [None]
 tech_1 = c3.selectbox("Technician 1", tech_options, format_func=lambda x: "None" if x is None else emp_df.set_index("id").loc[x, "full_name"], key="new_area_tech_1")
 tech_2 = c4.selectbox("Technician 2 optional", tech_options, format_func=lambda x: "None" if x is None else emp_df.set_index("id").loc[x, "full_name"], key="new_area_tech_2")
@@ -4086,7 +4114,7 @@ if auto_group == "Calibration":
         touched = sync_calibration_technician_areas()
         st.success(f"Prepared {touched} Calibration technician area(s). Use Preview Auto Assign to split stores across them.")
         st.rerun()
-auto_teams = team_df[team_df["team_type"].isin([auto_group, "Other"])] if not team_df.empty else team_df
+auto_teams = teams_for_group(team_df, stores_df, auto_group)
 included_team_ids = auto_cols[1].multiselect("Teams to include", auto_teams["id"].tolist() if not auto_teams.empty else [], default=auto_teams["id"].tolist() if not auto_teams.empty else [], format_func=lambda x: auto_teams.set_index("id").loc[x, "team_name"] if not auto_teams.empty else "")
 selected_auto_teams = auto_teams[auto_teams["id"].isin(included_team_ids)] if not auto_teams.empty else auto_teams
 anchor_issues = auto_assign_anchor_issues(selected_auto_teams, stores_df)
