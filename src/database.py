@@ -90,7 +90,12 @@ def ensure_workspace_schema():
     schema = current_account_schema()
     if not schema or not using_hosted_database():
         return None
-    engine = get_engine(get_database_url(), schema="")
+    return _ensure_workspace_schema(get_database_url(), schema)
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_workspace_schema(url, schema):
+    engine = get_engine(url, schema="")
     with engine.begin() as conn:
         conn.execute(text(f"create schema if not exists {_quote_identifier(schema)}"))
     return schema
@@ -163,7 +168,13 @@ FIELD_PLANNER_DATABASE_INSTANCE_ID = "your-stable-production-id"
 
 def init_db():
     schema = ensure_workspace_schema()
-    engine = get_engine(get_database_url(), schema=schema)
+    _init_db_for_schema(get_database_url(), schema or "")
+    return True
+
+
+@st.cache_resource(show_spinner=False)
+def _init_db_for_schema(url, schema):
+    engine = get_engine(url, schema=schema or None)
     Base.metadata.create_all(engine)
     ensure_undo_table(engine)
     ensure_schema_updates(engine)
@@ -421,6 +432,9 @@ def log_action(action_type, table_name=None, record_id=None, description=""):
 def apply_automatic_schedule_completion():
     """Mark normal past scheduled work completed without showing a separate user-facing status."""
     today = date.today()
+    run_key = f"_auto_schedule_completion_{current_account_schema() or 'local'}_{today.isoformat()}"
+    if st.session_state.get(run_key):
+        return 0
     current_month_start = date(today.year, today.month, 1)
     auto_complete_statuses = {"Scheduled", "In Progress"}
     auto_complete_work_types = {"Brand Enhancement", "Calibration", "PMT"}
@@ -452,6 +466,7 @@ def apply_automatic_schedule_completion():
             )
     except Exception:
         pass
+    st.session_state[run_key] = True
     return updated
 
 
@@ -490,26 +505,26 @@ def stores_for_select():
 def dashboard_counts():
     today = date.today()
     week_start = today - timedelta(days=today.weekday())
-    return {
-        "active_employees": scalar("select count(*) from employees where active = true"),
-        "active_stores": scalar("select count(*) from stores where active = true"),
-        "scheduled_today": scalar(
-            "select count(*) from schedule_items where work_type in ('Brand Enhancement','Calibration') and schedule_date = :d and status in ('Scheduled','In Progress')",
-            {"d": today},
-        ),
-        "completed_week": scalar(
-            "select count(*) from schedule_items where work_type in ('Brand Enhancement','Calibration') and status = 'Completed' and schedule_date >= :week_start",
-            {"week_start": week_start},
-        ),
-        "open_followups": scalar("select count(*) from followups where status not in ('Completed','Cancelled')"),
-        "overdue_followups": scalar(
-            "select count(*) from followups where status not in ('Completed','Cancelled') and coalesce(due_date,next_followup_date) < :today",
-            {"today": today},
-        ),
-        "off_today": scalar("select count(*) from calloff_pto where event_date <= :d and coalesce(end_date,event_date) >= :d", {"d": today}),
-        "deferred_available": scalar("select count(*) from deferred_work_orders where status = 'Available'"),
-        "needs_rescheduled": scalar("select count(*) from schedule_items where status = 'Needs Rescheduled'"),
-    }
+    engine = get_engine(get_database_url())
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                select
+                    (select count(*) from employees where active = true) as active_employees,
+                    (select count(*) from stores where active = true) as active_stores,
+                    (select count(*) from schedule_items where work_type in ('Brand Enhancement','Calibration') and schedule_date = :today and status in ('Scheduled','In Progress')) as scheduled_today,
+                    (select count(*) from schedule_items where work_type in ('Brand Enhancement','Calibration') and status = 'Completed' and schedule_date >= :week_start) as completed_week,
+                    (select count(*) from followups where status not in ('Completed','Cancelled')) as open_followups,
+                    (select count(*) from followups where status not in ('Completed','Cancelled') and coalesce(due_date,next_followup_date) < :today) as overdue_followups,
+                    (select count(*) from calloff_pto where event_date <= :today and coalesce(end_date,event_date) >= :today) as off_today,
+                    (select count(*) from deferred_work_orders where status = 'Available') as deferred_available,
+                    (select count(*) from schedule_items where status = 'Needs Rescheduled') as needs_rescheduled
+                """
+            ),
+            {"today": today, "week_start": week_start},
+        ).mappings().one()
+    return {key: int(row[key] or 0) for key in row.keys()}
 
 
 def scalar(sql, params=None):
