@@ -1,6 +1,7 @@
+import json
 import re
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -20,43 +21,39 @@ from src.models import (
 from src.auth import (
     DatabaseUnavailable,
     configured_database_url,
-    current_account_db_path,
     current_account_schema,
-    is_production,
+    is_postgresql_url,
     using_hosted_database,
 )
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
-LOCAL_DATABASE_PATH = APP_DIR / "asm_command_center.db"
 load_dotenv(APP_DIR / ".env")
 load_dotenv()
 
 
 def get_database_url():
     env_url = configured_database_url()
-    if env_url:
-        return env_url
-    if is_production():
+    if not env_url:
         raise DatabaseUnavailable(
-            "Production requires DATABASE_URL. Refusing to create or use a local SQLite database."
+            "PostgreSQL DATABASE_URL is required. Refusing to create or use local SQLite workspace storage."
         )
-    account_path = current_account_db_path()
-    if account_path:
-        account_path.parent.mkdir(exist_ok=True)
-        return f"sqlite:///{account_path.as_posix()}"
-    return f"sqlite:///{LOCAL_DATABASE_PATH.as_posix()}"
+    if not is_postgresql_url(env_url):
+        raise DatabaseUnavailable(
+            "DATABASE_URL must be PostgreSQL, such as postgresql+psycopg2://user:password@host:5432/database."
+        )
+    return env_url
 
 
 def using_sqlite():
-    return get_database_url().startswith("sqlite")
+    return False
 
 
 @st.cache_resource(show_spinner=False)
 def get_engine(url=None, schema=None):
     url = url or get_database_url()
     schema = schema if schema is not None else current_account_schema()
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    connect_args = {}
     if schema and url.startswith("postgresql"):
         connect_args = {"options": f"-csearch_path={schema},public"}
     return create_engine(url, pool_pre_ping=True, future=True, connect_args=connect_args)
@@ -85,7 +82,7 @@ def get_database_status():
         engine = get_engine(url, schema=schema)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-            database_name = conn.execute(text("select current_database()")).scalar() if not url.startswith("sqlite") else Path(url.replace("sqlite:///", "")).name
+            database_name = conn.execute(text("select current_database()")).scalar()
             users_found = None
             stores_found = None
             schedules_found = None
@@ -106,7 +103,7 @@ def get_database_status():
             "configured": True,
             "connected": True,
             "error": None,
-            "database_type": "PostgreSQL" if url.startswith("postgresql") else "SQLite",
+            "database_type": "PostgreSQL",
             "database_name": database_name,
             "schema": schema or "local",
             "users_found": users_found,
@@ -115,7 +112,7 @@ def get_database_status():
             "hosted_database": using_hosted_database(),
         }
     except Exception as exc:
-        return {"configured": bool(configured_database_url()) or not is_production(), "connected": False, "error": str(exc)}
+        return {"configured": bool(configured_database_url()), "connected": False, "error": str(exc)}
 
 
 def show_database_setup():
@@ -124,7 +121,7 @@ def show_database_setup():
         """
 No new data will be saved until the connection is restored. Existing information has not been intentionally deleted.
 
-For production, configure a hosted PostgreSQL database through Streamlit Secrets or environment variables. The app will not silently create a temporary SQLite database in production.
+Configure a PostgreSQL database through Streamlit Secrets or environment variables. The app will not create or use local SQLite storage for account or workspace data.
 
 Local `.env` example:
 
@@ -147,9 +144,38 @@ def init_db():
     schema = ensure_workspace_schema()
     engine = get_engine(get_database_url(), schema=schema)
     Base.metadata.create_all(engine)
+    ensure_undo_table(engine)
     ensure_schema_updates(engine)
     seed_core_data()
     return True
+
+
+def ensure_undo_table(engine=None):
+    engine = engine or get_engine(get_database_url())
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                create table if not exists undo_snapshots (
+                    id integer primary key autoincrement,
+                    action_label varchar(255) not null,
+                    table_names text not null,
+                    snapshot_json text not null,
+                    created_at timestamp not null
+                )
+                """
+                if engine.dialect.name == "sqlite"
+                else """
+                create table if not exists undo_snapshots (
+                    id serial primary key,
+                    action_label varchar(255) not null,
+                    table_names text not null,
+                    snapshot_json text not null,
+                    created_at timestamp not null
+                )
+                """
+            )
+        )
 
 
 def ensure_schema_updates(engine):
@@ -226,18 +252,125 @@ def make_session():
     return sessionmaker(bind=get_engine(get_database_url()), autoflush=False, autocommit=False, future=True)
 
 
+def _json_default(value):
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
+
+
+def _tracked_table_names(session):
+    names = set()
+    for obj in list(session.new) + list(session.dirty) + list(session.deleted):
+        table_name = getattr(getattr(obj, "__table__", None), "name", None)
+        if table_name and table_name not in {"audit_log", "undo_snapshots"}:
+            names.add(table_name)
+    return sorted(names)
+
+
+def _snapshot_tables(conn, table_names, action_label="Database change"):
+    if not table_names or st.session_state.get("_undo_restore_active") or st.session_state.get("_undo_snapshot_suppressed"):
+        return
+    ensure_undo_table(conn.engine)
+    snapshot = {}
+    valid_tables = set(Base.metadata.tables)
+    for table_name in table_names:
+        if table_name not in valid_tables:
+            continue
+        rows = conn.execute(text(f"select * from {table_name}")).mappings().all()
+        snapshot[table_name] = [dict(row) for row in rows]
+    if not snapshot:
+        return
+    conn.execute(
+        text(
+            """
+            insert into undo_snapshots (action_label, table_names, snapshot_json, created_at)
+            values (:action_label, :table_names, :snapshot_json, :created_at)
+            """
+        ),
+        {
+            "action_label": action_label[:255],
+            "table_names": ", ".join(snapshot.keys()),
+            "snapshot_json": json.dumps(snapshot, default=_json_default),
+            "created_at": datetime.utcnow(),
+        },
+    )
+
+
 @contextmanager
-def session_scope():
+def session_scope(action_label="Database change"):
     Session = make_session()
     session = Session()
     try:
         yield session
+        changed_tables = _tracked_table_names(session)
+        if changed_tables:
+            _snapshot_tables(session.connection(), changed_tables, action_label=action_label)
         session.commit()
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
+
+
+def latest_undo_snapshot():
+    try:
+        schema = ensure_workspace_schema()
+        engine = get_engine(get_database_url(), schema=schema)
+        ensure_undo_table(engine)
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    select id, action_label, table_names, created_at
+                    from undo_snapshots
+                    order by id desc
+                    limit 1
+                    """
+                )
+            ).mappings().first()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def restore_latest_undo_snapshot():
+    schema = ensure_workspace_schema()
+    engine = get_engine(get_database_url(), schema=schema)
+    ensure_undo_table(engine)
+    sorted_names = [table.name for table in Base.metadata.sorted_tables if table.name != "audit_log"]
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                select id, action_label, snapshot_json
+                from undo_snapshots
+                order by id desc
+                limit 1
+                """
+            )
+        ).mappings().first()
+        if not row:
+            return False, "There is no saved change to undo."
+        snapshot = json.loads(row["snapshot_json"])
+        table_names = [name for name in sorted_names if name in snapshot]
+        st.session_state["_undo_restore_active"] = True
+        try:
+            for table_name in reversed(table_names):
+                conn.execute(text(f"delete from {table_name}"))
+            for table_name in table_names:
+                rows = snapshot.get(table_name, [])
+                if not rows:
+                    continue
+                columns = list(rows[0].keys())
+                col_sql = ", ".join(columns)
+                value_sql = ", ".join([f":{column}" for column in columns])
+                for row_data in rows:
+                    conn.execute(text(f"insert into {table_name} ({col_sql}) values ({value_sql})"), row_data)
+            conn.execute(text("delete from undo_snapshots where id = :id"), {"id": row["id"]})
+        finally:
+            st.session_state.pop("_undo_restore_active", None)
+    return True, f"Undid last change: {row['action_label']}"
 
 
 def safe_query(sql, params=None):

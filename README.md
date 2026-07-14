@@ -2,7 +2,7 @@
 
 A Streamlit field-operations app for employees, stores, maps, schedules, call offs/PTO, follow-ups, deferred work orders, file uploads, and PDF/Excel reports.
 
-This version runs as a Streamlit app. Local development can use SQLite files. Hosted production must use one external PostgreSQL database through `DATABASE_URL`; production will not silently fall back to SQLite.
+This version runs as a Streamlit app. Account and workspace data require one external PostgreSQL database through `DATABASE_URL`; the app will not create or use SQLite storage for live data.
 
 ## Folder Structure
 
@@ -38,7 +38,7 @@ streamlit run app.py
 
 Or double-click `start_windows.bat`.
 
-The app will create local SQLite database files as needed when no `DATABASE_URL` is configured and `FIELD_PLANNER_ENV` is not production. To test PostgreSQL locally, create a database, copy `.env.example` to `.env`, and set:
+Create a PostgreSQL database, copy `.env.example` to `.env`, and set:
 
 ```bash
 DATABASE_URL=postgresql+psycopg2://postgres:your_password@localhost:5432/asm_command_center
@@ -56,9 +56,10 @@ FIELD_PLANNER_DATABASE_INSTANCE_ID = "field-planner-production"
 
 Use a hosted PostgreSQL database outside the Streamlit app container. Streamlit Community Cloud does not provide a built-in persistent PostgreSQL database.
 
-Production persistence rules:
+Persistence rules:
 
-- `DATABASE_URL` is required in production.
+- `DATABASE_URL` is always required.
+- `DATABASE_URL` must be PostgreSQL, for example `postgresql+psycopg2://...`.
 - Login accounts are stored in `public.app_users` in the hosted database.
 - Each account workspace uses a stable PostgreSQL schema named from the account slug, for example `fp_jane_manager`.
 - The app verifies `FIELD_PLANNER_DATABASE_INSTANCE_ID` before writing. If the connected database does not contain the expected identifier, startup stops instead of creating a new empty workspace.
@@ -74,7 +75,7 @@ Recommended hosted database backup process:
 
 ## Clean Upload Package
 
-For deployment, upload the cleaned project folder or the generated zip package from the parent folder. Do not upload private local database files unless you intentionally want to move that local data:
+For deployment, upload the cleaned project folder or the generated zip package from the parent folder. Do not upload local database files:
 
 - `field_planner_users.db`
 - `asm_command_center.db`
@@ -92,7 +93,7 @@ Generated files are also excluded from the clean package:
 - Automatic table creation for PostgreSQL without dropping existing records.
 - Setup screen when database configuration is missing.
 - Login screen with separate username/email/password accounts.
-- Separate local account databases for development, and separate PostgreSQL account schemas for hosted production.
+- PostgreSQL-backed login accounts and separate PostgreSQL account schemas for each workspace.
 - Employee/team CRUD, imports, inactive/reactivation flow.
 - Store import with update-by-store-number behavior.
 - Folium/OpenStreetMap map center with assignment/status coloring.

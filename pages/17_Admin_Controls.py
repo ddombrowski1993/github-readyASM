@@ -36,16 +36,15 @@ storage_cols = st.columns(4)
 storage_cols[0].metric("Login Accounts", storage["user_count"])
 storage_cols[1].metric("Workspace Storage", "PostgreSQL Schemas" if storage.get("hosted_database") else f"{storage['account_database_count']} DB Files")
 storage_cols[2].metric("Environment", storage.get("environment", "local"))
-storage_cols[3].metric("Using App Folder", "No" if storage.get("hosted_database") else "Yes" if storage["local_app_storage"] else "No")
+storage_cols[3].metric("Hosted Runtime", "Yes" if storage.get("hosted_runtime") else "No")
 with st.expander("Storage paths", expanded=False):
     st.write(f"Auth database: `{storage['auth_database']}`")
     st.write(f"Account databases: `{storage['account_database_dir']}`")
     if storage.get("hosted_database"):
         st.success("Production-safe hosted database storage is configured. Login accounts and workspaces are not stored in Streamlit container SQLite files.")
-    elif storage["local_app_storage"]:
-        st.warning(
-            "Accounts are stored inside the app folder. This is fine for local desktop use, but hosted deployments can lose local SQLite files after rebuilds, redeploys, or container replacement. "
-            "Set FIELD_PLANNER_DATA_DIR, FIELD_PLANNER_AUTH_DB, or FIELD_PLANNER_ACCOUNT_DB_DIR to a persistent location for production."
+    else:
+        st.error(
+            "PostgreSQL DATABASE_URL is required. Account creation and workspace editing are blocked unless the app is connected to PostgreSQL."
         )
 
 section_header("User Accounts", "Review current access levels and account status.", "green")

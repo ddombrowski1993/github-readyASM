@@ -1,4 +1,5 @@
 from datetime import date
+import io
 
 import pandas as pd
 import streamlit as st
@@ -12,6 +13,7 @@ from src.geocoding import geocode_address
 from src.imports import import_employees, sample_employee_template
 from src.manager_rollup import manager_rollup_query
 from src.models import Employee, Team
+from src.pmt_redistribution import apply_pmt_removal_plan, assigned_pmt_store_count, build_pmt_removal_preview
 from src.smart_import import (
     REQUIRED_FIELDS,
     display_field,
@@ -51,6 +53,14 @@ def render_employee_import_summary(summary):
         st.dataframe(pd.DataFrame({"Review Item": review}), use_container_width=True, hide_index=True)
     with st.expander("Import details", expanded=False):
         st.json(summary)
+
+
+def pmt_removal_workbook(preview, summary):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        summary.to_excel(writer, index=False, sheet_name="Transfer Summary")
+        preview.to_excel(writer, index=False, sheet_name="Store Changes")
+    return buffer.getvalue()
 
 
 if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
@@ -169,13 +179,103 @@ with tab_list:
     emp_id = st.selectbox("Employee", filtered["id"].tolist() if not filtered.empty else [])
     reason = st.text_input("Inactive reason")
     if st.button("Mark Selected Employee Inactive", disabled=not emp_id):
+        assigned_count = 0
+        selected_role = ""
         with session_scope() as session:
             emp = session.get(Employee, int(emp_id))
-            emp.active = False
-            emp.inactive_reason = reason
+            selected_role = emp.role if emp else ""
+            if emp and emp.role == "PMT":
+                assigned_count = assigned_pmt_store_count(session, int(emp_id))
+            if emp:
+                emp.active = False
+                emp.inactive_reason = reason
         log_action("employee marked inactive", "employees", int(emp_id), reason)
-        st.success("Employee marked inactive.")
+        if selected_role == "PMT" and assigned_count:
+            st.session_state["pmt_removal_employee_id"] = int(emp_id)
+            st.session_state["pmt_removal_reason"] = reason
+            st.warning(f"This PMT has {assigned_count} assigned store(s). Choose how to handle those assignments below.")
+        else:
+            st.success("Employee marked inactive.")
         st.rerun()
+    pending_pmt_id = st.session_state.get("pmt_removal_employee_id")
+    if pending_pmt_id:
+        with session_scope() as session:
+            pending_employee = session.get(Employee, int(pending_pmt_id))
+            pending_name = pending_employee.full_name if pending_employee else ""
+            pending_count = assigned_pmt_store_count(session, int(pending_pmt_id)) if pending_employee else 0
+        if not pending_employee or pending_count == 0:
+            st.session_state.pop("pmt_removal_employee_id", None)
+            st.session_state.pop("pmt_removal_reason", None)
+        else:
+            st.subheader("PMT Technician Removal & Territory Redistribution")
+            st.warning(f"{pending_name} currently has {pending_count} assigned PMT store(s). Choose how to handle these assignments.")
+            mode = st.radio(
+                "Reassignment option",
+                [
+                    "Leave Stores Unassigned",
+                    "Assign All Stores To Closest Single Technician",
+                    "Split Stores Across Multiple Nearby Technicians",
+                ],
+                key="pmt_removal_mode",
+            )
+            split_count = 3
+            if mode == "Split Stores Across Multiple Nearby Technicians":
+                split_count = st.selectbox("Number of receiving technicians", [2, 3, 4, 5], index=1, key="pmt_removal_split_count")
+            with session_scope() as session:
+                preview, transfer_summary, preview_error = build_pmt_removal_preview(session, int(pending_pmt_id), mode, split_count)
+            if preview_error:
+                st.error(preview_error)
+            elif not preview.empty:
+                st.markdown("**Transfer Summary**")
+                st.dataframe(transfer_summary, use_container_width=True, hide_index=True)
+                st.markdown("**Store-Level Change Preview**")
+                st.dataframe(
+                    preview[
+                        [
+                            "Store Number",
+                            "City",
+                            "State",
+                            "Original Technician",
+                            "New Technician",
+                            "Estimated Miles From New Tech",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    "Download PMT Reassignment Preview Excel",
+                    data=pmt_removal_workbook(preview, transfer_summary),
+                    file_name=f"pmt_reassignment_{pending_name.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                confirm = st.checkbox("I reviewed the PMT reassignment preview and want to apply these changes.", key="pmt_removal_confirm")
+                apply_cols = st.columns(2)
+                if apply_cols[0].button("Apply PMT Reassignment", type="primary", disabled=not confirm):
+                    try:
+                        with session_scope() as session:
+                            result = apply_pmt_removal_plan(
+                                session,
+                                int(pending_pmt_id),
+                                preview,
+                                reason=st.session_state.get("pmt_removal_reason", ""),
+                            )
+                        log_action(
+                            "pmt technician removed and territory redistributed",
+                            "employees",
+                            int(pending_pmt_id),
+                            f"{pending_name}; mode={mode}; reassigned={result['stores_reassigned']}; unassigned={result['stores_unassigned']}; future_items={result['future_items_transferred']}; backlog={result['backlog_transferred']}",
+                        )
+                        st.session_state.pop("pmt_removal_employee_id", None)
+                        st.session_state.pop("pmt_removal_reason", None)
+                        st.success("PMT reassignment applied. Stores, future PMT schedule items, backlog ownership, maps, dashboards, and reports will reflect the new assignments.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"PMT reassignment failed and was rolled back: {exc}")
+                if apply_cols[1].button("Cancel PMT Reassignment"):
+                    st.session_state.pop("pmt_removal_employee_id", None)
+                    st.session_state.pop("pmt_removal_reason", None)
+                    st.rerun()
     st.subheader("Fix Home Coordinates")
     coord_df = safe_query(
         """
@@ -265,7 +365,11 @@ with tab_add:
         if result:
             st.session_state["employee_form_lat"] = float(result["latitude"])
             st.session_state["employee_form_lon"] = float(result["longitude"])
-            st.success("Coordinates found. Review and save the employee.")
+            match_quality = result.get("match_quality", "Address match")
+            display_name = result.get("display_name", "")
+            st.success(f"Coordinates found ({match_quality}). Review and save the employee.")
+            if display_name:
+                st.caption(display_name)
         else:
             st.error("Could not find coordinates for that address. You can still save the address or enter coordinates manually.")
     lat = geo2.number_input("Home latitude", value=float(st.session_state["employee_form_lat"]), format="%.6f", key="employee_form_lat")
@@ -279,6 +383,17 @@ with tab_add:
         if not full:
             st.error("First or last name is required.")
         else:
+            save_lat = lat if lat else None
+            save_lon = lon if lon else None
+            geocode_note = ""
+            if (save_lat is None or save_lon is None) and any(str(value or "").strip() for value in [address, city, state, home_zip]):
+                result = geocode_address(address, city, state, home_zip)
+                if result:
+                    save_lat = float(result["latitude"])
+                    save_lon = float(result["longitude"])
+                    st.session_state["employee_form_lat"] = save_lat
+                    st.session_state["employee_form_lon"] = save_lon
+                    geocode_note = f" Coordinates were found automatically on save ({result.get('match_quality', 'Address match')})."
             with session_scope() as session:
                 emp = Employee(
                     first_name=first,
@@ -295,8 +410,8 @@ with tab_add:
                     home_city=city,
                     home_state=state,
                     home_zip=home_zip,
-                    home_latitude=lat if lat else None,
-                    home_longitude=lon if lon else None,
+                    home_latitude=save_lat,
+                    home_longitude=save_lon,
                     monthly_pmt_store_target=10,
                     active=active,
                     notes=notes,
@@ -305,7 +420,10 @@ with tab_add:
                 session.flush()
                 log_id = emp.id
             log_action("employee added", "employees", log_id, full)
-            st.success("Employee saved.")
+            if save_lat is None or save_lon is None:
+                st.warning("Employee saved, but coordinates were not found. Use Employee List > Fix Home Coordinates or enter latitude/longitude manually.")
+            else:
+                st.success(f"Employee saved.{geocode_note}")
 
 with tab_teams:
     st.dataframe(teams(active_only=False), use_container_width=True, hide_index=True)

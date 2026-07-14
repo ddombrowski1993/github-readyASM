@@ -31,17 +31,21 @@ def _secret_or_env(name, default=""):
     value = os.getenv(name)
     if value not in (None, ""):
         return str(value).strip()
-    if _local_streamlit_secrets_file_exists():
-        try:
-            if name in st.secrets:
-                return str(st.secrets[name] or "").strip()
-        except Exception:
-            pass
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name] or "").strip()
+    except Exception:
+        pass
     return str(default or "").strip()
 
 
 def configured_database_url():
     return _secret_or_env("DATABASE_URL")
+
+
+def is_postgresql_url(url):
+    normalized = str(url or "").strip().lower()
+    return normalized.startswith("postgresql://") or normalized.startswith("postgresql+")
 
 
 def deployment_environment():
@@ -53,12 +57,36 @@ def deployment_environment():
     ).strip().lower()
 
 
+def is_hosted_runtime():
+    if is_production():
+        return True
+    hosted_markers = (
+        "STREAMLIT_CLOUD",
+        "STREAMLIT_SHARING_MODE",
+        "IS_STREAMLIT_CLOUD",
+        "K_SERVICE",
+        "DYNO",
+        "RENDER",
+        "RAILWAY_ENVIRONMENT",
+        "FLY_APP_NAME",
+    )
+    if any(os.getenv(marker) for marker in hosted_markers):
+        return True
+    app_path = APP_DIR.as_posix()
+    cwd_path = Path.cwd().as_posix()
+    if app_path.startswith("/mount/src") or cwd_path.startswith("/mount/src"):
+        return True
+    if os.getenv("HOME") == "/home/adminuser" and os.getenv("USER") == "adminuser":
+        return True
+    return False
+
+
 def is_production():
     return deployment_environment() in {"prod", "production", "streamlit", "hosted"}
 
 
 def using_hosted_database():
-    return bool(configured_database_url())
+    return is_postgresql_url(configured_database_url())
 
 
 def _safe_identifier(value, prefix="fp"):
@@ -112,20 +140,20 @@ def clear_transient_session_state():
 
 def _auth_database_url():
     hosted_url = configured_database_url()
-    if hosted_url:
-        return hosted_url
-    if is_production():
+    if not hosted_url:
         raise DatabaseUnavailable(
-            "Production requires DATABASE_URL. The app stopped before creating a local SQLite database."
+            "PostgreSQL DATABASE_URL is required. The app will not create or use local SQLite account storage."
         )
-    AUTH_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    return f"sqlite:///{AUTH_DATABASE_PATH.as_posix()}"
+    if not is_postgresql_url(hosted_url):
+        raise DatabaseUnavailable(
+            "DATABASE_URL must be a PostgreSQL URL, such as postgresql+psycopg2://user:password@host:5432/database."
+        )
+    return hosted_url
 
 
 @st.cache_resource(show_spinner=False)
 def _auth_engine(url):
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, pool_pre_ping=True, future=True, connect_args=connect_args)
+    return create_engine(url, pool_pre_ping=True, future=True, connect_args={})
 
 
 def _engine():
@@ -297,6 +325,7 @@ def account_db_path(account_slug):
 def auth_storage_status():
     init_auth_db()
     hosted = using_hosted_database()
+    hosted_runtime = is_hosted_runtime()
     app_dir_resolved = APP_DIR.resolve()
     auth_resolved = AUTH_DATABASE_PATH.resolve()
     local_app_storage = False if hosted else app_dir_resolved in auth_resolved.parents or auth_resolved == app_dir_resolved
@@ -308,6 +337,7 @@ def auth_storage_status():
         "local_app_storage": local_app_storage,
         "configured_data_dir": _secret_or_env("FIELD_PLANNER_DATA_DIR") or "",
         "hosted_database": hosted,
+        "hosted_runtime": hosted_runtime,
         "environment": deployment_environment() or "local",
     }
 

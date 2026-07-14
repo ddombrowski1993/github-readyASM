@@ -68,7 +68,6 @@ CITY_CENTER_FALLBACKS = {
     ("san antonio", "TX"): (29.4252, -98.4946),
     ("waco", "TX"): (31.5493, -97.1467),
 }
-
 def group_config(group):
     return GROUPS.get(group)
 
@@ -1234,8 +1233,8 @@ def render_rebalance_preview_map(preview_df, group, context_stores_df=None, pers
         <b>Store {row.get('store_number','')}</b><br>
         {row.get('address','')}<br>
         {row.get('city','')}, {row.get('state','')}<br><br>
-        Current {group}: {row.get('current_technician') or 'Unassigned'}<br>
-        Proposed {group}: <b>{row.get('proposed_technician') or 'No change'}</b><br>
+        Original {group}: {row.get('current_technician') or 'Unassigned'}<br>
+        Newly Assigned {group}: <b>{row.get('proposed_technician') or 'No change'}</b><br>
         Target miles: {row.get('distance_from_target_home', '')}<br>
         Reason: {row.get('reason', '')}<br>
         Status: {'Suggested and included' if is_proposed and included else 'Suggested but excluded' if is_proposed else 'Not currently changing'}
@@ -1683,43 +1682,53 @@ def remove_or_deactivate_technician(employee_id, role, employee_field, team_fiel
     return True, message
 
 
-def sync_technician_areas(role, employee_field, team_field):
-    with session_scope() as session:
-        employees = session.query(Employee).filter(Employee.role == role, Employee.active == True).order_by(Employee.full_name).all()
-        touched = 0
-        for employee in employees:
-            stores = session.query(Store).filter(getattr(Store, employee_field) == employee.id, Store.active == True).all()
-            if not stores:
-                continue
-            team = ensure_technician_team(session, employee, role)
-            for store in stores:
-                setattr(store, team_field, team.id)
-            store_ids = sorted(int(store.id) for store in stores)
-            area = session.query(MapArea).filter(MapArea.team_id == team.id, MapArea.area_type == role, MapArea.active == True).first()
-            geometry = polygon_from_points(pd.DataFrame([{"latitude": store.latitude, "longitude": store.longitude} for store in stores]))
-            if area:
-                area.area_name = employee.full_name
-                area.employee_id = employee.id
-                area.assigned_store_ids = json.dumps(store_ids)
-                area.geometry_json = geometry or area.geometry_json
-                area.color = area.color or employee.color or stable_color(employee.full_name)
-            else:
-                session.add(
-                    MapArea(
-                        area_name=employee.full_name,
-                        area_type=role,
-                        team_id=team.id,
-                        employee_id=employee.id,
-                        assignment_type=GROUPS[role]["default_assignment"],
-                        team_members=json.dumps([employee.id]),
-                        home_base=", ".join([value for value in [employee.home_city, employee.home_state] if value]),
-                        geometry_json=geometry or json.dumps({"type": "Polygon", "coordinates": [[]]}),
-                        assigned_store_ids=json.dumps(store_ids),
-                        color=employee.color or stable_color(employee.full_name),
-                        active=True,
+def sync_technician_areas(role, employee_field, team_field, save_undo=True):
+    previous_suppressed = st.session_state.get("_undo_snapshot_suppressed")
+    if not save_undo:
+        st.session_state["_undo_snapshot_suppressed"] = True
+    try:
+        with session_scope(f"{role.lower()} areas synced") as session:
+            employees = session.query(Employee).filter(Employee.role == role, Employee.active == True).order_by(Employee.full_name).all()
+            touched = 0
+            for employee in employees:
+                stores = session.query(Store).filter(getattr(Store, employee_field) == employee.id, Store.active == True).all()
+                if not stores:
+                    continue
+                team = ensure_technician_team(session, employee, role)
+                for store in stores:
+                    setattr(store, team_field, team.id)
+                store_ids = sorted(int(store.id) for store in stores)
+                area = session.query(MapArea).filter(MapArea.team_id == team.id, MapArea.area_type == role, MapArea.active == True).first()
+                geometry = polygon_from_points(pd.DataFrame([{"latitude": store.latitude, "longitude": store.longitude} for store in stores]))
+                if area:
+                    area.area_name = employee.full_name
+                    area.employee_id = employee.id
+                    area.assigned_store_ids = json.dumps(store_ids)
+                    area.geometry_json = geometry or area.geometry_json
+                    area.color = area.color or employee.color or stable_color(employee.full_name)
+                else:
+                    session.add(
+                        MapArea(
+                            area_name=employee.full_name,
+                            area_type=role,
+                            team_id=team.id,
+                            employee_id=employee.id,
+                            assignment_type=GROUPS[role]["default_assignment"],
+                            team_members=json.dumps([employee.id]),
+                            home_base=", ".join([value for value in [employee.home_city, employee.home_state] if value]),
+                            geometry_json=geometry or json.dumps({"type": "Polygon", "coordinates": [[]]}),
+                            assigned_store_ids=json.dumps(store_ids),
+                            color=employee.color or stable_color(employee.full_name),
+                            active=True,
+                        )
                     )
-                )
-            touched += 1
+                touched += 1
+    finally:
+        if not save_undo:
+            if previous_suppressed:
+                st.session_state["_undo_snapshot_suppressed"] = previous_suppressed
+            else:
+                st.session_state.pop("_undo_snapshot_suppressed", None)
     log_action(f"{role.lower()} areas synced", "map_areas", description=f"{touched} {role} technician areas synced")
     return touched
 
@@ -1806,6 +1815,64 @@ def technician_store_export(stores_df, role, employee_field, person_column, area
     export["Work Group"] = role
     tech_col = f"{role} Technician"
     return export.sort_values([tech_col, "Store Number"], na_position="last") if tech_col in export.columns and not export.empty else export
+
+
+def rebalance_store_change_export(preview_df):
+    if preview_df is None or preview_df.empty:
+        return pd.DataFrame()
+    columns = [
+        "include",
+        "store_id",
+        "store_number",
+        "address",
+        "city",
+        "state",
+        "current_technician",
+        "proposed_technician",
+        "distance_from_target_home",
+        "distance_from_current_home",
+        "distance_improvement",
+        "reason",
+        "review_flag",
+    ]
+    export = preview_df[[column for column in columns if column in preview_df.columns]].copy()
+    return export.rename(
+        columns={
+            "include": "Include",
+            "store_id": "Store ID",
+            "store_number": "Store Number",
+            "address": "Address",
+            "city": "City",
+            "state": "State",
+            "current_technician": "Original Technician",
+            "proposed_technician": "Newly Assigned Technician",
+            "distance_from_target_home": "Miles From Newly Assigned Technician",
+            "distance_from_current_home": "Miles From Original Technician",
+            "distance_improvement": "Mileage Difference",
+            "reason": "Reason",
+            "review_flag": "Review Flag",
+        }
+    )
+
+
+def render_store_change_excel_export(group, change_df, key_suffix):
+    if change_df is None or change_df.empty:
+        return
+    export_df = rebalance_store_change_export(change_df)
+    with st.container(border=True):
+        st.markdown("**Store Change Excel Export**")
+        st.caption("Use this for the old technician/new technician handoff. Excel sheet: Report. Columns: Original Technician and Newly Assigned Technician.")
+        export_cols = st.columns([0.34, 0.22, 0.44])
+        export_cols[0].download_button(
+            "Download Store Change Excel",
+            data=excel_bytes(export_df),
+            file_name=f"{group.lower()}_store_changes_original_to_new.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=export_df.empty,
+            key=f"{group}_store_change_export_{key_suffix}",
+        )
+        export_cols[1].metric("Stores in export", len(export_df))
+        export_cols[2].write("Look for **Original Technician** and **Newly Assigned Technician**.")
 
 
 def technician_start_location(tech):
@@ -2061,9 +2128,11 @@ def rebalance_candidate_preview(
     if df.empty:
         return pd.DataFrame(), "No stores with coordinates are available for auto-suggest."
 
-    active_counts = tech_summary.set_index("employee_id")["assigned_stores"].fillna(0).to_dict()
+    active_counts = {int(emp_id): int(count or 0) for emp_id, count in tech_summary.set_index("employee_id")["assigned_stores"].fillna(0).to_dict().items()}
+    target_employee_id = int(target_employee_id)
     avg_count = sum(active_counts.values()) / len(active_counts) if active_counts else 0
-    overloaded_ids = {int(emp_id) for emp_id, count in active_counts.items() if count > max(avg_count, target_store_count)}
+    fair_count = int(ceil(avg_count)) if avg_count else 0
+    overloaded_ids = {emp_id for emp_id, count in active_counts.items() if count > fair_count}
 
     if source_mode == "Unassigned stores only":
         df = df[df[employee_field].isna()]
@@ -2093,7 +2162,7 @@ def rebalance_candidate_preview(
                 current_employee_id = int(store[employee_field])
             except Exception:
                 current_employee_id = None
-        if current_employee_id == int(target_employee_id):
+        if current_employee_id == target_employee_id:
             continue
         current_distance = None
         if current_employee_id in locations:
@@ -2124,7 +2193,7 @@ def rebalance_candidate_preview(
                 "longitude": store_lon,
                 "current_employee_id": current_employee_id,
                 "current_technician": store.get(person_column) or "Unassigned",
-                "proposed_employee_id": int(target_employee_id),
+                "proposed_employee_id": target_employee_id,
                 "proposed_technician": target_name,
                 "distance_from_target_home": round(distance_to_target, 1),
                 "distance_from_current_home": round(current_distance, 1) if current_distance is not None else "",
@@ -2136,7 +2205,207 @@ def rebalance_candidate_preview(
     preview = pd.DataFrame(rows)
     if preview.empty:
         return preview, "No suggested stores matched the distance and source settings."
-    preview = preview.sort_values(["distance_from_target_home", "store_number"], na_position="last").head(int(target_store_count))
+    source_take_limits = {}
+    if source_mode == "Pull from selected technician" and source_employee_id:
+        source_employee_id = int(source_employee_id)
+        combined_count = active_counts.get(source_employee_id, 0) + active_counts.get(target_employee_id, 0)
+        source_floor = int(ceil(combined_count / 2)) if combined_count else 0
+        source_take_limits[source_employee_id] = max(active_counts.get(source_employee_id, 0) - source_floor, 0)
+    elif source_mode in ("All stores", "Pull from overloaded technicians"):
+        candidate_source_ids = {
+            int(value)
+            for value in preview["current_employee_id"].dropna().tolist()
+            if str(value).strip() and int(value) != target_employee_id
+        }
+        local_total = active_counts.get(target_employee_id, 0) + sum(active_counts.get(employee_id, 0) for employee_id in candidate_source_ids)
+        local_fair_count = int(ceil(local_total / (len(candidate_source_ids) + 1))) if candidate_source_ids else fair_count
+        for employee_id in candidate_source_ids:
+            count = active_counts.get(employee_id, 0)
+            if employee_id == target_employee_id:
+                continue
+            source_take_limits[employee_id] = max(count - local_fair_count, 0)
+
+    if source_take_limits:
+        selected_rows = []
+        take_counts = {employee_id: 0 for employee_id in source_take_limits}
+        ranked = preview.sort_values(["distance_from_target_home", "store_number"], na_position="last")
+        for _, row in ranked.iterrows():
+            if len(selected_rows) >= int(target_store_count):
+                break
+            current_employee_id = row.get("current_employee_id")
+            if pd.isna(current_employee_id) or current_employee_id == "":
+                selected_rows.append(row)
+                continue
+            current_employee_id = int(current_employee_id)
+            take_limit = source_take_limits.get(current_employee_id)
+            if take_limit is not None and take_counts[current_employee_id] >= take_limit:
+                continue
+            if take_limit is not None:
+                take_counts[current_employee_id] += 1
+            selected_rows.append(row)
+        preview = pd.DataFrame(selected_rows)
+    else:
+        preview = preview.sort_values(["distance_from_target_home", "store_number"], na_position="last").head(int(target_store_count))
+    if preview.empty:
+        return preview, "No balanced suggestions were available without dropping a source technician below a fair store count. Try All stores, raise the target count, or adjust manually on the preview map."
+    return preview.reset_index(drop=True), ""
+
+
+def multi_technician_rebalance_preview(
+    stores_df,
+    tech_summary,
+    employee_field,
+    person_column,
+    source_mode,
+    source_employee_id=None,
+    target_store_count=20,
+    distance_limit=None,
+    target_employee_ids=None,
+):
+    if stores_df.empty:
+        return pd.DataFrame(), "No active stores are loaded."
+    if tech_summary.empty:
+        return pd.DataFrame(), "No active technicians are available."
+
+    df = stores_df.dropna(subset=["latitude", "longitude"]).copy()
+    if df.empty:
+        return pd.DataFrame(), "No stores with coordinates are available for auto-suggest."
+
+    active_counts = {int(emp_id): int(count or 0) for emp_id, count in tech_summary.set_index("employee_id")["assigned_stores"].fillna(0).to_dict().items()}
+    avg_count = sum(active_counts.values()) / len(active_counts) if active_counts else 0
+    fair_count = int(ceil(avg_count)) if avg_count else 0
+    overloaded_ids = {emp_id for emp_id, count in active_counts.items() if count > fair_count}
+
+    if source_mode == "Unassigned stores only":
+        df = df[df[employee_field].isna()]
+    elif source_mode == "Pull from selected technician" and source_employee_id:
+        df = df[df[employee_field] == int(source_employee_id)]
+    elif source_mode == "Pull from overloaded technicians":
+        df = df[df[employee_field].isin(overloaded_ids)]
+    elif source_mode == "All stores":
+        df = df[df[employee_field].notna()]
+
+    if df.empty:
+        return pd.DataFrame(), "No stores matched the selected source."
+
+    locations = technician_location_map(tech_summary)
+    if target_employee_ids:
+        selected_target_ids = {int(value) for value in target_employee_ids}
+        target_ids = [
+            int(row["employee_id"])
+            for _, row in tech_summary.iterrows()
+            if int(row["employee_id"]) in selected_target_ids and int(row["employee_id"]) in locations
+        ]
+    else:
+        target_ids = [
+            int(row["employee_id"])
+            for _, row in tech_summary.iterrows()
+            if int(row["employee_id"]) in locations and active_counts.get(int(row["employee_id"]), 0) < fair_count
+        ]
+    if not target_ids:
+        return pd.DataFrame(), "No selected receiving technicians have usable home/base locations. Add locations or select different technicians."
+
+    selected_total = sum(active_counts.get(employee_id, 0) for employee_id in target_ids)
+    source_total = 0
+    if source_mode == "Pull from selected technician" and source_employee_id:
+        source_total = active_counts.get(int(source_employee_id), 0)
+    elif source_mode in ("All stores", "Pull from overloaded technicians"):
+        source_ids_for_target = {int(value) for value in df[employee_field].dropna().tolist() if int(value) not in target_ids}
+        source_total = sum(active_counts.get(employee_id, 0) for employee_id in source_ids_for_target)
+    local_fair_count = int(ceil((selected_total + source_total) / max(len(target_ids) + (1 if source_total else 0), 1))) if target_ids else fair_count
+    target_capacity = {employee_id: max(local_fair_count - active_counts.get(employee_id, 0), 1) for employee_id in target_ids}
+    if source_mode == "Pull from selected technician" and source_employee_id:
+        source_employee_id = int(source_employee_id)
+        source_take_limits = {source_employee_id: max(active_counts.get(source_employee_id, 0) - fair_count, 0)}
+    elif source_mode in ("All stores", "Pull from overloaded technicians"):
+        source_ids = {int(value) for value in df[employee_field].dropna().tolist() if int(value) not in target_ids}
+        source_take_limits = {employee_id: max(active_counts.get(employee_id, 0) - fair_count, 0) for employee_id in source_ids}
+    else:
+        source_take_limits = {}
+
+    target_names = tech_summary.set_index("employee_id")["technician"].to_dict()
+    rows = []
+    for _, store in df.iterrows():
+        current_employee_id = None
+        if pd.notna(store.get(employee_field)):
+            try:
+                current_employee_id = int(store[employee_field])
+            except Exception:
+                current_employee_id = None
+        store_lat = float(store["latitude"])
+        store_lon = float(store["longitude"])
+        candidates = []
+        for target_id in target_ids:
+            if current_employee_id == target_id:
+                continue
+            target_location = locations[target_id]
+            distance_to_target = haversine_miles(store_lat, store_lon, target_location["latitude"], target_location["longitude"])
+            if distance_limit is not None and distance_to_target > float(distance_limit):
+                continue
+            candidates.append((distance_to_target, target_id))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: item[0])
+        best_distance, best_target_id = candidates[0]
+        current_distance = None
+        if current_employee_id in locations:
+            current_location = locations[current_employee_id]
+            current_distance = haversine_miles(store_lat, store_lon, current_location["latitude"], current_location["longitude"])
+        review_flag = ""
+        if current_employee_id and current_distance is None:
+            review_flag = "Current technician missing location"
+        elif distance_limit is not None and best_distance > float(distance_limit) * 0.85:
+            review_flag = "Near distance limit"
+        rows.append(
+            {
+                "include": True,
+                "store_id": int(store["id"]),
+                "store_number": store.get("store_number"),
+                "address": store.get("address"),
+                "city": store.get("city"),
+                "state": store.get("state"),
+                "latitude": store_lat,
+                "longitude": store_lon,
+                "current_employee_id": current_employee_id,
+                "current_technician": store.get(person_column) or "Unassigned",
+                "proposed_employee_id": best_target_id,
+                "proposed_technician": target_names.get(best_target_id, f"Employee {best_target_id}"),
+                "distance_from_target_home": round(best_distance, 1),
+                "distance_from_current_home": round(current_distance, 1) if current_distance is not None else "",
+                "distance_improvement": round(current_distance - best_distance, 1) if current_distance is not None else "",
+                "reason": "Spread across nearby underloaded technicians",
+                "review_flag": review_flag,
+            }
+        )
+
+    preview = pd.DataFrame(rows)
+    if preview.empty:
+        return preview, "No multi-technician suggestions matched the distance and source settings."
+
+    selected_rows = []
+    take_counts = {employee_id: 0 for employee_id in source_take_limits}
+    add_counts = {employee_id: 0 for employee_id in target_capacity}
+    ranked = preview.sort_values(["distance_from_target_home", "store_number"], na_position="last")
+    for _, row in ranked.iterrows():
+        if len(selected_rows) >= int(target_store_count):
+            break
+        target_id = int(row["proposed_employee_id"])
+        if add_counts.get(target_id, 0) >= target_capacity.get(target_id, 0):
+            continue
+        current_employee_id = row.get("current_employee_id")
+        if pd.notna(current_employee_id) and current_employee_id != "":
+            current_employee_id = int(current_employee_id)
+            take_limit = source_take_limits.get(current_employee_id)
+            if take_limit is not None and take_counts[current_employee_id] >= take_limit:
+                continue
+            if take_limit is not None:
+                take_counts[current_employee_id] += 1
+        add_counts[target_id] += 1
+        selected_rows.append(row)
+
+    preview = pd.DataFrame(selected_rows)
+    if preview.empty:
+        return preview, "No balanced multi-technician suggestions were available without dropping source technicians below the fair count."
     return preview.reset_index(drop=True), ""
 
 
@@ -2438,6 +2707,7 @@ sidebar_nav()
 if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
     page_header("Areas and Maps", "Manager roll-up view of store assignments across managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to open and edit that person's map assignments.")
+    st.caption("Store reassignment, rebalance, and the Original Technician / Newly Assigned Technician Excel export are available after switching from All Managed Users into one specific workspace.")
     assignment_rollup = manager_rollup_query(
         st.session_state.get("user_id"),
         """
@@ -2709,7 +2979,12 @@ if selected_group in ("PMT", "Calibration"):
             )
 
     zero_store_techs = tech_summary[tech_summary["assigned_stores"].fillna(0).astype(int) == 0] if not tech_summary.empty else pd.DataFrame()
-    with st.expander("Staffing Change & Territory Rebalance", expanded=not zero_store_techs.empty):
+    section_last_rebalance_export_key = f"{selected_group}_last_store_change_export"
+    has_last_rebalance_export = (
+        isinstance(st.session_state.get(section_last_rebalance_export_key), pd.DataFrame)
+        and not st.session_state.get(section_last_rebalance_export_key).empty
+    )
+    with st.expander("Staffing Change & Territory Rebalance", expanded=not zero_store_techs.empty or has_last_rebalance_export):
         st.info(f"You are editing {selected_group} assignments only. This will not change Brand Enhancement or the other technician assignment layer.")
         if selected_group == "PMT":
             st.caption("Use this when a new PMT is hired, someone leaves, or a technician is covering too many stores.")
@@ -2729,6 +3004,7 @@ if selected_group in ("PMT", "Calibration"):
             rebalance_key = f"{selected_group}_rebalance_preview"
             editor_key = f"{selected_group}_rebalance_editor"
             map_edit_count_key = f"{selected_group}_rebalance_map_edit_count"
+            last_rebalance_export_key = section_last_rebalance_export_key
             active_targets = tech_summary["employee_id"].tolist()
             if selected_group == "Calibration":
                 with st.container(border=True):
@@ -2842,6 +3118,16 @@ if selected_group in ("PMT", "Calibration"):
             if not zero_store_techs.empty:
                 first_zero_id = int(zero_store_techs.iloc[0]["employee_id"])
                 default_target_index = active_targets.index(first_zero_id) if first_zero_id in active_targets else 0
+            rebalance_result = st.radio(
+                "Rebalance result",
+                ["Move stores to one selected technician", "Spread stores across multiple nearby technicians"],
+                horizontal=True,
+                key=f"{selected_group}_rebalance_result",
+            )
+            if rebalance_result == "Move stores to one selected technician":
+                st.caption("Use this when one new tech needs a starting territory or one person is taking over stores.")
+            else:
+                st.caption("Use this when the goal is to reduce several nearby overloaded technicians and make the area more even.")
             purpose_options = ["Initial assignment", "Realignment adjustment"]
             assignment_purpose = st.radio(
                 "Assignment purpose",
@@ -2851,13 +3137,35 @@ if selected_group in ("PMT", "Calibration"):
                 help="Use Initial assignment for new/unassigned territories. Use Realignment adjustment when moving stores from an existing technician.",
             )
             control_cols = st.columns(4)
-            target_employee = control_cols[0].selectbox(
-                f"Target {selected_group} technician",
-                active_targets,
-                index=default_target_index,
-                format_func=lambda value: tech_summary.set_index("employee_id").loc[value, "technician"],
-                key=f"{selected_group}_rebalance_target",
-            )
+            target_employee = None
+            spread_target_employees = []
+            if rebalance_result == "Move stores to one selected technician":
+                target_employee = control_cols[0].selectbox(
+                    f"Target {selected_group} technician",
+                    active_targets,
+                    index=default_target_index,
+                    format_func=lambda value: tech_summary.set_index("employee_id").loc[value, "technician"],
+                    key=f"{selected_group}_rebalance_target",
+                )
+            else:
+                underloaded_count = int((tech_summary["assigned_stores"].fillna(0).astype(int) < avg_count).sum()) if avg_count else 0
+                control_cols[0].metric("Underloaded techs", underloaded_count)
+                tech_lookup = tech_summary.set_index("employee_id")
+                default_spread_targets = []
+                for _, row in tech_summary.iterrows():
+                    assigned_stores = int(row["assigned_stores"]) if pd.notna(row["assigned_stores"]) else 0
+                    if assigned_stores < avg_count:
+                        default_spread_targets.append(int(row["employee_id"]))
+                if not default_spread_targets and not zero_store_techs.empty:
+                    default_spread_targets = [int(value) for value in zero_store_techs["employee_id"].tolist()]
+                spread_target_employees = st.multiselect(
+                    f"{selected_group} technicians to receive stores",
+                    active_targets,
+                    default=[value for value in default_spread_targets if value in active_targets],
+                    format_func=lambda value: f"{tech_lookup.loc[value, 'technician']} ({int(tech_lookup.loc[value, 'assigned_stores']) if pd.notna(tech_lookup.loc[value, 'assigned_stores']) else 0} stores)",
+                    key=f"{selected_group}_rebalance_spread_targets",
+                    help="Choose every technician you want included as a possible newly assigned technician in the spread preview.",
+                )
             if assignment_purpose == "Initial assignment":
                 source_mode_options = ["Unassigned stores only", "All stores"]
                 default_source_index = 0 if unassigned_count > 0 else 1
@@ -2870,6 +3178,12 @@ if selected_group in ("PMT", "Calibration"):
                 index=default_source_index,
                 key=f"{selected_group}_rebalance_source_mode_{assignment_purpose}",
             )
+            if source_mode == "All stores":
+                st.caption("All stores spreads suggested moves across nearby technicians and avoids dropping any one technician below a fair store count.")
+            elif source_mode == "Pull from overloaded technicians":
+                st.caption("Overloaded mode pulls only from technicians above the current average store count.")
+            elif source_mode == "Pull from selected technician":
+                st.caption("Selected technician mode limits how many stores are pulled so the source technician is not reduced below a fair split with the target.")
             source_options = source_technician_options(stores_df, tech_config["employee_field"], tech_config["person_column"])
             source_employee = None
             if source_mode == "Pull from selected technician":
@@ -2894,19 +3208,35 @@ if selected_group in ("PMT", "Calibration"):
                 distance_limit = None
             else:
                 distance_limit = int(distance_choice.split()[0])
-            generate_disabled = source_mode == "Pull from selected technician" and source_employee is None
+            generate_disabled = (
+                (source_mode == "Pull from selected technician" and source_employee is None)
+                or (rebalance_result == "Spread stores across multiple nearby technicians" and not spread_target_employees)
+            )
             if st.button("Auto Suggest Assignment", type="primary", disabled=generate_disabled, key=f"{selected_group}_rebalance_generate"):
-                preview, issue = rebalance_candidate_preview(
-                    stores_df,
-                    tech_summary,
-                    tech_config["employee_field"],
-                    tech_config["person_column"],
-                    target_employee,
-                    source_mode,
-                    source_employee_id=source_employee,
-                    target_store_count=target_count,
-                    distance_limit=distance_limit,
-                )
+                if rebalance_result == "Move stores to one selected technician":
+                    preview, issue = rebalance_candidate_preview(
+                        stores_df,
+                        tech_summary,
+                        tech_config["employee_field"],
+                        tech_config["person_column"],
+                        target_employee,
+                        source_mode,
+                        source_employee_id=source_employee,
+                        target_store_count=target_count,
+                        distance_limit=distance_limit,
+                    )
+                else:
+                    preview, issue = multi_technician_rebalance_preview(
+                        stores_df,
+                        tech_summary,
+                        tech_config["employee_field"],
+                        tech_config["person_column"],
+                        source_mode,
+                        source_employee_id=source_employee,
+                        target_store_count=target_count,
+                        distance_limit=distance_limit,
+                        target_employee_ids=spread_target_employees,
+                    )
                 if issue:
                     st.warning(issue)
                     st.session_state.pop(rebalance_key, None)
@@ -2941,8 +3271,10 @@ if selected_group in ("PMT", "Calibration"):
                     column_config={
                         "include": st.column_config.CheckboxColumn("Include", default=True),
                         "store_id": st.column_config.NumberColumn("Store ID", disabled=True),
-                        "distance_from_target_home": st.column_config.NumberColumn("Target Miles", format="%.1f"),
-                        "distance_from_current_home": st.column_config.TextColumn("Current Miles"),
+                        "current_technician": st.column_config.TextColumn("Original Technician"),
+                        "proposed_technician": st.column_config.TextColumn("Newly Assigned Technician"),
+                        "distance_from_target_home": st.column_config.NumberColumn("Newly Assigned Miles", format="%.1f"),
+                        "distance_from_current_home": st.column_config.TextColumn("Original Miles"),
                         "distance_improvement": st.column_config.TextColumn("Distance Improvement"),
                     },
                     key=editor_key,
@@ -2951,7 +3283,17 @@ if selected_group in ("PMT", "Calibration"):
                 full_preview["include"] = edited_preview["include"].tolist()
                 selected_preview = full_preview[full_preview["include"] == True].copy()
                 selected_count = len(selected_preview)
-                st.metric("Stores selected for reassignment", selected_count)
+                preview_actions = st.columns([0.28, 0.32, 0.4])
+                preview_actions[0].metric("Stores selected for reassignment", selected_count)
+                preview_actions[1].download_button(
+                    "Download Store Change Preview Excel",
+                    data=excel_bytes(rebalance_store_change_export(full_preview)),
+                    file_name=f"{selected_group.lower()}_store_change_preview.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    disabled=full_preview.empty,
+                    key=f"{selected_group}_rebalance_preview_export_top",
+                )
+                preview_actions[2].caption("Excel sheet: Report. Compare Original Technician to Newly Assigned Technician.")
                 impact_df = rebalance_impact_summary(tech_summary, full_preview)
                 if not impact_df.empty:
                     st.dataframe(impact_df, use_container_width=True, hide_index=True)
@@ -2989,11 +3331,11 @@ if selected_group in ("PMT", "Calibration"):
                     proposal_lookup = proposal_lookup.set_index("store_id")
                     drawn_review = drawn_preview_stores.copy()
                     drawn_review["store_id"] = pd.to_numeric(drawn_review["id"], errors="coerce").astype("Int64")
-                    drawn_review["Current PMT"] = drawn_review[tech_config["person_column"]].fillna("Unassigned").replace("", "Unassigned")
-                    drawn_review["Proposed PMT"] = drawn_review["store_id"].map(lambda value: proposal_lookup.loc[value, "proposed_technician"] if value in proposal_lookup.index and bool(proposal_lookup.loc[value, "include"]) else "Keep current")
+                    drawn_review["Original Technician"] = drawn_review[tech_config["person_column"]].fillna("Unassigned").replace("", "Unassigned")
+                    drawn_review["Newly Assigned Technician"] = drawn_review["store_id"].map(lambda value: proposal_lookup.loc[value, "proposed_technician"] if value in proposal_lookup.index and bool(proposal_lookup.loc[value, "include"]) else "Keep current")
                     drawn_review["Status"] = drawn_review["store_id"].map(lambda value: "Changing" if value in proposal_lookup.index and bool(proposal_lookup.loc[value, "include"]) else "No change")
                     st.dataframe(
-                        drawn_review[["store_number", "city", "state", "Current PMT", "Proposed PMT", "Status"]],
+                        drawn_review[["store_number", "city", "state", "Original Technician", "Newly Assigned Technician", "Status"]],
                         use_container_width=True,
                         hide_index=True,
                     )
@@ -3020,20 +3362,14 @@ if selected_group in ("PMT", "Calibration"):
                         st.session_state[map_edit_count_key] = map_edit_count + 1
                         st.rerun()
                     map_adjust_cols[3].caption("Use Keep current PMT to remove suggested stores from the plan, or choose a PMT to add/change the drawn stores.")
-                st.download_button(
-                    "Export Rebalance Preview",
-                    data=excel_bytes(full_preview),
-                    file_name=f"{selected_group.lower()}_rebalance_preview.xlsx",
-                    disabled=full_preview.empty,
+                confirmed = st.checkbox(
+                    f"I reviewed these {selected_count} {selected_group} assignment change(s).",
+                    key=f"{selected_group}_rebalance_confirm_check",
                 )
-                if selected_count >= 10:
-                    confirm_text = st.text_input(f"Type REASSIGN to confirm {selected_count} {selected_group} store changes", key=f"{selected_group}_rebalance_confirm_text")
-                    confirmed = confirm_text.strip().upper() == "REASSIGN"
-                else:
-                    confirmed = st.checkbox(f"Confirm {selected_group} assignment changes", key=f"{selected_group}_rebalance_confirm_check")
                 apply_cols = st.columns([0.25, 0.25, 0.5])
                 if apply_cols[0].button("Save Assignment Plan", type="primary", disabled=selected_count == 0 or not confirmed, key=f"{selected_group}_rebalance_apply"):
                     audit_rows = []
+                    applied_change_export = selected_preview.copy()
                     with session_scope() as session:
                         team_cache = {}
                         for _, row in selected_preview.iterrows():
@@ -3065,9 +3401,10 @@ if selected_group in ("PMT", "Calibration"):
                             description=f"Store {audit['store_number']}: {audit['old']} to {audit['new']} by rebalance tool. Reason: {audit['reason']}",
                         )
                     sync_technician_areas(selected_group, tech_config["employee_field"], tech_config["team_field"])
+                    st.session_state[last_rebalance_export_key] = applied_change_export
                     st.session_state.pop(rebalance_key, None)
                     st.session_state.pop(editor_key, None)
-                    st.success(f"Saved {len(audit_rows)} {selected_group} assignment change(s).")
+                    st.success(f"Saved {len(audit_rows)} {selected_group} assignment change(s). The Store Change Excel Export remains at the bottom of this section.")
                     st.rerun()
                 if apply_cols[1].button("Cancel Preview", key=f"{selected_group}_rebalance_cancel"):
                     st.session_state.pop(rebalance_key, None)
@@ -3115,18 +3452,19 @@ if selected_group in ("PMT", "Calibration"):
                     )
                     st.caption("Showing up to 100 affected stores. Export the current assignment list above if you need the full list before changing it.")
                 deactivate_disabled = deactivate_action == "Reassign all stores to one technician" and replacement_employee is None
-                deactivate_confirm = st.text_input(
-                    f"Type DEACTIVATE to confirm deactivating this {selected_group} technician",
+                deactivate_confirmed = st.checkbox(
+                    f"I reviewed this {selected_group} technician deactivation/replacement.",
                     key=f"{selected_group}_deactivate_confirm",
                 )
                 if st.button(
                     f"Deactivate {selected_group} Technician",
                     type="secondary",
-                    disabled=deactivate_disabled or deactivate_confirm.strip().upper() != "DEACTIVATE",
+                    disabled=deactivate_disabled or not deactivate_confirmed,
                     key=f"{selected_group}_deactivate_apply",
                 ):
                     audit_rows = []
-                    with session_scope() as session:
+                    deactivated_name = dict(source_options).get(int(deactivate_employee), f"Employee {deactivate_employee}")
+                    with session_scope(f"{selected_group} technician deactivated: {deactivated_name}") as session:
                         employee = session.get(Employee, int(deactivate_employee))
                         if employee:
                             employee.active = False
@@ -3161,11 +3499,38 @@ if selected_group in ("PMT", "Calibration"):
                         f"{selected_group.lower()} technician deactivated",
                         "employees",
                         record_id=int(deactivate_employee),
-                        description=f"{dict(source_options).get(int(deactivate_employee), deactivate_employee)} deactivated. Store handling: {deactivate_action}.",
+                        description=f"{deactivated_name} deactivated. Store handling: {deactivate_action}.",
                     )
-                    sync_technician_areas(selected_group, tech_config["employee_field"], tech_config["team_field"])
-                    st.success(f"Deactivated technician and processed {len(audit_rows)} assigned store(s).")
+                    sync_technician_areas(selected_group, tech_config["employee_field"], tech_config["team_field"], save_undo=False)
+                    source_store_lookup = source_store_preview.set_index("id") if not source_store_preview.empty else pd.DataFrame()
+                    deactivation_export_rows = []
+                    for audit in audit_rows:
+                        store_id = int(audit["store_id"])
+                        source_row = source_store_lookup.loc[store_id] if not source_store_lookup.empty and store_id in source_store_lookup.index else {}
+                        deactivation_export_rows.append(
+                            {
+                                "include": True,
+                                "store_id": store_id,
+                                "store_number": audit.get("store_number"),
+                                "address": source_row.get("address") if hasattr(source_row, "get") else "",
+                                "city": source_row.get("city") if hasattr(source_row, "get") else "",
+                                "state": source_row.get("state") if hasattr(source_row, "get") else "",
+                                "current_technician": deactivated_name,
+                                "proposed_technician": audit.get("new"),
+                                "reason": f"Technician deactivation: {deactivate_action}",
+                                "review_flag": "",
+                            }
+                        )
+                    st.session_state[last_rebalance_export_key] = pd.DataFrame(deactivation_export_rows)
+                    st.success(f"Deactivated {deactivated_name} and processed {len(audit_rows)} assigned store(s). Use Undo Last Change in the sidebar if needed.")
                     st.rerun()
+
+            active_export_df = pd.DataFrame()
+            if isinstance(st.session_state.get(rebalance_key), pd.DataFrame) and not st.session_state.get(rebalance_key).empty:
+                active_export_df = st.session_state.get(rebalance_key)
+            elif isinstance(st.session_state.get(last_rebalance_export_key), pd.DataFrame) and not st.session_state.get(last_rebalance_export_key).empty:
+                active_export_df = st.session_state.get(last_rebalance_export_key)
+            render_store_change_excel_export(selected_group, active_export_df, "bottom")
 
     with st.expander(f"Add or Update {selected_group} Technician", expanded=tech_summary.empty):
         with st.form(f"{selected_group}_technician_profile_form", clear_on_submit=False):
@@ -3282,9 +3647,12 @@ if selected_group in ("PMT", "Calibration"):
                         f"Remove {remove_row['technician']}? "
                         + ("They have no assigned stores, so this will delete the technician record." if assigned_to_remove == 0 else f"They have {assigned_to_remove} assigned store(s), so this will deactivate them and leave assignments for review.")
                     )
-                    confirm_remove = st.text_input(f"Type REMOVE to confirm {remove_row['technician']}", key=f"{selected_group}_remove_confirm")
+                    confirm_remove = st.checkbox(
+                        f"I reviewed this {selected_group} technician removal.",
+                        key=f"{selected_group}_remove_confirm",
+                    )
                     c_remove, c_cancel = st.columns(2)
-                    if c_remove.button("Confirm Remove Technician", type="primary", disabled=confirm_remove.strip().upper() != "REMOVE", key=f"{selected_group}_confirm_remove_btn"):
+                    if c_remove.button("Confirm Remove Technician", type="primary", disabled=not confirm_remove, key=f"{selected_group}_confirm_remove_btn"):
                         ok, message = remove_or_deactivate_technician(remove_id, selected_group, tech_config["employee_field"], tech_config["team_field"])
                         st.session_state.pop(f"{selected_group}_remove_tech_id", None)
                         if ok:

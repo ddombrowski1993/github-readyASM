@@ -806,6 +806,8 @@ def step_flow(steps, hint=""):
 
 
 def sidebar_nav():
+    from src.database import latest_undo_snapshot, restore_latest_undo_snapshot
+
     if st.session_state.get("authenticated"):
         display_name = f"{st.session_state.get('first_name', '')} {st.session_state.get('last_name', '')}".strip()
         st.sidebar.markdown(
@@ -919,6 +921,19 @@ def sidebar_nav():
         st.sidebar.page_link("pages/10_Settings.py", label="Settings")
         st.sidebar.page_link("pages/17_Admin_Controls.py", label="Admin Controls")
     st.sidebar.page_link("pages/15_Help_How_It_Works.py", label="Help / How To")
+    st.sidebar.divider()
+    undo_snapshot = latest_undo_snapshot()
+    if undo_snapshot:
+        st.sidebar.caption(f"Undo last change: {undo_snapshot.get('action_label') or undo_snapshot.get('table_names', '')}")
+    else:
+        st.sidebar.caption("No undo point saved yet.")
+    if st.sidebar.button("Undo Last Change", disabled=not undo_snapshot, key="global_undo_last_change"):
+        ok, message = restore_latest_undo_snapshot()
+        if ok:
+            st.sidebar.success(message)
+            st.cache_resource.clear()
+            st.rerun()
+        st.sidebar.error(message)
 
 
 def require_login():
@@ -935,7 +950,7 @@ def require_login():
             <div style="background:#ffffff;border:2px solid #dc2626;border-radius:8px;padding:1rem 1.25rem;margin:1rem 0;color:#111827;max-width:760px;">
               <h2 style="margin:0 0 .5rem 0;font-size:1.35rem;">Login temporarily unavailable</h2>
               <p style="margin:.25rem 0;">The persistent database could not be loaded. Existing information has not been intentionally deleted.</p>
-              <p style="margin:.25rem 0;">The app will not open first-account setup or create a temporary local database while production storage is unavailable.</p>
+              <p style="margin:.25rem 0;">The app will not open first-account setup unless PostgreSQL storage is available.</p>
             </div>
             """,
             unsafe_allow_html=True,
