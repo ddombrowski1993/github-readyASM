@@ -1421,10 +1421,10 @@ def require_login():
                 st.error(message)
     with reset_tab:
         st.markdown('<div class="login-card"><h3>Reset password</h3><p>Enter your email, answer your secret question, then choose a new password.</p></div>', unsafe_allow_html=True)
-        reset_email = st.text_input("Email address", key="reset_email")
+        reset_email = st.text_input("Username or email address", key="reset_email")
         recovery_user = find_user_by_email(reset_email) if reset_email.strip() else None
         if reset_email.strip() and not recovery_user:
-            st.info("Enter the email address used for your account.")
+            st.info("Enter the username or email address used for your account.")
         saved_question = recovery_user.get("secret_question") if recovery_user else ""
         reset_question_options = SECRET_QUESTIONS if not saved_question or saved_question in SECRET_QUESTIONS else SECRET_QUESTIONS + [saved_question]
         reset_question_index = reset_question_options.index(saved_question) if saved_question in reset_question_options else 0

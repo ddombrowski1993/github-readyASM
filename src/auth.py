@@ -232,6 +232,27 @@ def _email_match_clause(column_name):
     return f"lower(trim(coalesce({column_name}, ''))) = lower(trim(:email))"
 
 
+def normalize_login_identifier(value):
+    return re.sub(r"\s+", "", str(value or "")).strip().lower()
+
+
+def find_user_by_login_identifier(identifier):
+    init_auth_db()
+    login_key = normalize_login_identifier(identifier)
+    if not login_key:
+        return None
+    users_table = _public_table("app_users")
+    with _engine().connect() as conn:
+        rows = conn.execute(text(f"select * from {users_table}")).fetchall()
+    for row in _rows_dict(rows):
+        if login_key in {
+            normalize_login_identifier(row.get("username")),
+            normalize_login_identifier(row.get("email")),
+        }:
+            return row
+    return None
+
+
 def _verify_database_identity(engine):
     if not using_hosted_database():
         return
@@ -634,27 +655,13 @@ def update_user_profile(user_id, first_name, last_name, position_title, s_number
 
 
 def authenticate(username, password):
-    init_auth_db()
-    login = username.strip()
-    engine = _engine()
-    users_table = _public_table("app_users")
-    with engine.connect() as conn:
-        user = conn.execute(
-            text(
-                f"""
-            select *
-            from {users_table}
-            where {_login_match_clause('username')}
-               or {_login_match_clause('email')}
-            """,
-            ),
-            {"login": login},
-        ).fetchone()
-    user = _row_dict(user)
+    user = find_user_by_login_identifier(username)
     if not user or not verify_password(password, user["password_hash"]):
         return None
     if int(user.get("active", 1)) != 1:
         return None
+    engine = _engine()
+    users_table = _public_table("app_users")
     now = datetime.utcnow() if engine.dialect.name == "postgresql" else datetime.utcnow().isoformat()
     with engine.begin() as conn:
         conn.execute(text(f"update {users_table} set last_login = :last_login where id = :user_id"), {"last_login": now, "user_id": int(user["id"])})
@@ -822,14 +829,7 @@ def can_access_account_slug(account_slug):
 
 
 def find_user_by_email(email):
-    init_auth_db()
-    users_table = _public_table("app_users")
-    with _engine().connect() as conn:
-        user = conn.execute(
-            text(f"select * from {users_table} where {_email_match_clause('email')}"),
-            {"email": email.strip()},
-        ).fetchone()
-    return _row_dict(user)
+    return find_user_by_login_identifier(email)
 
 
 def reset_password_with_secret(email, secret_answer, new_password):
