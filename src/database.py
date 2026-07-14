@@ -20,8 +20,10 @@ from src.models import (
 )
 from src.auth import (
     DatabaseUnavailable,
+    allow_local_sqlite,
     configured_database_url,
     current_account_schema,
+    is_sqlite_url,
     is_postgresql_url,
     using_hosted_database,
 )
@@ -33,20 +35,26 @@ load_dotenv()
 
 
 def get_database_url():
-    env_url = configured_database_url()
-    if not env_url:
+    database_url = configured_database_url()
+    if not database_url:
         raise DatabaseUnavailable(
-            "PostgreSQL DATABASE_URL is required. Refusing to create or use local SQLite workspace storage."
+            "PostgreSQL DATABASE_URL is missing. Add DATABASE_URL as an environment variable or as a top-level Streamlit secret."
         )
-    if not is_postgresql_url(env_url):
+    if is_postgresql_url(database_url):
+        return database_url
+    if is_sqlite_url(database_url) and allow_local_sqlite():
+        return database_url
+    if is_sqlite_url(database_url):
         raise DatabaseUnavailable(
-            "DATABASE_URL must be PostgreSQL, such as postgresql+psycopg2://user:password@host:5432/database."
+            "SQLite DATABASE_URL is only allowed for intentional local development with FIELD_PLANNER_ALLOW_LOCAL_SQLITE=true. Hosted deployments require PostgreSQL."
         )
-    return env_url
+    raise DatabaseUnavailable(
+        "DATABASE_URL must be PostgreSQL, such as postgresql+psycopg2://user:password@host:5432/database."
+    )
 
 
 def using_sqlite():
-    return False
+    return is_sqlite_url(configured_database_url()) and allow_local_sqlite()
 
 
 @st.cache_resource(show_spinner=False)

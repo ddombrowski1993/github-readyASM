@@ -7,11 +7,15 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
 LEGACY_DATABASE_PATH = APP_DIR / "asm_command_center.db"
+load_dotenv(APP_DIR / ".env")
+load_dotenv()
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -40,12 +44,23 @@ def _secret_or_env(name, default=""):
 
 
 def configured_database_url():
-    return _secret_or_env("DATABASE_URL")
+    return normalize_database_url(_secret_or_env("DATABASE_URL"))
+
+
+def normalize_database_url(url):
+    normalized = str(url or "").strip()
+    if normalized.lower().startswith("postgres://"):
+        return f"postgresql://{normalized[len('postgres://'):]}"
+    return normalized
 
 
 def is_postgresql_url(url):
     normalized = str(url or "").strip().lower()
     return normalized.startswith("postgresql://") or normalized.startswith("postgresql+")
+
+
+def is_sqlite_url(url):
+    return str(url or "").strip().lower().startswith("sqlite:")
 
 
 def deployment_environment():
@@ -83,6 +98,14 @@ def is_hosted_runtime():
 
 def is_production():
     return deployment_environment() in {"prod", "production", "streamlit", "hosted"}
+
+
+def allow_local_sqlite():
+    return _secret_or_env("FIELD_PLANNER_ALLOW_LOCAL_SQLITE").lower() == "true" and not is_hosted_runtime()
+
+
+def using_local_sqlite_database():
+    return is_sqlite_url(configured_database_url()) and allow_local_sqlite()
 
 
 def using_hosted_database():
@@ -139,16 +162,22 @@ def clear_transient_session_state():
 
 
 def _auth_database_url():
-    hosted_url = configured_database_url()
-    if not hosted_url:
+    database_url = configured_database_url()
+    if not database_url:
         raise DatabaseUnavailable(
-            "PostgreSQL DATABASE_URL is required. The app will not create or use local SQLite account storage."
+            "PostgreSQL DATABASE_URL is missing. Add DATABASE_URL as an environment variable or as a top-level Streamlit secret."
         )
-    if not is_postgresql_url(hosted_url):
+    if is_postgresql_url(database_url):
+        return database_url
+    if using_local_sqlite_database():
+        return database_url
+    if is_sqlite_url(database_url):
         raise DatabaseUnavailable(
-            "DATABASE_URL must be a PostgreSQL URL, such as postgresql+psycopg2://user:password@host:5432/database."
+            "SQLite DATABASE_URL is only allowed for intentional local development with FIELD_PLANNER_ALLOW_LOCAL_SQLITE=true. Hosted deployments require PostgreSQL."
         )
-    return hosted_url
+    raise DatabaseUnavailable(
+        "DATABASE_URL must be a PostgreSQL URL, such as postgresql+psycopg2://user:password@host:5432/database."
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -232,79 +261,86 @@ def _verify_database_identity(engine):
 def init_auth_db():
     if not using_hosted_database():
         ACCOUNT_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
-    engine = _engine()
-    _verify_database_identity(engine)
-    with engine.begin() as conn:
-        if engine.dialect.name == "postgresql":
-            conn.execute(
-                text(
-                    """
-                    create table if not exists app_users (
-                        id serial primary key,
-                        username text not null unique,
-                        first_name text not null default '',
-                        last_name text not null default '',
-                        email text not null,
-                        password_hash text not null,
-                        account_slug text not null unique,
-                        created_at timestamp not null
+    try:
+        engine = _engine()
+        _verify_database_identity(engine)
+        with engine.begin() as conn:
+            if engine.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        """
+                        create table if not exists app_users (
+                            id serial primary key,
+                            username text not null unique,
+                            first_name text not null default '',
+                            last_name text not null default '',
+                            email text not null,
+                            password_hash text not null,
+                            account_slug text not null unique,
+                            created_at timestamp not null
+                        )
+                        """
                     )
-                    """
                 )
-            )
-        else:
+            else:
+                conn.execute(
+                    text(
+                        """
+                        create table if not exists app_users (
+                    id integer primary key autoincrement,
+                    username text not null unique,
+                    first_name text not null default '',
+                    last_name text not null default '',
+                    email text not null,
+                    password_hash text not null,
+                    account_slug text not null unique,
+                    created_at text not null
+                )
+                """
+                    )
+                )
+        existing_columns = {column["name"] for column in inspect(engine).get_columns("app_users")}
+        column_specs = {
+            "first_name": "text not null default ''",
+            "last_name": "text not null default ''",
+            "secret_question": "text not null default ''",
+            "secret_answer_hash": "text not null default ''",
+            "account_role": "text not null default 'User'",
+            "manager_user_id": "integer",
+            "active": "integer not null default 1",
+            "updated_at": "timestamp" if engine.dialect.name == "postgresql" else "text",
+            "last_login": "timestamp" if engine.dialect.name == "postgresql" else "text",
+            "position_title": "text not null default ''",
+            "s_number": "text not null default ''",
+            "street_address": "text not null default ''",
+            "city": "text not null default ''",
+            "state": "text not null default ''",
+            "zip_code": "text not null default ''",
+            "home_latitude": "real",
+            "home_longitude": "real",
+        }
+        with engine.begin() as conn:
+            for column_name, column_type in column_specs.items():
+                if column_name not in existing_columns:
+                    conn.execute(text(f"alter table app_users add column {column_name} {column_type}"))
+            if "first_name" not in existing_columns:
+                pass
             conn.execute(
                 text(
                     """
-                    create table if not exists app_users (
-                id integer primary key autoincrement,
-                username text not null unique,
-                first_name text not null default '',
-                last_name text not null default '',
-                email text not null,
-                password_hash text not null,
-                account_slug text not null unique,
-                created_at text not null
+                update app_users
+                set account_role = 'Admin', active = 1
+                where lower(email) = lower(:email)
+                """,
+                ),
+                {"email": "daniel.dombrowski@7-11.com"},
             )
-            """
-                )
-            )
-    existing_columns = {column["name"] for column in inspect(engine).get_columns("app_users")}
-    column_specs = {
-        "first_name": "text not null default ''",
-        "last_name": "text not null default ''",
-        "secret_question": "text not null default ''",
-        "secret_answer_hash": "text not null default ''",
-        "account_role": "text not null default 'User'",
-        "manager_user_id": "integer",
-        "active": "integer not null default 1",
-        "updated_at": "timestamp" if engine.dialect.name == "postgresql" else "text",
-        "last_login": "timestamp" if engine.dialect.name == "postgresql" else "text",
-        "position_title": "text not null default ''",
-        "s_number": "text not null default ''",
-        "street_address": "text not null default ''",
-        "city": "text not null default ''",
-        "state": "text not null default ''",
-        "zip_code": "text not null default ''",
-        "home_latitude": "real",
-        "home_longitude": "real",
-    }
-    with engine.begin() as conn:
-        for column_name, column_type in column_specs.items():
-            if column_name not in existing_columns:
-                conn.execute(text(f"alter table app_users add column {column_name} {column_type}"))
-        if "first_name" not in existing_columns:
-            pass
-        conn.execute(
-            text(
-                """
-            update app_users
-            set account_role = 'Admin', active = 1
-            where lower(email) = lower(:email)
-            """,
-            ),
-            {"email": "daniel.dombrowski@7-11.com"},
-        )
+    except DatabaseUnavailable:
+        raise
+    except SQLAlchemyError as exc:
+        if using_hosted_database():
+            raise DatabaseUnavailable(f"PostgreSQL connection failed: {exc}") from exc
+        raise
 
 
 def user_count():
