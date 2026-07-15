@@ -2555,6 +2555,10 @@ def team_store_counts(stores_df, group):
     return counts
 
 
+AUTO_ASSIGN_MAX_BALANCE_EXTRA_MILES = 20.0
+AUTO_ASSIGN_MAX_BALANCE_DISTANCE_RATIO = 1.35
+
+
 def auto_assign(stores_df, selected_teams_df, group, method=None):
     config = group_config(group)
     if not config or stores_df.empty or selected_teams_df.empty:
@@ -2615,6 +2619,9 @@ def auto_assign(stores_df, selected_teams_df, group, method=None):
             if nearest_team["team_id"] not in overfull or next_team["team_id"] not in underfull:
                 continue
             move_cost = next_distance - nearest_distance
+            distance_ratio = next_distance / max(nearest_distance, 1.0)
+            if move_cost > AUTO_ASSIGN_MAX_BALANCE_EXTRA_MILES or distance_ratio > AUTO_ASSIGN_MAX_BALANCE_DISTANCE_RATIO:
+                continue
             if best_move is None or move_cost < best_move["cost"]:
                 best_move = {
                     "store_id": store_id,
@@ -4129,7 +4136,7 @@ auto_teams = teams_for_group(team_df, stores_df, auto_group)
 included_team_ids = auto_cols[1].multiselect("Teams to include", auto_teams["id"].tolist() if not auto_teams.empty else [], default=auto_teams["id"].tolist() if not auto_teams.empty else [], format_func=lambda x: auto_teams.set_index("id").loc[x, "team_name"] if not auto_teams.empty else "")
 selected_auto_teams = auto_teams[auto_teams["id"].isin(included_team_ids)] if not auto_teams.empty else auto_teams
 anchor_issues = auto_assign_anchor_issues(selected_auto_teams, stores_df)
-st.caption("Auto Assign starts each store at the nearest team city/state anchor, then balances only by moving close boundary stores to their next-nearest neighboring area. It will not skip over an intermediate city just to force equal counts.")
+st.caption("Auto Assign starts each store at the nearest team city/state anchor, then balances only close boundary stores when the next area is still geographically reasonable. It will not send stores far past closer areas just to force equal counts.")
 if not selected_auto_teams.empty:
     anchor_rows = []
     for _, team in selected_auto_teams.iterrows():
@@ -4187,7 +4194,7 @@ if st.button("Preview Auto Assign", disabled=not included_team_ids or not anchor
     st.session_state["auto_assign_preview"] = preview.to_dict("records")
     st.session_state["auto_assign_group"] = auto_group
     st.session_state["auto_assign_version"] = AUTO_ASSIGN_VERSION
-    st.session_state["auto_assign_method"] = "Neighbor-balanced nearest city/state anchor"
+    st.session_state["auto_assign_method"] = "Nearest city/state anchor with nearby-boundary balancing"
 
 reset_cols = st.columns([0.35, 0.65])
 confirm_clear_assignments = reset_cols[1].text_input(f"Type CLEAR to clear existing {auto_group} assignments", key="confirm_clear_group_assignments")
