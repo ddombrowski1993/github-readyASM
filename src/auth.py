@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -17,6 +18,7 @@ APP_DIR = Path(__file__).resolve().parents[1]
 LEGACY_DATABASE_PATH = APP_DIR / "asm_command_center.db"
 load_dotenv(APP_DIR / ".env")
 load_dotenv()
+LOGGER = logging.getLogger(__name__)
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -143,10 +145,48 @@ def _safe_identifier(value, prefix="fp"):
 def current_account_schema():
     if not using_hosted_database():
         return None
-    account_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
+    account_slug = effective_account_slug()
     if not account_slug:
         return None
     return _safe_identifier(f"fp_{account_slug}")
+
+
+def authenticated_user_id():
+    return st.session_state.get("authenticated_user_id") or st.session_state.get("user_id")
+
+
+def effective_user_id():
+    return st.session_state.get("effective_user_id") or authenticated_user_id()
+
+
+def effective_account_slug():
+    return (
+        st.session_state.get("effective_account_slug")
+        or st.session_state.get("active_account_slug")
+        or st.session_state.get("account_slug")
+    )
+
+
+def get_effective_account_context():
+    authenticated_id = authenticated_user_id()
+    effective_id = effective_user_id()
+    authenticated_slug = st.session_state.get("account_slug")
+    effective_slug = effective_account_slug()
+    return {
+        "authenticated_user_id": authenticated_id,
+        "authenticated_account_slug": authenticated_slug,
+        "impersonated_user_id": st.session_state.get("impersonated_user_id"),
+        "impersonated_account_slug": st.session_state.get("impersonated_account_slug"),
+        "effective_user_id": effective_id,
+        "effective_account_slug": effective_slug,
+        "effective_account_label": st.session_state.get("effective_account_label")
+        or st.session_state.get("active_account_label")
+        or effective_slug,
+        "is_impersonating": bool(
+            st.session_state.get("impersonated_user_id")
+            and str(effective_slug or "") != str(authenticated_slug or "")
+        ),
+    }
 
 
 def data_dir():
@@ -473,7 +513,7 @@ def auth_storage_status():
 def current_account_db_path():
     if using_hosted_database():
         return None
-    account_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
+    account_slug = effective_account_slug()
     if not account_slug:
         return None
     return account_db_path(account_slug)
@@ -916,6 +956,9 @@ def sign_in(user):
     clear_transient_session_state()
     st.session_state["authenticated"] = True
     st.session_state["user_id"] = int(user["id"])
+    st.session_state["authenticated_user_id"] = int(user["id"])
+    st.session_state["effective_user_id"] = int(user["id"])
+    st.session_state["impersonated_user_id"] = None
     st.session_state["username"] = user["username"]
     st.session_state["first_name"] = user.get("first_name", "")
     st.session_state["last_name"] = user.get("last_name", "")
@@ -928,9 +971,18 @@ def sign_in(user):
     st.session_state["user_email"] = user["email"]
     st.session_state["account_slug"] = user["account_slug"]
     st.session_state["active_account_slug"] = user["account_slug"]
+    st.session_state["effective_account_slug"] = user["account_slug"]
+    st.session_state["impersonated_account_slug"] = None
     st.session_state["active_account_label"] = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user["email"]
+    st.session_state["effective_account_label"] = st.session_state["active_account_label"]
     st.session_state["account_role"] = user.get("account_role", "User")
     st.session_state["manager_user_id"] = user.get("manager_user_id")
+    LOGGER.info(
+        "Account context sign in authenticated_user=%s effective_user=%s effective_account_slug=%s",
+        st.session_state.get("authenticated_user_id"),
+        st.session_state.get("effective_user_id"),
+        st.session_state.get("effective_account_slug"),
+    )
 
 
 def sign_out():
@@ -938,6 +990,9 @@ def sign_out():
     for key in [
         "authenticated",
         "user_id",
+        "authenticated_user_id",
+        "effective_user_id",
+        "impersonated_user_id",
         "username",
         "first_name",
         "last_name",
@@ -950,7 +1005,10 @@ def sign_out():
         "user_email",
         "account_slug",
         "active_account_slug",
+        "effective_account_slug",
+        "impersonated_account_slug",
         "active_account_label",
+        "effective_account_label",
         "account_role",
         "manager_user_id",
     ]:

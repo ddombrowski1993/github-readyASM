@@ -24,6 +24,7 @@ from src.auth import (
     allow_local_sqlite,
     configured_database_url,
     current_account_schema,
+    get_effective_account_context,
     is_sqlite_url,
     is_postgresql_url,
     using_hosted_database,
@@ -62,6 +63,15 @@ def using_sqlite():
 def get_engine(url=None, schema=None):
     url = url or get_database_url()
     schema = schema if schema is not None else current_account_schema()
+    context = get_effective_account_context()
+    LOGGER.info(
+        "Database engine requested authenticated_user=%s impersonated_user=%s effective_user=%s effective_account_slug=%s schema=%s",
+        context.get("authenticated_user_id"),
+        context.get("impersonated_user_id"),
+        context.get("effective_user_id"),
+        context.get("effective_account_slug"),
+        schema or "",
+    )
     return _get_engine(url, schema or "")
 
 
@@ -122,6 +132,7 @@ def get_database_status():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             database_name = conn.execute(text("select current_database()")).scalar()
+            active_schema = conn.execute(text("select current_schema()")).scalar()
             users_found = None
             stores_found = None
             schedules_found = None
@@ -138,6 +149,7 @@ def get_database_status():
                         schedules_found = value
                 except Exception:
                     pass
+        context = get_effective_account_context()
         return {
             "configured": True,
             "connected": True,
@@ -145,6 +157,11 @@ def get_database_status():
             "database_type": "PostgreSQL",
             "database_name": database_name,
             "schema": schema or "local",
+            "active_schema": active_schema,
+            "authenticated_user_id": context.get("authenticated_user_id"),
+            "impersonated_user_id": context.get("impersonated_user_id"),
+            "effective_user_id": context.get("effective_user_id"),
+            "effective_account_slug": context.get("effective_account_slug"),
             "users_found": users_found,
             "stores_found": stores_found,
             "schedules_found": schedules_found,

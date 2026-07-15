@@ -2,7 +2,7 @@ import streamlit as st
 
 st.set_page_config(page_title="My Profile", layout="wide")
 
-from src.auth import get_user_by_id, update_user_profile
+from src.auth import effective_user_id, get_user_by_id, update_user_profile
 from src.utils import apply_theme, page_header, require_login, require_page_access, section_header, sidebar_nav
 
 
@@ -14,7 +14,7 @@ require_page_access("My Profile")
 
 page_header("My Profile", "Keep your employee information, S Number, and home base address up to date.")
 
-profile = get_user_by_id(st.session_state.get("user_id"))
+profile = get_user_by_id(effective_user_id())
 if not profile:
     st.warning("Your profile could not be loaded. Sign out and sign back in, then try again.")
     st.stop()
@@ -68,15 +68,18 @@ if submitted:
         zip_code,
     )
     if ok:
-        st.session_state["first_name"] = first_name.strip()
-        st.session_state["last_name"] = last_name.strip()
-        st.session_state["position_title"] = position_title.strip()
-        st.session_state["s_number"] = s_number.strip().upper().replace(" ", "")
-        st.session_state["street_address"] = street_address.strip()
-        st.session_state["city"] = city.strip()
-        st.session_state["state"] = state.strip().upper()[:2]
-        st.session_state["zip_code"] = zip_code.strip()
-        st.session_state["active_account_label"] = f"{first_name.strip()} {last_name.strip()}".strip() or profile.get("email", "")
+        profile_label = f"{first_name.strip()} {last_name.strip()}".strip() or profile.get("email", "")
+        if int(profile["id"]) == int(st.session_state.get("authenticated_user_id") or st.session_state.get("user_id")):
+            st.session_state["first_name"] = first_name.strip()
+            st.session_state["last_name"] = last_name.strip()
+            st.session_state["position_title"] = position_title.strip()
+            st.session_state["s_number"] = s_number.strip().upper().replace(" ", "")
+            st.session_state["street_address"] = street_address.strip()
+            st.session_state["city"] = city.strip()
+            st.session_state["state"] = state.strip().upper()[:2]
+            st.session_state["zip_code"] = zip_code.strip()
+        st.session_state["active_account_label"] = profile_label
+        st.session_state["effective_account_label"] = profile_label
         st.success(message)
         st.rerun()
     st.error(message)

@@ -1,5 +1,6 @@
 from datetime import date
 from html import escape
+import logging
 from pathlib import Path
 
 import streamlit as st
@@ -10,6 +11,7 @@ from src.auth import authenticate, authenticate_with_reason, accessible_accounts
 
 APP_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(APP_DIR / ".env")
+LOGGER = logging.getLogger(__name__)
 load_dotenv()
 
 UPLOAD_DIR = Path("uploads")
@@ -651,11 +653,28 @@ def clear_workspace_transient_state():
             st.session_state.pop(key, None)
 
 
-def switch_workspace(account_slug, account_label, manager_rollup_active=False, selector_key=None):
+def switch_workspace(account_slug, account_label, manager_rollup_active=False, effective_user_id=None, selector_key=None):
+    authenticated_account_slug = st.session_state.get("account_slug")
+    authenticated_user_id = st.session_state.get("authenticated_user_id") or st.session_state.get("user_id")
+    effective_user_id = int(effective_user_id or authenticated_user_id) if effective_user_id else authenticated_user_id
+    is_impersonating = bool(account_slug and account_slug != authenticated_account_slug)
     clear_workspace_transient_state()
     st.session_state["manager_rollup_active"] = bool(manager_rollup_active)
     st.session_state["active_account_slug"] = account_slug
     st.session_state["active_account_label"] = account_label
+    st.session_state["effective_user_id"] = effective_user_id
+    st.session_state["effective_account_slug"] = account_slug
+    st.session_state["effective_account_label"] = account_label
+    st.session_state["impersonated_user_id"] = effective_user_id if is_impersonating else None
+    st.session_state["impersonated_account_slug"] = account_slug if is_impersonating else None
+    LOGGER.info(
+        "Workspace switch authenticated_user=%s impersonated_user=%s effective_user=%s effective_account_slug=%s manager_rollup=%s",
+        authenticated_user_id,
+        st.session_state.get("impersonated_user_id"),
+        st.session_state.get("effective_user_id"),
+        st.session_state.get("effective_account_slug"),
+        st.session_state.get("manager_rollup_active"),
+    )
     st.cache_resource.clear()
     st.cache_data.clear()
     st.rerun()
@@ -861,6 +880,7 @@ def sidebar_nav():
         if not can_access_account_slug(active_slug):
             active_slug = st.session_state.get("account_slug")
         own_slug = st.session_state.get("account_slug")
+        accounts_by_slug = {account["account_slug"]: account for account in accounts}
         account_slugs = [account["account_slug"] for account in accounts]
         account_labels = {
             account["account_slug"]: "My Workspace" if account["account_slug"] == own_slug else f"{account['first_name']} {account['last_name']}".strip() or account["email"]
@@ -873,7 +893,12 @@ def sidebar_nav():
             st.sidebar.warning(f"Viewing as: {account_labels.get(active_slug, active_slug)}")
             if st.sidebar.button("Return to My Workspace", key="admin_stop_impersonating"):
                 st.session_state["admin_impersonate_workspace_selector"] = own_slug
-                switch_workspace(own_slug, "My Workspace", selector_key="admin_impersonate_workspace_selector")
+                switch_workspace(
+                    own_slug,
+                    "My Workspace",
+                    effective_user_id=accounts_by_slug.get(own_slug, {}).get("id") or st.session_state.get("authenticated_user_id"),
+                    selector_key="admin_impersonate_workspace_selector",
+                )
         else:
             st.sidebar.caption("Viewing your own workspace.")
         selected_slug = st.sidebar.selectbox(
@@ -884,11 +909,18 @@ def sidebar_nav():
             key="admin_impersonate_workspace_selector",
         )
         if selected_slug != st.session_state.get("active_account_slug"):
-            switch_workspace(selected_slug, account_labels.get(selected_slug, selected_slug), selector_key="admin_impersonate_workspace_selector")
+            selected_account = accounts_by_slug.get(selected_slug, {})
+            switch_workspace(
+                selected_slug,
+                account_labels.get(selected_slug, selected_slug),
+                effective_user_id=selected_account.get("id"),
+                selector_key="admin_impersonate_workspace_selector",
+            )
     elif account_role == "Manager" and managed_accounts:
         current_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
         options = ["__manager_rollup__"] + [account["account_slug"] for account in accounts]
         own_slug = st.session_state.get("account_slug")
+        accounts_by_slug = {account["account_slug"]: account for account in accounts}
         account_labels = {
             "__manager_rollup__": "All Managed Users",
             **{
@@ -906,17 +938,29 @@ def sidebar_nav():
         )
         if selected_slug == "__manager_rollup__":
             if not st.session_state.get("manager_rollup_active"):
-                switch_workspace(st.session_state.get("account_slug"), "All Managed Users", manager_rollup_active=True)
+                switch_workspace(
+                    st.session_state.get("account_slug"),
+                    "All Managed Users",
+                    manager_rollup_active=True,
+                    effective_user_id=st.session_state.get("authenticated_user_id") or st.session_state.get("user_id"),
+                )
             st.session_state["active_account_slug"] = st.session_state.get("account_slug")
             st.session_state["active_account_label"] = "All Managed Users"
             st.session_state["manager_rollup_active"] = True
         else:
             if selected_slug != current_slug or st.session_state.get("manager_rollup_active"):
-                switch_workspace(selected_slug, account_labels.get(selected_slug, selected_slug), selector_key="sidebar_workspace_selector")
+                selected_account = accounts_by_slug.get(selected_slug, {})
+                switch_workspace(
+                    selected_slug,
+                    account_labels.get(selected_slug, selected_slug),
+                    effective_user_id=selected_account.get("id"),
+                    selector_key="sidebar_workspace_selector",
+                )
     elif len(accounts) > 1:
         active_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
         if not can_access_account_slug(active_slug):
             active_slug = st.session_state.get("account_slug")
+        accounts_by_slug = {account["account_slug"]: account for account in accounts}
         account_slugs = [account["account_slug"] for account in accounts]
         account_labels = {
             account["account_slug"]: f"{account['first_name']} {account['last_name']}".strip() or account["email"]
@@ -930,14 +974,31 @@ def sidebar_nav():
             key="sidebar_workspace_selector",
         )
         if selected_slug != st.session_state.get("active_account_slug"):
-            switch_workspace(selected_slug, account_labels.get(selected_slug, selected_slug), selector_key="sidebar_workspace_selector")
+            selected_account = accounts_by_slug.get(selected_slug, {})
+            switch_workspace(
+                selected_slug,
+                account_labels.get(selected_slug, selected_slug),
+                effective_user_id=selected_account.get("id"),
+                selector_key="sidebar_workspace_selector",
+            )
     elif accounts:
         if accounts[0]["account_slug"] != st.session_state.get("active_account_slug"):
             clear_workspace_transient_state()
         st.session_state["active_account_slug"] = accounts[0]["account_slug"]
         st.session_state["active_account_label"] = f"{accounts[0]['first_name']} {accounts[0]['last_name']}".strip() or accounts[0]["email"]
+        st.session_state["effective_user_id"] = accounts[0]["id"]
+        st.session_state["effective_account_slug"] = accounts[0]["account_slug"]
+        st.session_state["effective_account_label"] = st.session_state["active_account_label"]
+        st.session_state["impersonated_user_id"] = None
+        st.session_state["impersonated_account_slug"] = None
         st.session_state["manager_rollup_active"] = False
-    active_workspace_label = st.session_state.get("active_account_label") or st.session_state.get("active_account_slug") or "Current workspace"
+    active_workspace_label = (
+        st.session_state.get("effective_account_label")
+        or st.session_state.get("active_account_label")
+        or st.session_state.get("effective_account_slug")
+        or st.session_state.get("active_account_slug")
+        or "Current workspace"
+    )
     if account_role in ("Admin", "Manager"):
         st.sidebar.caption(f"Active workspace: {active_workspace_label}")
     st.sidebar.markdown('<div class="sidebar-group home"><div class="sidebar-section-title">Home</div></div>', unsafe_allow_html=True)
