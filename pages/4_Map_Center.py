@@ -3153,20 +3153,17 @@ if selected_group in ("PMT", "Calibration"):
             source_labels = dict(source_options)
             tech_lookup = tech_summary.set_index("employee_id")
             if rebalance_result == "Move stores to one selected technician":
-                if assignment_purpose == "Realignment adjustment":
-                    if source_values:
-                        source_employee = control_cols[0].selectbox(
-                            "Pull stores from",
-                            source_values,
-                            format_func=lambda value: source_labels.get(value, f"Employee {value}"),
-                            key=f"{selected_group}_rebalance_source_tech_one",
-                        )
-                    else:
-                        control_cols[0].warning("No assigned source technicians found.")
-                    source_mode = "Pull from selected technician"
+                if source_values:
+                    source_employee = control_cols[0].selectbox(
+                        "Pull stores from",
+                        source_values,
+                        format_func=lambda value: source_labels.get(value, f"Employee {value}"),
+                        key=f"{selected_group}_rebalance_source_tech_one",
+                        help="Choose the technician whose assigned stores should be considered for reassignment.",
+                    )
                 else:
-                    control_cols[0].metric("Pull stores from", "Unassigned")
-                    source_mode = "Unassigned stores only"
+                    control_cols[0].warning("No assigned source technicians found.")
+                source_mode = "Pull from selected technician"
                 target_options = [value for value in active_targets if value != source_employee]
                 if target_options:
                     default_target_value = active_targets[default_target_index]
