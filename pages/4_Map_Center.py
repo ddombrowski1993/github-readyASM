@@ -2305,6 +2305,7 @@ def multi_technician_rebalance_preview(
     person_column,
     source_mode,
     source_employee_id=None,
+    source_employee_ids=None,
     target_store_count=20,
     distance_limit=None,
     target_employee_ids=None,
@@ -2323,10 +2324,14 @@ def multi_technician_rebalance_preview(
     fair_count = int(ceil(avg_count)) if avg_count else 0
     overloaded_ids = {emp_id for emp_id, count in active_counts.items() if count > fair_count}
 
+    selected_source_ids = {int(value) for value in (source_employee_ids or [])}
+    if source_employee_id:
+        selected_source_ids.add(int(source_employee_id))
+
     if source_mode == "Unassigned stores only":
         df = df[df[employee_field].isna()]
-    elif source_mode == "Pull from selected technician" and source_employee_id:
-        df = df[df[employee_field] == int(source_employee_id)]
+    elif source_mode in ("Pull from selected technician", "Pull from selected technicians") and selected_source_ids:
+        df = df[df[employee_field].isin(selected_source_ids)]
     elif source_mode == "Pull from overloaded technicians":
         df = df[df[employee_field].isin(overloaded_ids)]
     elif source_mode == "All stores":
@@ -2354,16 +2359,15 @@ def multi_technician_rebalance_preview(
 
     selected_total = sum(active_counts.get(employee_id, 0) for employee_id in target_ids)
     source_total = 0
-    if source_mode == "Pull from selected technician" and source_employee_id:
-        source_total = active_counts.get(int(source_employee_id), 0)
+    if source_mode in ("Pull from selected technician", "Pull from selected technicians") and selected_source_ids:
+        source_total = sum(active_counts.get(employee_id, 0) for employee_id in selected_source_ids)
     elif source_mode in ("All stores", "Pull from overloaded technicians"):
         source_ids_for_target = {int(value) for value in df[employee_field].dropna().tolist() if int(value) not in target_ids}
         source_total = sum(active_counts.get(employee_id, 0) for employee_id in source_ids_for_target)
     local_fair_count = int(ceil((selected_total + source_total) / max(len(target_ids) + (1 if source_total else 0), 1))) if target_ids else fair_count
     target_capacity = {employee_id: max(local_fair_count - active_counts.get(employee_id, 0), 1) for employee_id in target_ids}
-    if source_mode == "Pull from selected technician" and source_employee_id:
-        source_employee_id = int(source_employee_id)
-        source_take_limits = {source_employee_id: max(active_counts.get(source_employee_id, 0) - fair_count, 0)}
+    if source_mode in ("Pull from selected technician", "Pull from selected technicians") and selected_source_ids:
+        source_take_limits = {employee_id: max(active_counts.get(employee_id, 0) - fair_count, 0) for employee_id in selected_source_ids}
     elif source_mode in ("All stores", "Pull from overloaded technicians"):
         source_ids = {int(value) for value in df[employee_field].dropna().tolist() if int(value) not in target_ids}
         source_take_limits = {employee_id: max(active_counts.get(employee_id, 0) - fair_count, 0) for employee_id in source_ids}
@@ -3142,18 +3146,59 @@ if selected_group in ("PMT", "Calibration"):
             control_cols = st.columns(4)
             target_employee = None
             spread_target_employees = []
+            spread_source_employees = []
+            source_employee = None
+            source_options = source_technician_options(stores_df, tech_config["employee_field"], tech_config["person_column"])
+            source_values = [value for value, _ in source_options]
+            source_labels = dict(source_options)
+            tech_lookup = tech_summary.set_index("employee_id")
             if rebalance_result == "Move stores to one selected technician":
-                target_employee = control_cols[0].selectbox(
-                    f"Target {selected_group} technician",
-                    active_targets,
-                    index=default_target_index,
-                    format_func=lambda value: tech_summary.set_index("employee_id").loc[value, "technician"],
-                    key=f"{selected_group}_rebalance_target",
-                )
+                if assignment_purpose == "Realignment adjustment":
+                    if source_values:
+                        source_employee = control_cols[0].selectbox(
+                            "Pull stores from",
+                            source_values,
+                            format_func=lambda value: source_labels.get(value, f"Employee {value}"),
+                            key=f"{selected_group}_rebalance_source_tech_one",
+                        )
+                    else:
+                        control_cols[0].warning("No assigned source technicians found.")
+                    source_mode = "Pull from selected technician"
+                else:
+                    control_cols[0].metric("Pull stores from", "Unassigned")
+                    source_mode = "Unassigned stores only"
+                target_options = [value for value in active_targets if value != source_employee]
+                if target_options:
+                    default_target_value = active_targets[default_target_index]
+                    target_index = target_options.index(default_target_value) if default_target_value in target_options else 0
+                    target_employee = control_cols[1].selectbox(
+                        "Assign stores to",
+                        target_options,
+                        index=target_index,
+                        format_func=lambda value: tech_summary.set_index("employee_id").loc[value, "technician"],
+                        key=f"{selected_group}_rebalance_target",
+                    )
+                else:
+                    control_cols[1].warning("No receiving technician available.")
             else:
-                underloaded_count = int((tech_summary["assigned_stores"].fillna(0).astype(int) < avg_count).sum()) if avg_count else 0
-                control_cols[0].metric("Underloaded techs", underloaded_count)
-                tech_lookup = tech_summary.set_index("employee_id")
+                if assignment_purpose == "Realignment adjustment":
+                    source_mode = "Pull from selected technicians"
+                    overloaded_source_ids = []
+                    for _, row in tech_summary.iterrows():
+                        assigned_stores = int(row["assigned_stores"]) if pd.notna(row["assigned_stores"]) else 0
+                        if assigned_stores > avg_count and int(row["employee_id"]) in source_values:
+                            overloaded_source_ids.append(int(row["employee_id"]))
+                    spread_source_employees = control_cols[0].multiselect(
+                        "Pull stores from",
+                        source_values,
+                        default=[value for value in overloaded_source_ids if value in source_values],
+                        format_func=lambda value: source_labels.get(value, f"Employee {value}"),
+                        key=f"{selected_group}_rebalance_spread_sources",
+                        help="Choose the technicians whose stores are allowed to be moved.",
+                    )
+                else:
+                    control_cols[0].metric("Pull stores from", "Unassigned")
+                    source_mode = "Unassigned stores only"
                 default_spread_targets = []
                 for _, row in tech_summary.iterrows():
                     assigned_stores = int(row["assigned_stores"]) if pd.notna(row["assigned_stores"]) else 0
@@ -3161,57 +3206,16 @@ if selected_group in ("PMT", "Calibration"):
                         default_spread_targets.append(int(row["employee_id"]))
                 if not default_spread_targets and not zero_store_techs.empty:
                     default_spread_targets = [int(value) for value in zero_store_techs["employee_id"].tolist()]
-                spread_target_employees = st.multiselect(
-                    f"{selected_group} technicians to receive stores",
-                    active_targets,
-                    default=[value for value in default_spread_targets if value in active_targets],
+                spread_target_options = [value for value in active_targets if value not in spread_source_employees]
+                spread_target_employees = control_cols[1].multiselect(
+                    "Assign stores to",
+                    spread_target_options,
+                    default=[value for value in default_spread_targets if value in spread_target_options],
                     format_func=lambda value: f"{tech_lookup.loc[value, 'technician']} ({int(tech_lookup.loc[value, 'assigned_stores']) if pd.notna(tech_lookup.loc[value, 'assigned_stores']) else 0} stores)",
                     key=f"{selected_group}_rebalance_spread_targets",
                     help="Choose every technician you want included as a possible newly assigned technician in the spread preview.",
                 )
-            if rebalance_result == "Move stores to one selected technician" and assignment_purpose == "Initial assignment":
-                source_mode_options = ["Unassigned stores only"]
-                default_source_index = 0
-            elif rebalance_result == "Move stores to one selected technician":
-                source_mode_options = ["Pull from selected technician"]
-                default_source_index = 0
-            elif assignment_purpose == "Initial assignment":
-                source_mode_options = ["Unassigned stores only", "All stores"]
-                default_source_index = 0 if unassigned_count > 0 else 1
-            else:
-                source_mode_options = ["Pull from selected technician", "Pull from overloaded technicians", "All stores", "Unassigned stores only"]
-                default_source_index = 0
-            source_mode = control_cols[1].selectbox(
-                "Source of stores",
-                source_mode_options,
-                index=default_source_index,
-                key=f"{selected_group}_rebalance_source_mode_{assignment_purpose}",
-            )
-            if source_mode == "All stores":
-                st.caption("All stores spreads suggested moves across nearby technicians and avoids dropping any one technician below a fair store count.")
-            elif source_mode == "Pull from overloaded technicians":
-                st.caption("Overloaded mode pulls only from technicians above the current average store count.")
-            elif source_mode == "Pull from selected technician":
-                st.caption("Selected technician mode only pulls stores from the one source technician selected below.")
-            elif source_mode == "Unassigned stores only" and rebalance_result == "Move stores to one selected technician":
-                st.caption("Initial assignment only suggests currently unassigned stores for the selected target technician.")
-            source_options = source_technician_options(stores_df, tech_config["employee_field"], tech_config["person_column"])
-            source_employee = None
-            if source_mode == "Pull from selected technician":
-                source_values = [value for value, _ in source_options]
-                if source_values:
-                    source_employee = control_cols[2].selectbox(
-                        "Source technician",
-                        source_values,
-                        format_func=lambda value: dict(source_options).get(value, f"Employee {value}"),
-                        key=f"{selected_group}_rebalance_source_tech",
-                    )
-                else:
-                    control_cols[2].warning("No assigned source technicians found.")
-            else:
-                target_count = control_cols[2].number_input("Target store count", min_value=1, max_value=max(total_stores, 1), value=min(20, max(total_stores, 1)), step=1, key=f"{selected_group}_rebalance_target_count")
-            if source_mode == "Pull from selected technician":
-                target_count = st.number_input("Target store count", min_value=1, max_value=max(total_stores, 1), value=min(20, max(total_stores, 1)), step=1, key=f"{selected_group}_rebalance_target_count_selected")
+            target_count = control_cols[2].number_input("Target store count", min_value=1, max_value=max(total_stores, 1), value=min(20, max(total_stores, 1)), step=1, key=f"{selected_group}_rebalance_target_count")
             distance_choice = control_cols[3].selectbox("Distance limit", ["No limit", "25 miles", "50 miles", "75 miles", "Custom"], key=f"{selected_group}_rebalance_distance")
             if distance_choice == "Custom":
                 distance_limit = st.number_input("Custom distance limit miles", min_value=1, value=50, step=5, key=f"{selected_group}_rebalance_custom_distance")
@@ -3221,6 +3225,8 @@ if selected_group in ("PMT", "Calibration"):
                 distance_limit = int(distance_choice.split()[0])
             generate_disabled = (
                 (source_mode == "Pull from selected technician" and source_employee is None)
+                or (source_mode == "Pull from selected technicians" and not spread_source_employees)
+                or (rebalance_result == "Move stores to one selected technician" and target_employee is None)
                 or (rebalance_result == "Spread stores across multiple nearby technicians" and not spread_target_employees)
             )
             if st.button("Auto Suggest Assignment", type="primary", disabled=generate_disabled, key=f"{selected_group}_rebalance_generate"):
@@ -3244,6 +3250,7 @@ if selected_group in ("PMT", "Calibration"):
                         tech_config["person_column"],
                         source_mode,
                         source_employee_id=source_employee,
+                        source_employee_ids=spread_source_employees,
                         target_store_count=target_count,
                         distance_limit=distance_limit,
                         target_employee_ids=spread_target_employees,
