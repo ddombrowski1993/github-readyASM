@@ -628,6 +628,7 @@ WORKSPACE_TRANSIENT_KEYS = {
     "pmt_schedule_draft",
     "pmt_schedule_draft_settings",
     "calibration_schedule_preview",
+    "workspace_diagnostic_result",
 }
 WORKSPACE_TRANSIENT_PREFIXES = (
     "auto_assign_",
@@ -848,7 +849,7 @@ def step_flow(steps, hint=""):
 
 
 def sidebar_nav():
-    from src.database import latest_undo_snapshot, restore_latest_undo_snapshot
+    from src.database import latest_undo_snapshot, restore_latest_undo_snapshot, workspace_context_diagnostics
 
     if st.session_state.get("authenticated"):
         display_name = f"{st.session_state.get('first_name', '')} {st.session_state.get('last_name', '')}".strip()
@@ -1001,6 +1002,18 @@ def sidebar_nav():
     )
     if account_role in ("Admin", "Manager"):
         st.sidebar.caption(f"Active workspace: {active_workspace_label}")
+        with st.sidebar.expander("Workspace diagnostic", expanded=False):
+            if st.button("Run workspace check", key="run_workspace_diagnostic"):
+                st.session_state["workspace_diagnostic_result"] = workspace_context_diagnostics()
+            diag = st.session_state.get("workspace_diagnostic_result")
+            if diag:
+                if diag.get("error"):
+                    st.caption(f"Error: {diag['error']}")
+                else:
+                    st.caption(f"Effective slug: {diag.get('effective_account_slug')}")
+                    st.caption(f"Expected schema: {diag.get('expected_schema')}")
+                    st.caption(f"Active schema: {diag.get('active_schema')}")
+                    st.caption(f"Stores: {diag.get('stores')} | Employees: {diag.get('employees')} | Schedules: {diag.get('schedules')}")
     st.sidebar.markdown('<div class="sidebar-group home"><div class="sidebar-section-title">Home</div></div>', unsafe_allow_html=True)
     st.sidebar.page_link("app.py", label="Dashboard")
     st.sidebar.markdown('<div class="sidebar-group operations"><div class="sidebar-section-title">Main Operations</div></div>', unsafe_allow_html=True)

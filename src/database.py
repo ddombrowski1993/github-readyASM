@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import hashlib
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -63,15 +64,6 @@ def using_sqlite():
 def get_engine(url=None, schema=None):
     url = url or get_database_url()
     schema = schema if schema is not None else current_account_schema()
-    context = get_effective_account_context()
-    LOGGER.info(
-        "Database engine requested authenticated_user=%s impersonated_user=%s effective_user=%s effective_account_slug=%s schema=%s",
-        context.get("authenticated_user_id"),
-        context.get("impersonated_user_id"),
-        context.get("effective_user_id"),
-        context.get("effective_account_slug"),
-        schema or "",
-    )
     return _get_engine(url, schema or "")
 
 
@@ -87,7 +79,7 @@ def _get_engine(url, schema):
                 dbapi_connection.autocommit = True
             try:
                 with dbapi_connection.cursor() as cursor:
-                    cursor.execute(f"set search_path to {quoted_schema}, public")
+                    cursor.execute(f"set search_path to {quoted_schema}")
             finally:
                 if previous_autocommit is not None:
                     dbapi_connection.autocommit = previous_autocommit
@@ -113,7 +105,7 @@ def _apply_workspace_search_path(conn, schema=None):
     schema = schema if schema is not None else current_account_schema()
     if not schema or conn.engine.dialect.name != "postgresql":
         return schema
-    conn.execute(text(f"set search_path to {_quote_identifier(schema)}, public"))
+    conn.execute(text(f"set search_path to {_quote_identifier(schema)}"))
     return schema
 
 
@@ -138,6 +130,7 @@ def get_database_status():
         schema = ensure_workspace_schema()
         engine = get_engine(url, schema=schema)
         with engine.connect() as conn:
+            _apply_workspace_search_path(conn, schema)
             conn.execute(text("SELECT 1"))
             database_name = conn.execute(text("select current_database()")).scalar()
             active_schema = conn.execute(text("select current_schema()")).scalar()
@@ -177,6 +170,37 @@ def get_database_status():
         }
     except Exception as exc:
         return {"configured": bool(configured_database_url()), "connected": False, "error": str(exc)}
+
+
+def workspace_context_diagnostics():
+    context = get_effective_account_context()
+    expected_schema = current_account_schema()
+    diagnostics = {
+        "authenticated_user_id": context.get("authenticated_user_id"),
+        "impersonated_user_id": context.get("impersonated_user_id"),
+        "effective_user_id": context.get("effective_user_id"),
+        "effective_account_slug": context.get("effective_account_slug"),
+        "expected_schema": expected_schema,
+        "active_schema": None,
+        "search_path": None,
+        "stores": None,
+        "employees": None,
+        "schedules": None,
+        "error": None,
+    }
+    try:
+        url = get_database_url()
+        engine = get_engine(url, schema=expected_schema)
+        with engine.connect() as conn:
+            _apply_workspace_search_path(conn, expected_schema)
+            diagnostics["active_schema"] = conn.execute(text("select current_schema()")).scalar()
+            diagnostics["search_path"] = conn.execute(text("show search_path")).scalar()
+            diagnostics["stores"] = conn.execute(text("select count(*) from stores")).scalar()
+            diagnostics["employees"] = conn.execute(text("select count(*) from employees")).scalar()
+            diagnostics["schedules"] = conn.execute(text("select count(*) from schedules")).scalar()
+    except Exception as exc:
+        diagnostics["error"] = str(exc)
+    return diagnostics
 
 
 def show_database_setup():
@@ -399,22 +423,14 @@ def session_scope(action_label="Database change"):
     Session = make_session()
     session = Session()
     try:
-        schema = _apply_workspace_search_path(session.connection())
-        if schema:
-            context = get_effective_account_context()
-            LOGGER.info(
-                "Database session using schema=%s authenticated_user=%s impersonated_user=%s effective_user=%s effective_account_slug=%s",
-                schema,
-                context.get("authenticated_user_id"),
-                context.get("impersonated_user_id"),
-                context.get("effective_user_id"),
-                context.get("effective_account_slug"),
-            )
+        _apply_workspace_search_path(session.connection())
         yield session
         changed_tables = _tracked_table_names(session)
         if changed_tables:
             _snapshot_tables(session.connection(), changed_tables, action_label=action_label)
         session.commit()
+        if changed_tables:
+            st.cache_data.clear()
     except Exception:
         session.rollback()
         raise
@@ -484,21 +500,32 @@ def restore_latest_undo_snapshot():
     return True, f"Undid last change: {row['action_label']}"
 
 
-def safe_query(sql, params=None):
-    engine = get_engine(get_database_url())
+def _params_cache_key(params):
+    return json.dumps(params or {}, default=_json_default, sort_keys=True)
+
+
+def _database_cache_key(url):
+    return hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()
+
+
+@st.cache_data(show_spinner=False, ttl=45)
+def _cached_read_sql(url_key, schema, sql, params_json):
+    engine = get_engine(get_database_url(), schema=schema)
+    params = json.loads(params_json or "{}")
+    with engine.connect() as conn:
+        _apply_workspace_search_path(conn, schema)
+        return pd.read_sql(text(sql), conn, params=params)
+
+
+def safe_query(sql, params=None, use_cache=True):
     try:
+        url = get_database_url()
+        schema = current_account_schema() or ""
+        if use_cache:
+            return _cached_read_sql(_database_cache_key(url), schema, sql, _params_cache_key(params))
+        engine = get_engine(url, schema=schema)
         with engine.connect() as conn:
-            schema = _apply_workspace_search_path(conn)
-            if schema:
-                context = get_effective_account_context()
-                LOGGER.info(
-                    "Database query using schema=%s authenticated_user=%s impersonated_user=%s effective_user=%s effective_account_slug=%s",
-                    schema,
-                    context.get("authenticated_user_id"),
-                    context.get("impersonated_user_id"),
-                    context.get("effective_user_id"),
-                    context.get("effective_account_slug"),
-                )
+            _apply_workspace_search_path(conn, schema)
             return pd.read_sql(text(sql), conn, params=params or {})
     except Exception as exc:
         LOGGER.exception("Database query failed. SQL=%s params=%s", sql, params or {})
@@ -632,6 +659,7 @@ def dashboard_counts():
     week_start = today - timedelta(days=today.weekday())
     engine = get_engine(get_database_url())
     with engine.connect() as conn:
+        _apply_workspace_search_path(conn)
         row = conn.execute(
             text(
                 """
@@ -657,4 +685,5 @@ def scalar(sql, params=None):
     if engine is None:
         return 0
     with engine.connect() as conn:
+        _apply_workspace_search_path(conn)
         return conn.execute(text(sql), params or {}).scalar() or 0
