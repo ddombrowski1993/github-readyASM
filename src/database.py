@@ -109,6 +109,14 @@ def _quote_identifier(identifier):
     return f'"{identifier}"'
 
 
+def _apply_workspace_search_path(conn, schema=None):
+    schema = schema if schema is not None else current_account_schema()
+    if not schema or conn.engine.dialect.name != "postgresql":
+        return schema
+    conn.execute(text(f"set search_path to {_quote_identifier(schema)}, public"))
+    return schema
+
+
 def ensure_workspace_schema():
     schema = current_account_schema()
     if not schema or not using_hosted_database():
@@ -391,6 +399,17 @@ def session_scope(action_label="Database change"):
     Session = make_session()
     session = Session()
     try:
+        schema = _apply_workspace_search_path(session.connection())
+        if schema:
+            context = get_effective_account_context()
+            LOGGER.info(
+                "Database session using schema=%s authenticated_user=%s impersonated_user=%s effective_user=%s effective_account_slug=%s",
+                schema,
+                context.get("authenticated_user_id"),
+                context.get("impersonated_user_id"),
+                context.get("effective_user_id"),
+                context.get("effective_account_slug"),
+            )
         yield session
         changed_tables = _tracked_table_names(session)
         if changed_tables:
@@ -409,6 +428,7 @@ def latest_undo_snapshot():
         engine = get_engine(get_database_url(), schema=schema)
         ensure_undo_table(engine)
         with engine.connect() as conn:
+            _apply_workspace_search_path(conn, schema)
             row = conn.execute(
                 text(
                     """
@@ -430,6 +450,7 @@ def restore_latest_undo_snapshot():
     ensure_undo_table(engine)
     sorted_names = [table.name for table in Base.metadata.sorted_tables if table.name != "audit_log"]
     with engine.begin() as conn:
+        _apply_workspace_search_path(conn, schema)
         row = conn.execute(
             text(
                 """
@@ -466,7 +487,19 @@ def restore_latest_undo_snapshot():
 def safe_query(sql, params=None):
     engine = get_engine(get_database_url())
     try:
-        return pd.read_sql(text(sql), engine, params=params or {})
+        with engine.connect() as conn:
+            schema = _apply_workspace_search_path(conn)
+            if schema:
+                context = get_effective_account_context()
+                LOGGER.info(
+                    "Database query using schema=%s authenticated_user=%s impersonated_user=%s effective_user=%s effective_account_slug=%s",
+                    schema,
+                    context.get("authenticated_user_id"),
+                    context.get("impersonated_user_id"),
+                    context.get("effective_user_id"),
+                    context.get("effective_account_slug"),
+                )
+            return pd.read_sql(text(sql), conn, params=params or {})
     except Exception as exc:
         LOGGER.exception("Database query failed. SQL=%s params=%s", sql, params or {})
         st.error(f"Database query failed: {exc}")
