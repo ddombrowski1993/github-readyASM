@@ -3169,7 +3169,13 @@ if selected_group in ("PMT", "Calibration"):
                     key=f"{selected_group}_rebalance_spread_targets",
                     help="Choose every technician you want included as a possible newly assigned technician in the spread preview.",
                 )
-            if assignment_purpose == "Initial assignment":
+            if rebalance_result == "Move stores to one selected technician" and assignment_purpose == "Initial assignment":
+                source_mode_options = ["Unassigned stores only"]
+                default_source_index = 0
+            elif rebalance_result == "Move stores to one selected technician":
+                source_mode_options = ["Pull from selected technician"]
+                default_source_index = 0
+            elif assignment_purpose == "Initial assignment":
                 source_mode_options = ["Unassigned stores only", "All stores"]
                 default_source_index = 0 if unassigned_count > 0 else 1
             else:
@@ -3186,7 +3192,9 @@ if selected_group in ("PMT", "Calibration"):
             elif source_mode == "Pull from overloaded technicians":
                 st.caption("Overloaded mode pulls only from technicians above the current average store count.")
             elif source_mode == "Pull from selected technician":
-                st.caption("Selected technician mode limits how many stores are pulled so the source technician is not reduced below a fair split with the target.")
+                st.caption("Selected technician mode only pulls stores from the one source technician selected below.")
+            elif source_mode == "Unassigned stores only" and rebalance_result == "Move stores to one selected technician":
+                st.caption("Initial assignment only suggests currently unassigned stores for the selected target technician.")
             source_options = source_technician_options(stores_df, tech_config["employee_field"], tech_config["person_column"])
             source_employee = None
             if source_mode == "Pull from selected technician":
