@@ -656,8 +656,6 @@ def switch_workspace(account_slug, account_label, manager_rollup_active=False, s
     st.session_state["manager_rollup_active"] = bool(manager_rollup_active)
     st.session_state["active_account_slug"] = account_slug
     st.session_state["active_account_label"] = account_label
-    if selector_key:
-        st.session_state[selector_key] = account_slug
     st.cache_resource.clear()
     st.cache_data.clear()
     st.rerun()
@@ -874,6 +872,7 @@ def sidebar_nav():
         if active_slug != own_slug:
             st.sidebar.warning(f"Viewing as: {account_labels.get(active_slug, active_slug)}")
             if st.sidebar.button("Return to My Workspace", key="admin_stop_impersonating"):
+                st.session_state["admin_impersonate_workspace_selector"] = own_slug
                 switch_workspace(own_slug, "My Workspace", selector_key="admin_impersonate_workspace_selector")
         else:
             st.sidebar.caption("Viewing your own workspace.")
