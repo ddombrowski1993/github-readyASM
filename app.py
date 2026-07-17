@@ -103,9 +103,9 @@ if is_all_managed_view():
     st.subheader("PMT Monthly Progress")
     pm1, pm2, pm3, pm4 = st.columns(4)
     pm1.metric("Scheduled This Month", totals.get("PMT Scheduled This Month", 0))
-    pm1.page_link("pages/13_PMT_Monthly_Scheduler.py", label="Open PMT Scheduler")
+    pm1.page_link("pages/12_View_Schedule.py", label="View PMT Schedule")
     with pm2:
-        metric_help_card("Carryover Stores", pmt_not_completed, "PMT schedule items in the current month marked Not Completed, Needs Rescheduled, Rescheduled, Rain Delay, or Skipped. These are the items that carried over into the next cycle.")
+        metric_help_card("Carryover Stores", totals.get("PMT Carryover Stores", 0), "PMT schedule items in the current month marked Not Completed, Needs Rescheduled, Rescheduled, Rain Delay, or Skipped. These are the items that carried over into the next cycle.")
     with pm3:
         metric_help_card("Stores Not Scheduled", totals.get("PMT Stores Not Scheduled", 0), "Assigned PMT stores that did not fit into the selected/latest PMT schedule period because capacity was too low.")
     with pm4:
