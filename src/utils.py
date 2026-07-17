@@ -914,7 +914,13 @@ def sidebar_nav():
                 for key, account in manager_rollup_options.items()
             },
             **{
-                account["account_slug"]: "My Workspace" if account["account_slug"] == own_slug else f"{account['first_name']} {account['last_name']}".strip() or account["email"]
+                account["account_slug"]: (
+                    "My Workspace"
+                    if account["account_slug"] == own_slug
+                    else f"{(account['first_name'] + ' ' + account['last_name']).strip() or account['email']} - Manager Account"
+                    if account.get("account_role") == "Manager"
+                    else f"{account['first_name']} {account['last_name']}".strip() or account["email"]
+                )
                 for account in accounts
             },
         }
@@ -923,7 +929,9 @@ def sidebar_nav():
             if st.session_state.get("manager_rollup_active") and f"__manager_rollup__:{active_slug}" in manager_rollup_options
             else active_slug
         )
-        if st.session_state.get("admin_impersonate_workspace_selector") not in account_slugs:
+        if st.session_state.get("manager_rollup_active") and current_admin_option in account_slugs:
+            st.session_state["admin_impersonate_workspace_selector"] = current_admin_option
+        elif st.session_state.get("admin_impersonate_workspace_selector") not in account_slugs:
             st.session_state["admin_impersonate_workspace_selector"] = current_admin_option
         st.sidebar.markdown("**Admin Impersonate Account**")
         if active_slug != own_slug:
@@ -956,14 +964,26 @@ def sidebar_nav():
                     effective_user_id=selected_account.get("id"),
                     selector_key="admin_impersonate_workspace_selector",
                 )
-        elif selected_slug != st.session_state.get("active_account_slug") or st.session_state.get("manager_rollup_active"):
+        else:
             selected_account = accounts_by_slug.get(selected_slug, {})
-            switch_workspace(
-                selected_slug,
-                account_labels.get(selected_slug, selected_slug),
-                effective_user_id=selected_account.get("id"),
-                selector_key="admin_impersonate_workspace_selector",
-            )
+            selected_is_manager = selected_account.get("account_role") == "Manager"
+            if selected_is_manager:
+                selected_rollup_key = f"__manager_rollup__:{selected_slug}"
+                if selected_slug != st.session_state.get("active_account_slug") or not st.session_state.get("manager_rollup_active"):
+                    switch_workspace(
+                        selected_slug,
+                        account_labels.get(selected_rollup_key, "All Managed Users"),
+                        manager_rollup_active=True,
+                        effective_user_id=selected_account.get("id"),
+                        selector_key="admin_impersonate_workspace_selector",
+                    )
+            elif selected_slug != st.session_state.get("active_account_slug") or st.session_state.get("manager_rollup_active"):
+                switch_workspace(
+                    selected_slug,
+                    account_labels.get(selected_slug, selected_slug),
+                    effective_user_id=selected_account.get("id"),
+                    selector_key="admin_impersonate_workspace_selector",
+                )
     elif account_role == "Manager" and managed_accounts:
         current_slug = st.session_state.get("active_account_slug") or st.session_state.get("account_slug")
         options = ["__manager_rollup__"] + [account["account_slug"] for account in accounts]
