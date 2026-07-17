@@ -11,7 +11,7 @@ from src.imports import import_deferred_work_orders, read_upload, sample_deferre
 from src.manager_rollup import manager_rollup_query
 from src.models import DeferredWorkOrder, Schedule, ScheduleItem, UploadedFile
 from src.pdf_reports import build_pdf_report, pdf_bytes
-from src.utils import apply_theme, ensure_database_or_stop, page_header, save_upload, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, save_upload, sidebar_nav
 
 
 apply_theme()
@@ -43,11 +43,11 @@ def mark_deferred_work_orders_complete(wo_ids, completed_on=None, completion_not
     log_action("deferred WOs completed", "deferred_work_orders", description=f"{count} marked complete")
     return count
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header("Deferred Work Orders", "Manager roll-up view of deferred work orders across managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to manage that person's deferred work orders.")
     dwo_rollup = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select d.work_order_number, coalesce(s.store_number, '') as store_number, coalesce(s.city, '') as city,
                d.title, d.description, d.priority, d.status, d.date_created, d.due_date, d.completed_date, d.notes

@@ -14,7 +14,7 @@ from src.maps import map_html, render_plain_table, render_route_preview, render_
 from src.pdf_reports import build_pdf_report, pdf_bytes
 from src.scheduler import build_schedule_preview, cascade_schedule_items, delete_schedule, haversine_miles, is_company_holiday, save_schedule, schedule_publish_conflicts
 from src.models import ScheduleItem
-from src.utils import apply_theme, ensure_database_or_stop, is_all_managed_view, page_header, section_header, sidebar_nav, step_flow
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, section_header, sidebar_nav, step_flow
 
 
 apply_theme()
@@ -24,7 +24,7 @@ page_header("Calibration Scheduler", "Build, review, publish, and manage individ
 
 if is_all_managed_view():
     st.caption("Read-only roll-up view. Select a specific workspace from the sidebar to build or edit Calibration schedules.")
-    _ru_df = manager_rollup_dataframe(st.session_state.get("user_id"))
+    _ru_df = manager_rollup_dataframe(effective_rollup_user_id())
     if not _ru_df.empty:
         _ru_t = manager_rollup_totals(_ru_df)
         _m1, _m2, _m3, _m4 = st.columns(4)
@@ -39,7 +39,7 @@ if is_all_managed_view():
     _ru_end    = _fc2.date_input("End date",   value=_week_start + timedelta(days=6), key="cal_ru_end")
     _ru_status = _fc3.selectbox("Status filter", ["All", "Scheduled", "Completed", "Needs Rescheduled", "Not Completed", "Rescheduled", "Cancelled"], key="cal_ru_status")
     _cal_items = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select si.schedule_date, e.full_name as technician, si.status,
                s.store_number, s.city, s.state,

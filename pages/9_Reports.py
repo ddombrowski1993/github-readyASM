@@ -19,7 +19,7 @@ from src.imports import normalize_columns
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.models import PMCompletionReportRow
 from src.pdf_reports import fit_pdf_dataframe, fit_pdf_table
-from src.utils import apply_theme, ensure_database_or_stop, is_all_managed_view, page_header, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, sidebar_nav
 
 
 apply_theme()
@@ -215,7 +215,7 @@ def date_range_for(label):
 
 def run_query(sql, params=None, rollup=False):
     if rollup:
-        return manager_rollup_query(st.session_state.get("user_id"), sql, params=params)
+        return manager_rollup_query(effective_rollup_user_id(), sql, params=params)
     return safe_query(sql, params=params)
 
 
@@ -809,7 +809,7 @@ def build_report(report_type, start, end, rollup=False, filters=None):
         tables = {"Weather Impact Schedule Items": weather_rows, "Schedule Detail": sched}
         summary["Weather Impact Items"] = len(weather_rows)
     elif report_type == "Manager Roll-Up":
-        rollup_df = manager_rollup_dataframe(st.session_state.get("user_id"), include_self=False)
+        rollup_df = manager_rollup_dataframe(effective_rollup_user_id(), include_self=False)
         totals = manager_rollup_totals(rollup_df) if not rollup_df.empty else {}
         summary.update(totals)
         deferred_by_manager = (

@@ -6,7 +6,7 @@ st.set_page_config(page_title="Weather", layout="wide")
 from src.database import safe_query
 from src.exports import csv_bytes, excel_bytes
 from src.manager_rollup import manager_rollup_query
-from src.utils import apply_theme, ensure_database_or_stop, is_all_managed_view, page_header, section_header, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, section_header, sidebar_nav
 from src.weather import add_rain_timeframes, weekly_weather_for_brand_areas
 
 
@@ -224,7 +224,7 @@ if is_all_managed_view():
     page_header("Weather", "Manager roll-up weather outlook for Brand Enhancement areas across managed workspaces.")
     st.info("Viewing Data For: All Managed Users. Filter by owner/user below, or select one managed user from the sidebar to edit that workspace.")
     brand_team_df = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         brand_weather_team_query(),
     )
     weather_forecast, weather_errors = weekly_weather_for_brand_areas(brand_team_df)

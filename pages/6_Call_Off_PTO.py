@@ -10,7 +10,7 @@ from src.exports import download_table
 from src.manager_rollup import manager_rollup_query
 from src.models import CalloffPTO
 from src.pdf_reports import build_pdf_report, pdf_bytes
-from src.utils import apply_theme, ensure_database_or_stop, page_header, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, sidebar_nav
 
 
 apply_theme()
@@ -44,7 +44,7 @@ def event_days_total(df, event_type, start_date, end_date):
     return int(add_event_days(filtered, start_date, end_date)["days"].sum())
 
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header("Call Off / PTO", "Manager roll-up view of attendance across all managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to manage that person's attendance records.")
     today = date.today()
@@ -52,7 +52,7 @@ if st.session_state.get("account_role") == "Manager" and st.session_state.get("m
     start_date = start_filter.date_input("Start", value=date(today.year, today.month, 1))
     end_date = end_filter.date_input("End", value=today)
     pto_rollup = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select e.full_name as employee, t.team_name, c.event_type, c.event_date, c.end_date,
                c.status, c.approved_by, c.notes

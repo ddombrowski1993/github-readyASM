@@ -26,7 +26,7 @@ from src.smart_import import (
     scan_issue_rows,
     scan_workbook,
 )
-from src.utils import apply_theme, df_search, ensure_database_or_stop, page_header, section_header, sidebar_nav
+from src.utils import apply_theme, df_search, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, section_header, sidebar_nav
 
 
 apply_theme()
@@ -63,11 +63,11 @@ def pmt_removal_workbook(preview, summary):
     return buffer.getvalue()
 
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header("Employees", "Manager roll-up view of employees and technicians across managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to edit that person's employees.")
     employees_rollup = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select e.full_name, e.employee_number, e.role, t.team_name, e.phone, e.email,
                e.truck_number, e.home_city, e.home_state, e.home_latitude, e.home_longitude,

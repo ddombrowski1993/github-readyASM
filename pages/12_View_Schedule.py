@@ -9,14 +9,14 @@ from src.database import safe_query, teams, using_sqlite
 from src.exports import download_table, excel_bytes
 from src.manager_rollup import manager_rollup_query
 from src.pdf_reports import build_pdf_report, pdf_bytes
-from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, section_header, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, metric_help_card, page_header, section_header, sidebar_nav
 
 
 apply_theme()
 sidebar_nav()
 ensure_database_or_stop()
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header("View Schedule", "Manager roll-up schedule view across all managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to open that person's detailed schedule tools.")
     today = date.today()
@@ -28,7 +28,7 @@ if st.session_state.get("account_role") == "Manager" and st.session_state.get("m
     start_date = f3.date_input("Start date", value=default_start)
     end_date = f4.date_input("End date", value=default_end)
     schedule_rollup = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select si.schedule_date, si.work_type, si.status, coalesce(t.team_name, '') as team,
                coalesce(e.full_name, '') as technician, s.store_number, s.city, s.state,

@@ -6,7 +6,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.auth import authenticate, authenticate_with_reason, accessible_accounts_for_current_user, can_access_account_slug, create_user, find_user_by_email, init_auth_db, reset_password_with_secret, sign_in, sign_out, user_count
+from src.auth import authenticate, authenticate_with_reason, accessible_accounts_for_current_user, can_access_account_slug, create_user, find_user_by_email, get_user_by_id, init_auth_db, reset_password_with_secret, sign_in, sign_out, user_count
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -603,7 +603,7 @@ def page_header(title, description="", actions=None):
 
 
 def is_all_managed_view():
-    return st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active")
+    return effective_view_role() == "Manager" and st.session_state.get("manager_rollup_active")
 
 
 def selected_workspace_scope():
@@ -616,6 +616,10 @@ def selected_workspace_scope():
 
 def can_edit_current_scope():
     return not is_all_managed_view()
+
+
+def effective_rollup_user_id():
+    return st.session_state.get("effective_user_id") or st.session_state.get("user_id")
 
 
 WORKSPACE_TRANSIENT_KEYS = {
@@ -679,6 +683,19 @@ def switch_workspace(account_slug, account_label, manager_rollup_active=False, e
     st.cache_resource.clear()
     st.cache_data.clear()
     st.rerun()
+
+
+def effective_view_role():
+    if st.session_state.get("manager_rollup_active"):
+        return "Manager"
+    impersonated_user_id = st.session_state.get("impersonated_user_id")
+    if impersonated_user_id:
+        try:
+            user = get_user_by_id(int(impersonated_user_id))
+            return (user or {}).get("account_role") or st.session_state.get("account_role", "User")
+        except Exception:
+            return st.session_state.get("account_role", "User")
+    return st.session_state.get("account_role", "User")
 
 
 PAGE_PERMISSIONS = {
@@ -853,8 +870,11 @@ def sidebar_nav():
 
     if st.session_state.get("authenticated"):
         display_name = f"{st.session_state.get('first_name', '')} {st.session_state.get('last_name', '')}".strip()
+        actual_role = st.session_state.get("account_role", "User")
+        view_role = effective_view_role()
+        role_label = actual_role if actual_role == view_role else f"{actual_role} viewing {view_role}"
         st.sidebar.markdown(
-            f'<div class="sidebar-user">Signed in as<br><strong>{display_name or st.session_state.get("username", "")}</strong><br>{st.session_state.get("account_role", "User")}</div>',
+            f'<div class="sidebar-user">Signed in as<br><strong>{display_name or st.session_state.get("username", "")}</strong><br>{role_label}</div>',
             unsafe_allow_html=True,
         )
         if st.sidebar.button("Sign out", type="secondary"):
@@ -882,16 +902,32 @@ def sidebar_nav():
             active_slug = st.session_state.get("account_slug")
         own_slug = st.session_state.get("account_slug")
         accounts_by_slug = {account["account_slug"]: account for account in accounts}
-        account_slugs = [account["account_slug"] for account in accounts]
-        account_labels = {
-            account["account_slug"]: "My Workspace" if account["account_slug"] == own_slug else f"{account['first_name']} {account['last_name']}".strip() or account["email"]
+        manager_rollup_options = {
+            f"__manager_rollup__:{account['account_slug']}": account
             for account in accounts
+            if account.get("account_role") == "Manager"
         }
+        account_slugs = list(manager_rollup_options) + [account["account_slug"] for account in accounts]
+        account_labels = {
+            **{
+                key: f"{(account['first_name'] + ' ' + account['last_name']).strip() or account['email']} - All Managed Users"
+                for key, account in manager_rollup_options.items()
+            },
+            **{
+                account["account_slug"]: "My Workspace" if account["account_slug"] == own_slug else f"{account['first_name']} {account['last_name']}".strip() or account["email"]
+                for account in accounts
+            },
+        }
+        current_admin_option = (
+            f"__manager_rollup__:{active_slug}"
+            if st.session_state.get("manager_rollup_active") and f"__manager_rollup__:{active_slug}" in manager_rollup_options
+            else active_slug
+        )
         if st.session_state.get("admin_impersonate_workspace_selector") not in account_slugs:
-            st.session_state["admin_impersonate_workspace_selector"] = active_slug
+            st.session_state["admin_impersonate_workspace_selector"] = current_admin_option
         st.sidebar.markdown("**Admin Impersonate Account**")
         if active_slug != own_slug:
-            st.sidebar.warning(f"Viewing as: {account_labels.get(active_slug, active_slug)}")
+            st.sidebar.warning(f"Viewing as: {account_labels.get(current_admin_option, active_slug)}")
             if st.sidebar.button("Return to My Workspace", key="admin_stop_impersonating"):
                 st.session_state["admin_impersonate_workspace_selector"] = own_slug
                 switch_workspace(
@@ -905,11 +941,22 @@ def sidebar_nav():
         selected_slug = st.sidebar.selectbox(
             "View account workspace",
             account_slugs,
-            index=account_slugs.index(active_slug) if active_slug in account_slugs else 0,
+            index=account_slugs.index(current_admin_option) if current_admin_option in account_slugs else 0,
             format_func=lambda slug: account_labels.get(slug, slug),
             key="admin_impersonate_workspace_selector",
         )
-        if selected_slug != st.session_state.get("active_account_slug"):
+        if str(selected_slug).startswith("__manager_rollup__:"):
+            selected_account_slug = selected_slug.split(":", 1)[1]
+            selected_account = accounts_by_slug.get(selected_account_slug, {})
+            if selected_account_slug != st.session_state.get("active_account_slug") or not st.session_state.get("manager_rollup_active"):
+                switch_workspace(
+                    selected_account_slug,
+                    account_labels.get(selected_slug, "All Managed Users"),
+                    manager_rollup_active=True,
+                    effective_user_id=selected_account.get("id"),
+                    selector_key="admin_impersonate_workspace_selector",
+                )
+        elif selected_slug != st.session_state.get("active_account_slug") or st.session_state.get("manager_rollup_active"):
             selected_account = accounts_by_slug.get(selected_slug, {})
             switch_workspace(
                 selected_slug,
@@ -1014,28 +1061,45 @@ def sidebar_nav():
                     st.caption(f"Expected schema: {diag.get('expected_schema')}")
                     st.caption(f"Active schema: {diag.get('active_schema')}")
                     st.caption(f"Stores: {diag.get('stores')} | Employees: {diag.get('employees')} | Schedules: {diag.get('schedules')}")
-    st.sidebar.markdown('<div class="sidebar-group home"><div class="sidebar-section-title">Home</div></div>', unsafe_allow_html=True)
-    st.sidebar.page_link("app.py", label="Dashboard")
-    st.sidebar.markdown('<div class="sidebar-group operations"><div class="sidebar-section-title">Main Operations</div></div>', unsafe_allow_html=True)
-    st.sidebar.page_link("pages/3_Stores.py", label="Stores")
-    st.sidebar.page_link("pages/4_Map_Center.py", label="Areas and Maps")
-    st.sidebar.page_link("pages/5_Scheduler.py", label="Brand Enhancement Scheduler")
-    st.sidebar.page_link("pages/13_PMT_Monthly_Scheduler.py", label="PMT Monthly Scheduler")
-    st.sidebar.page_link("pages/14_Calibration_Scheduler.py", label="Calibration Scheduler")
-    st.sidebar.page_link("pages/12_View_Schedule.py", label="View Schedule")
-    st.sidebar.page_link("pages/16_Weather.py", label="Weather")
-    st.sidebar.page_link("pages/11_Site_Visits.py", label="Site Visits")
-    st.sidebar.page_link("pages/8_Deferred_Work_Orders.py", label="Deferred Work Orders")
-    st.sidebar.markdown('<div class="sidebar-group admin"><div class="sidebar-section-title">Admin</div></div>', unsafe_allow_html=True)
-    st.sidebar.page_link("pages/2_Employees.py", label="Employees")
-    st.sidebar.page_link("pages/6_Call_Off_PTO.py", label="Call Off / PTO")
-    st.sidebar.page_link("pages/7_Follow_Ups.py", label="Follow-Ups")
-    st.sidebar.page_link("pages/9_Reports.py", label="Reports")
-    st.sidebar.page_link("pages/18_My_Profile.py", label="My Profile")
-    if account_role == "Admin":
-        st.sidebar.page_link("pages/10_Settings.py", label="Settings")
-        st.sidebar.page_link("pages/17_Admin_Controls.py", label="Admin Controls")
-    st.sidebar.page_link("pages/15_Help_How_It_Works.py", label="Help / How To")
+    if is_all_managed_view():
+        st.sidebar.markdown('<div class="sidebar-group home"><div class="sidebar-section-title">Manager</div></div>', unsafe_allow_html=True)
+        st.sidebar.page_link("app.py", label="Manager Dashboard")
+        st.sidebar.markdown('<div class="sidebar-group operations"><div class="sidebar-section-title">Roll-Up Views</div></div>', unsafe_allow_html=True)
+        st.sidebar.page_link("pages/12_View_Schedule.py", label="Rolled-Up Schedule")
+        st.sidebar.page_link("pages/3_Stores.py", label="Stores Roll-Up")
+        st.sidebar.page_link("pages/4_Map_Center.py", label="Areas and Maps Roll-Up")
+        st.sidebar.page_link("pages/2_Employees.py", label="Employees Roll-Up")
+        st.sidebar.page_link("pages/6_Call_Off_PTO.py", label="Call Off / PTO Roll-Up")
+        st.sidebar.page_link("pages/7_Follow_Ups.py", label="Follow-Ups Roll-Up")
+        st.sidebar.page_link("pages/8_Deferred_Work_Orders.py", label="Deferred Work Orders Roll-Up")
+        st.sidebar.page_link("pages/11_Site_Visits.py", label="Site Visits Roll-Up")
+        st.sidebar.page_link("pages/9_Reports.py", label="Reports")
+        st.sidebar.page_link("pages/16_Weather.py", label="Weather")
+        st.sidebar.page_link("pages/18_My_Profile.py", label="My Profile")
+        st.sidebar.page_link("pages/15_Help_How_It_Works.py", label="Help / How To")
+    else:
+        st.sidebar.markdown('<div class="sidebar-group home"><div class="sidebar-section-title">Home</div></div>', unsafe_allow_html=True)
+        st.sidebar.page_link("app.py", label="Dashboard")
+        st.sidebar.markdown('<div class="sidebar-group operations"><div class="sidebar-section-title">Main Operations</div></div>', unsafe_allow_html=True)
+        st.sidebar.page_link("pages/3_Stores.py", label="Stores")
+        st.sidebar.page_link("pages/4_Map_Center.py", label="Areas and Maps")
+        st.sidebar.page_link("pages/5_Scheduler.py", label="Brand Enhancement Scheduler")
+        st.sidebar.page_link("pages/13_PMT_Monthly_Scheduler.py", label="PMT Monthly Scheduler")
+        st.sidebar.page_link("pages/14_Calibration_Scheduler.py", label="Calibration Scheduler")
+        st.sidebar.page_link("pages/12_View_Schedule.py", label="View Schedule")
+        st.sidebar.page_link("pages/16_Weather.py", label="Weather")
+        st.sidebar.page_link("pages/11_Site_Visits.py", label="Site Visits")
+        st.sidebar.page_link("pages/8_Deferred_Work_Orders.py", label="Deferred Work Orders")
+        st.sidebar.markdown('<div class="sidebar-group admin"><div class="sidebar-section-title">Admin</div></div>', unsafe_allow_html=True)
+        st.sidebar.page_link("pages/2_Employees.py", label="Employees")
+        st.sidebar.page_link("pages/6_Call_Off_PTO.py", label="Call Off / PTO")
+        st.sidebar.page_link("pages/7_Follow_Ups.py", label="Follow-Ups")
+        st.sidebar.page_link("pages/9_Reports.py", label="Reports")
+        st.sidebar.page_link("pages/18_My_Profile.py", label="My Profile")
+        if account_role == "Admin":
+            st.sidebar.page_link("pages/10_Settings.py", label="Settings")
+            st.sidebar.page_link("pages/17_Admin_Controls.py", label="Admin Controls")
+        st.sidebar.page_link("pages/15_Help_How_It_Works.py", label="Help / How To")
     st.sidebar.divider()
     undo_snapshot = latest_undo_snapshot()
     if undo_snapshot:

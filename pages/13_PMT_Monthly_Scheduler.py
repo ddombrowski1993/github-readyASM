@@ -26,7 +26,7 @@ from src.models import Employee, MapArea, PMTScheduleBacklog, PMTScheduleRun, Sc
 from src.pdf_reports import REPORT_DIR, pdf_bytes
 from src.scheduler import haversine_miles, is_company_holiday
 from src.smart_import import scan_issue_rows, scan_workbook
-from src.utils import apply_theme, ensure_database_or_stop, is_all_managed_view, metric_help_card, page_header, section_header, sidebar_nav, step_flow
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, metric_help_card, page_header, section_header, sidebar_nav, step_flow
 
 
 apply_theme()
@@ -39,7 +39,7 @@ page_header(
 
 if is_all_managed_view():
     st.caption("Read-only roll-up view. Select a specific workspace from the sidebar to build or edit PMT schedules.")
-    _ru_df = manager_rollup_dataframe(st.session_state.get("user_id"))
+    _ru_df = manager_rollup_dataframe(effective_rollup_user_id())
     if not _ru_df.empty:
         _ru_t = manager_rollup_totals(_ru_df)
         _m1, _m2, _m3, _m4, _m5 = st.columns(5)
@@ -57,7 +57,7 @@ if is_all_managed_view():
         st.subheader("PMT Progress by Managed Area")
         st.dataframe(_ru_df[_pmt_progress_cols], use_container_width=True, hide_index=True)
     _pmt_runs = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select r.run_name, r.cycle_start, r.cycle_end, r.months,
                r.technician_count, r.store_count, r.unscheduled_count,

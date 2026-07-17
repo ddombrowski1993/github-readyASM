@@ -23,7 +23,7 @@ from src.smart_import import (
     scan_issue_rows,
     scan_workbook,
 )
-from src.utils import apply_theme, df_search, ensure_database_or_stop, metric_help_card, page_header, sidebar_nav
+from src.utils import apply_theme, df_search, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, metric_help_card, page_header, sidebar_nav
 
 
 LOCAL_STORE_CSV = "data/stores.csv"
@@ -112,11 +112,11 @@ def render_store_import_summary(summary):
 apply_theme()
 sidebar_nav()
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header("Stores", "Manager roll-up view of stores across all managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to edit that person's stores.")
     stores_rollup = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select s.store_number, s.store_name, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
                p.full_name as assigned_pmt, b.full_name as assigned_brand, c.full_name as assigned_calibration,

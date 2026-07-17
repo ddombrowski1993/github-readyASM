@@ -12,7 +12,7 @@ from src.manager_rollup import manager_rollup_query
 from src.maps import render_plain_table
 from src.models import Followup, FollowupOption, UploadedFile
 from src.pdf_reports import build_pdf_report, pdf_bytes
-from src.utils import apply_theme, ensure_database_or_stop, page_header, save_upload, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, save_upload, sidebar_nav
 
 
 apply_theme()
@@ -254,10 +254,10 @@ def apply_filters(df, manager=False):
 
 page_header("Follow-Ups", "Add, review, and complete follow-up tasks from manual entries.")
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     with st.container(border=True):
         step_header(2, "Review Managed Follow-Ups", "Read-only manager roll-up across all managed users.")
-        followups_rollup = manager_rollup_query(st.session_state.get("user_id"), followup_base_query() + " order by f.due_date, f.priority desc")
+        followups_rollup = manager_rollup_query(effective_rollup_user_id(), followup_base_query() + " order by f.due_date, f.priority desc")
         if followups_rollup.empty:
             st.warning("No managed follow-ups were found.")
         else:

@@ -18,7 +18,7 @@ from src.maps import render_plain_table
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_totals
 from src.models import ScheduleItem
 from src.scheduler import is_company_holiday
-from src.utils import apply_theme, metric_help_card, page_header, require_login, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, is_all_managed_view, metric_help_card, page_header, require_login, sidebar_nav
 from src.weather import weather_alerts
 apply_theme()
 
@@ -41,14 +41,14 @@ if not status["connected"]:
 init_db()
 apply_automatic_schedule_completion()
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header(
         "Dashboard",
         "Manager roll-up view across the people and areas assigned under this account.",
         actions=[("How This App Works", "pages/15_Help_How_It_Works.py")],
     )
     st.info("Viewing Data For: All Managed Users. Use the sidebar Viewing Workspace dropdown to switch to My Workspace or one managed user's workspace.")
-    rollup_df = manager_rollup_dataframe(st.session_state.get("user_id"))
+    rollup_df = manager_rollup_dataframe(effective_rollup_user_id())
     if rollup_df.empty:
         st.warning("No managed areas are assigned to this manager account yet. Ask an admin to assign employees or managers under this account, or claim users from Employees > User Accounts.")
         st.page_link("pages/2_Employees.py", label="Open Employees")

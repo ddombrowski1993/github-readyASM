@@ -26,7 +26,7 @@ from src.manager_rollup import manager_rollup_query
 from src.maps import add_area_overlays, center_for, drawing_to_geometry_json, haversine_miles, map_html, stable_color, stores_within_drawings
 from src.models import Employee, MapArea, PMTAssignmentChange, Store, Team
 from src.smart_import import display_field, mapped_dataframe, mapping_summary, preview_summary, review_table, scan_issue_rows, scan_workbook
-from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, metric_help_card, page_header, sidebar_nav
 
 
 GROUPS = {
@@ -2922,12 +2922,12 @@ def apply_auto_assign_preview_records(apply_group, preview_records):
 apply_theme()
 sidebar_nav()
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header("Areas and Maps", "Manager roll-up view of store assignments across managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to open and edit that person's map assignments.")
     st.caption("Store reassignment, rebalance, and the Original Technician / Newly Assigned Technician Excel export are available after switching from All Managed Users into one specific workspace.")
     assignment_rollup = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select s.store_number, s.address, s.city, s.state, s.latitude, s.longitude,
                bt.team_name as brand_team,

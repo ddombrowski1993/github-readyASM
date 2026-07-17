@@ -11,20 +11,20 @@ from src.manager_rollup import manager_rollup_query
 from src.maps import render_plain_table
 from src.models import SiteVisit
 from src.pdf_reports import build_pdf_report, pdf_bytes
-from src.utils import apply_theme, ensure_database_or_stop, page_header, sidebar_nav
+from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, sidebar_nav
 
 
 apply_theme()
 sidebar_nav()
 
-if st.session_state.get("account_role") == "Manager" and st.session_state.get("manager_rollup_active"):
+if is_all_managed_view():
     page_header("Site Visits", "Manager roll-up view of site visits across managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to plan or complete that person's site visits.")
     today = date.today()
     year_start = date(today.year, 1, 1)
     year_end = date(today.year, 12, 31)
     visits_rollup = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         """
         select s.store_number, s.address, s.city, s.state,
                sv.visit_date, sv.scheduled_date, sv.status, sv.visit_type, sv.comments, sv.followup_needed
@@ -36,7 +36,7 @@ if st.session_state.get("account_role") == "Manager" and st.session_state.get("m
         {"year_start": year_start.isoformat(), "year_end": year_end.isoformat()},
     )
     active_stores = manager_rollup_query(
-        st.session_state.get("user_id"),
+        effective_rollup_user_id(),
         "select store_number from stores where active = 1",
     )
     c1, c2, c3, c4 = st.columns(4)
