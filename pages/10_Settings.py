@@ -42,6 +42,7 @@ WIPE_WORKSPACE_TABLES = [
     "schedule_items",
     "schedules",
     "pmt_schedule_runs",
+    "pmt_assignment_changes",
     "followups",
     "deferred_work_orders",
     "calloff_pto",
@@ -68,6 +69,7 @@ RESTORE_TABLES = [
     "store_assignments",
     "schedules",
     "pmt_schedule_runs",
+    "pmt_assignment_changes",
     "deferred_work_orders",
     "schedule_items",
     "followups",
@@ -345,7 +347,7 @@ with tabs[2]:
 
     st.divider()
     st.subheader("Single Table CSV Backup")
-    table = st.selectbox("Export table", ["employees", "teams", "stores", "custom_city_anchors", "schedule_items", "pmt_schedule_runs", "followups", "followup_options", "calloff_pto", "deferred_work_orders", "pm_completion_report_rows", "uploaded_files", "reports", "audit_log"])
+    table = st.selectbox("Export table", ["employees", "teams", "stores", "custom_city_anchors", "schedule_items", "pmt_schedule_runs", "pmt_assignment_changes", "followups", "followup_options", "calloff_pto", "deferred_work_orders", "pm_completion_report_rows", "uploaded_files", "reports", "audit_log"])
     df = safe_query(f"select * from {table}")
     st.dataframe(df.head(100), use_container_width=True, hide_index=True)
     st.download_button("Download CSV Backup", data=df.to_csv(index=False).encode("utf-8"), file_name=f"{table}_backup.csv")

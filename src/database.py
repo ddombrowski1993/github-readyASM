@@ -265,6 +265,8 @@ def ensure_performance_indexes(engine):
         "create index if not exists ix_uploaded_files_related on uploaded_files (related_table, related_id)",
         "create index if not exists ix_map_areas_active_type_team on map_areas (active, area_type, team_id)",
         "create index if not exists ix_employees_active_role_name on employees (active, role, full_name)",
+        "create index if not exists ix_pmt_assignment_changes_changed_at on pmt_assignment_changes (changed_at)",
+        "create index if not exists ix_pmt_assignment_changes_store on pmt_assignment_changes (store_id, changed_at)",
     ]
     with engine.begin() as conn:
         for statement in index_statements:

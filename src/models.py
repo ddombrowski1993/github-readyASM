@@ -314,6 +314,24 @@ class PMTScheduleBacklog(Base, TimestampMixin):
     )
 
 
+class PMTAssignmentChange(Base):
+    __tablename__ = "pmt_assignment_changes"
+    id = Column(Integer, primary_key=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False)
+    store_number = Column(String(80))
+    city = Column(String(120))
+    state = Column(String(20))
+    previous_employee_id = Column(Integer, ForeignKey("employees.id"))
+    previous_technician = Column(String(220), default="Unassigned")
+    new_employee_id = Column(Integer, ForeignKey("employees.id"))
+    new_technician = Column(String(220), default="Unassigned")
+    changed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    changed_by = Column(String(220))
+    change_source = Column(String(120), nullable=False)
+    change_action = Column(String(120), nullable=False)
+    batch_id = Column(String(80))
+
+
 class UploadedFile(Base):
     __tablename__ = "uploaded_files"
     id = Column(Integer, primary_key=True)

@@ -1,12 +1,14 @@
 import json
 import re
-from datetime import date
+import uuid
+from datetime import date, datetime, timedelta
 from math import atan2
 from math import ceil
 
 import folium
 import pandas as pd
 import streamlit as st
+from sqlalchemy.orm import object_session
 
 st.set_page_config(page_title="Areas and Maps", layout="wide")
 
@@ -22,7 +24,7 @@ from src.geocoding import geocode_address
 from src.imports import clean_store_number, to_float
 from src.manager_rollup import manager_rollup_query
 from src.maps import add_area_overlays, center_for, drawing_to_geometry_json, haversine_miles, map_html, stable_color, stores_within_drawings
-from src.models import Employee, MapArea, Store, Team
+from src.models import Employee, MapArea, PMTAssignmentChange, Store, Team
 from src.smart_import import display_field, mapped_dataframe, mapping_summary, preview_summary, review_table, scan_issue_rows, scan_workbook
 from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, sidebar_nav
 
@@ -167,6 +169,83 @@ def employee_name(employee_id, employees_df):
         return ""
     indexed = employees_df.set_index("id")
     return indexed.loc[employee_id, "full_name"] if employee_id in indexed.index else ""
+
+
+def current_user_label():
+    return st.session_state.get("user_email") or st.session_state.get("username") or st.session_state.get("active_account_label") or ""
+
+
+def normalize_employee_id(value):
+    if value in ("", None) or pd.isna(value):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def technician_name_from_id(session, employee_id):
+    employee_id = normalize_employee_id(employee_id)
+    if employee_id is None:
+        return "Unassigned"
+    employee = session.get(Employee, int(employee_id)) if session else None
+    return employee.full_name if employee else f"Employee {employee_id}"
+
+
+def record_pmt_assignment_change(
+    session,
+    store,
+    previous_employee_id,
+    new_employee_id,
+    change_source,
+    change_action,
+    batch_id=None,
+):
+    previous_employee_id = normalize_employee_id(previous_employee_id)
+    new_employee_id = normalize_employee_id(new_employee_id)
+    if previous_employee_id == new_employee_id:
+        return False
+    session.add(
+        PMTAssignmentChange(
+            store_id=int(store.id),
+            store_number=store.store_number,
+            city=store.city,
+            state=store.state,
+            previous_employee_id=previous_employee_id,
+            previous_technician=technician_name_from_id(session, previous_employee_id),
+            new_employee_id=new_employee_id,
+            new_technician=technician_name_from_id(session, new_employee_id),
+            changed_at=datetime.utcnow(),
+            changed_by=current_user_label(),
+            change_source=change_source,
+            change_action=change_action,
+            batch_id=batch_id,
+        )
+    )
+    return True
+
+
+def apply_pmt_assignment_change(store, employee_id, team_id, change_source, change_action="Reassigned", batch_id=None):
+    session = object_session(store)
+    if session is None:
+        raise RuntimeError("PMT assignment changes must be made on a session-bound Store.")
+    previous_employee_id = getattr(store, "assigned_pmt_employee_id", None)
+    new_employee_id = normalize_employee_id(employee_id)
+    store.assigned_pmt_employee_id = new_employee_id
+    store.assigned_pmt_team_id = int(team_id) if team_id else None
+    return record_pmt_assignment_change(
+        session,
+        store,
+        previous_employee_id,
+        new_employee_id,
+        change_source,
+        change_action,
+        batch_id,
+    )
+
+
+def clear_pmt_assignment_change(store, change_source, change_action="Removed", batch_id=None):
+    return apply_pmt_assignment_change(store, None, None, change_source, change_action, batch_id)
 
 
 def import_column_key(column):
@@ -800,6 +879,7 @@ def simple_pmt_assignment_upload_panel(employee_field, team_field):
         geocoded_people = 0
         review = []
         geocode_attempted = set()
+        batch_id = uuid.uuid4().hex
         progress = st.progress(0, text="Starting PMT import...")
         status_message = st.empty()
         rows_to_import = mapped[mapped["ready"] == True].copy()
@@ -843,8 +923,7 @@ def simple_pmt_assignment_upload_panel(employee_field, team_field):
                     else:
                         review.append({"Store": "", "PMT": assignee.full_name, "Issue": f"Home coordinates were not found: {match_quality}"})
                 team = ensure_technician_team(session, assignee, "PMT")
-                store.assigned_pmt_employee_id = int(assignee.id)
-                store.assigned_pmt_team_id = int(team.id) if team else None
+                apply_pmt_assignment_change(store, int(assignee.id), int(team.id) if team else None, "Assignment Import", "Assigned", batch_id)
                 lat = to_float(row.get("latitude", ""))
                 lon = to_float(row.get("longitude", ""))
                 if lat is not None and lon is not None and (store.latitude is None or store.longitude is None):
@@ -1384,18 +1463,24 @@ def render_manager_rollup_map(stores_df, key="manager_rollup_store_map"):
     return fmap
 
 
-def assign_store_to_group(store, group, team_id=None, employee_id=None):
+def assign_store_to_group(store, group, team_id=None, employee_id=None, change_source="PMT Map", change_action="Reassigned", batch_id=None):
     config = group_config(group)
     if not config:
+        return
+    if group == "PMT":
+        apply_pmt_assignment_change(store, employee_id, team_id, change_source, change_action, batch_id)
         return
     setattr(store, config["team_field"], int(team_id) if team_id else None)
     if employee_id:
         setattr(store, config["employee_field"], int(employee_id))
 
 
-def clear_store_group(store, group):
+def clear_store_group(store, group, change_source="PMT Map", change_action="Removed", batch_id=None):
     config = group_config(group)
     if not config:
+        return
+    if group == "PMT":
+        clear_pmt_assignment_change(store, change_source, change_action, batch_id)
         return
     setattr(store, config["team_field"], None)
     setattr(store, config["employee_field"], None)
@@ -1911,6 +1996,119 @@ def rebalance_store_change_export(preview_df):
             "review_flag": "Review Flag",
         }
     )
+
+
+def pmt_assignment_change_events(start_date, end_date, source_filter="All", technician_filter="All", store_search=""):
+    params = {
+        "start": start_date,
+        "end_exclusive": end_date + timedelta(days=1),
+    }
+    filters = ["changed_at >= :start", "changed_at < :end_exclusive"]
+    if source_filter != "All":
+        filters.append("change_source = :source")
+        params["source"] = source_filter
+    if technician_filter != "All":
+        filters.append("(previous_technician = :technician or new_technician = :technician)")
+        params["technician"] = technician_filter
+    if store_search.strip():
+        filters.append("lower(coalesce(store_number, '')) like lower(:store_search)")
+        params["store_search"] = f"%{store_search.strip()}%"
+    where_sql = " and ".join(filters)
+    return safe_query(
+        f"""
+        select id, store_id, store_number, city, state,
+               coalesce(previous_technician, 'Unassigned') as previous_technician,
+               coalesce(new_technician, 'Unassigned') as new_technician,
+               changed_at, changed_by, change_source, change_action, batch_id
+        from pmt_assignment_changes
+        where {where_sql}
+        order by changed_at desc, store_number
+        """,
+        params,
+        use_cache=False,
+    )
+
+
+def consolidated_pmt_assignment_changes(events_df):
+    if events_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "Store Number",
+                "City",
+                "State",
+                "Original PMT Technician",
+                "Final PMT Technician",
+                "First Change Date/Time",
+                "Last Change Date/Time",
+                "Number of Assignment Changes",
+                "Change Sources",
+            ]
+        )
+    df = events_df.copy()
+    df["changed_at_sort"] = pd.to_datetime(df["changed_at"], errors="coerce")
+    rows = []
+    for store_id, group in df.sort_values("changed_at_sort").groupby("store_id", dropna=False):
+        first = group.iloc[0]
+        last = group.iloc[-1]
+        rows.append(
+            {
+                "Store Number": first.get("store_number", ""),
+                "City": first.get("city", ""),
+                "State": first.get("state", ""),
+                "Original PMT Technician": first.get("previous_technician") or "Unassigned",
+                "Final PMT Technician": last.get("new_technician") or "Unassigned",
+                "First Change Date/Time": first.get("changed_at"),
+                "Last Change Date/Time": last.get("changed_at"),
+                "Number of Assignment Changes": int(len(group)),
+                "Change Sources": ", ".join(sorted(set(group["change_source"].fillna("").astype(str).str.strip()) - {""})),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["Store Number"])
+
+
+def detailed_pmt_assignment_changes(events_df):
+    if events_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "Store Number",
+                "City",
+                "State",
+                "Previous Technician",
+                "New Technician",
+                "Change Date/Time",
+                "Change Source",
+                "Change Action",
+                "Changed By",
+                "Batch ID",
+            ]
+        )
+    return events_df.rename(
+        columns={
+            "store_number": "Store Number",
+            "city": "City",
+            "state": "State",
+            "previous_technician": "Previous Technician",
+            "new_technician": "New Technician",
+            "changed_at": "Change Date/Time",
+            "change_source": "Change Source",
+            "change_action": "Change Action",
+            "changed_by": "Changed By",
+            "batch_id": "Batch ID",
+        }
+    )[
+        [
+            "Store Number",
+            "City",
+            "State",
+            "Previous Technician",
+            "New Technician",
+            "Change Date/Time",
+            "Change Source",
+            "Change Action",
+            "Changed By",
+            "Batch ID",
+        ]
+    ]
 
 
 def render_store_change_excel_export(group, change_df, key_suffix):
@@ -2963,11 +3161,14 @@ if selected_group in ("PMT", "Calibration"):
         st.subheader(f"{selected_group} Geographic Coverage Ranking")
         st.caption("Approximate square miles are based on the outer north/south/east/west spread of each assigned store group. Larger coverage usually means more drive time risk.")
         st.dataframe(coverage, use_container_width=True, hide_index=True)
-        st.download_button(
-            f"Export {selected_group} Geographic Coverage",
-            data=excel_bytes(coverage),
-            file_name=f"{selected_group.lower()}_geographic_coverage.xlsx",
-        )
+        if selected_group != "PMT":
+            st.download_button(
+                f"Export {selected_group} Geographic Coverage",
+                data=excel_bytes(coverage),
+                file_name=f"{selected_group.lower()}_geographic_coverage.xlsx",
+            )
+        else:
+            st.caption("Export PMT geographic coverage from the PMT Export Center at the bottom of this page.")
     st.warning(f"You are editing {selected_group} assignments. This will not change Brand Enhancement or the other technician assignment layer.")
 
     export_cols = st.columns([0.35, 0.65])
@@ -2975,12 +3176,15 @@ if selected_group in ("PMT", "Calibration"):
         synced = sync_technician_areas(selected_group, tech_config["employee_field"], tech_config["team_field"])
         st.success(f"Refreshed {synced} {selected_group} technician map area(s).")
         st.rerun()
-    export_cols[1].download_button(
-        f"Export All {selected_group} Assignments",
-        data=excel_bytes(technician_store_export(stores_df, selected_group, tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"])),
-        file_name=f"{selected_group.lower()}_store_assignments.xlsx",
-        disabled=stores_df.empty,
-    )
+    if selected_group != "PMT":
+        export_cols[1].download_button(
+            f"Export All {selected_group} Assignments",
+            data=excel_bytes(technician_store_export(stores_df, selected_group, tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"])),
+            file_name=f"{selected_group.lower()}_store_assignments.xlsx",
+            disabled=stores_df.empty,
+        )
+    else:
+        export_cols[1].info("PMT assignment exports are available in the PMT Export Center at the bottom of this page.")
     with st.expander(f"Optional: import existing {selected_group} assignments from Excel", expanded=False):
         st.caption(f"You can skip this if you want to assign imported stores manually on this page.")
         if selected_group == "PMT":
@@ -3311,15 +3515,19 @@ if selected_group in ("PMT", "Calibration"):
                 selected_count = len(selected_preview)
                 preview_actions = st.columns([0.28, 0.32, 0.4])
                 preview_actions[0].metric("Stores selected for reassignment", selected_count)
-                preview_actions[1].download_button(
-                    "Download Store Change Preview Excel",
-                    data=excel_bytes(rebalance_store_change_export(full_preview)),
-                    file_name=f"{selected_group.lower()}_store_change_preview.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    disabled=full_preview.empty,
-                    key=f"{selected_group}_rebalance_preview_export_top",
-                )
-                preview_actions[2].caption("Excel sheet: Report. Compare Original Technician to Newly Assigned Technician.")
+                if selected_group != "PMT":
+                    preview_actions[1].download_button(
+                        "Download Store Change Preview Excel",
+                        data=excel_bytes(rebalance_store_change_export(full_preview)),
+                        file_name=f"{selected_group.lower()}_store_change_preview.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        disabled=full_preview.empty,
+                        key=f"{selected_group}_rebalance_preview_export_top",
+                    )
+                    preview_actions[2].caption("Excel sheet: Report. Compare Original Technician to Newly Assigned Technician.")
+                else:
+                    preview_actions[1].info("PMT change exports are in the PMT Export Center.")
+                    preview_actions[2].caption("After saving, use the consolidated or detailed change report at the bottom of this page.")
                 impact_df = rebalance_impact_summary(tech_summary, full_preview)
                 if not impact_df.empty:
                     st.dataframe(impact_df, use_container_width=True, hide_index=True)
@@ -3339,11 +3547,14 @@ if selected_group in ("PMT", "Calibration"):
                     enable_draw=True,
                 )
                 if preview_map:
-                    st.download_button(
-                        "Export Rebalance Preview Map",
-                        data=map_html(preview_map),
-                        file_name=f"{selected_group.lower()}_rebalance_preview_map.html",
-                    )
+                    if selected_group != "PMT":
+                        st.download_button(
+                            "Export Rebalance Preview Map",
+                            data=map_html(preview_map),
+                            file_name=f"{selected_group.lower()}_rebalance_preview_map.html",
+                        )
+                    else:
+                        st.caption("Preview map export is available from the PMT Export Center after reviewing the page.")
                 preview_drawings = preview_map_data.get("all_drawings") if preview_map_data else []
                 drawn_preview_stores = stores_within_drawings(map_context_df, preview_drawings, close_lines_as_areas=True) if preview_drawings else pd.DataFrame()
                 map_adjust_cols = st.columns([0.22, 0.22, 0.22, 0.34])
@@ -3396,6 +3607,7 @@ if selected_group in ("PMT", "Calibration"):
                 if apply_cols[0].button("Save Assignment Plan", type="primary", disabled=selected_count == 0 or not confirmed, key=f"{selected_group}_rebalance_apply"):
                     audit_rows = []
                     applied_change_export = selected_preview.copy()
+                    batch_id = uuid.uuid4().hex
                     with session_scope() as session:
                         team_cache = {}
                         for _, row in selected_preview.iterrows():
@@ -3408,8 +3620,14 @@ if selected_group in ("PMT", "Calibration"):
                             if not store:
                                 continue
                             old_value = getattr(store, tech_config["employee_field"])
-                            setattr(store, tech_config["employee_field"], proposed_employee_id)
-                            setattr(store, tech_config["team_field"], int(team.id) if team else None)
+                            if selected_group == "PMT":
+                                changed = apply_pmt_assignment_change(store, proposed_employee_id, int(team.id) if team else None, "Territory Rebalance", "Reassigned", batch_id)
+                            else:
+                                setattr(store, tech_config["employee_field"], proposed_employee_id)
+                                setattr(store, tech_config["team_field"], int(team.id) if team else None)
+                                changed = True
+                            if not changed:
+                                continue
                             audit_rows.append(
                                 {
                                     "store_id": int(row["store_id"]),
@@ -3430,7 +3648,10 @@ if selected_group in ("PMT", "Calibration"):
                     st.session_state[last_rebalance_export_key] = applied_change_export
                     st.session_state.pop(rebalance_key, None)
                     st.session_state.pop(editor_key, None)
-                    st.success(f"Saved {len(audit_rows)} {selected_group} assignment change(s). The Store Change Excel Export remains at the bottom of this section.")
+                    if selected_group == "PMT":
+                        st.success(f"Saved {len(audit_rows)} {selected_group} assignment change(s). Use the PMT Export Center at the bottom of this page for change reports.")
+                    else:
+                        st.success(f"Saved {len(audit_rows)} {selected_group} assignment change(s). The Store Change Excel Export remains at the bottom of this section.")
                     st.rerun()
                 if apply_cols[1].button("Cancel Preview", key=f"{selected_group}_rebalance_cancel"):
                     st.session_state.pop(rebalance_key, None)
@@ -3489,6 +3710,7 @@ if selected_group in ("PMT", "Calibration"):
                     key=f"{selected_group}_deactivate_apply",
                 ):
                     audit_rows = []
+                    batch_id = uuid.uuid4().hex
                     deactivated_name = dict(source_options).get(int(deactivate_employee), f"Employee {deactivate_employee}")
                     with session_scope(f"{selected_group} technician deactivated: {deactivated_name}") as session:
                         employee = session.get(Employee, int(deactivate_employee))
@@ -3504,15 +3726,26 @@ if selected_group in ("PMT", "Calibration"):
                         for store in affected_stores:
                             old_value = getattr(store, tech_config["employee_field"])
                             if deactivate_action == "Clear assignments and mark unassigned":
-                                setattr(store, tech_config["employee_field"], None)
-                                setattr(store, tech_config["team_field"], None)
+                                if selected_group == "PMT":
+                                    changed = clear_pmt_assignment_change(store, "Technician Deactivation", "Removed", batch_id)
+                                else:
+                                    setattr(store, tech_config["employee_field"], None)
+                                    setattr(store, tech_config["team_field"], None)
+                                    changed = True
                                 new_value = "Unassigned"
                             elif deactivate_action == "Reassign all stores to one technician" and replacement_employee is not None:
-                                setattr(store, tech_config["employee_field"], int(replacement_employee))
-                                setattr(store, tech_config["team_field"], int(replacement_team.id) if replacement_team else None)
+                                if selected_group == "PMT":
+                                    changed = apply_pmt_assignment_change(store, int(replacement_employee), int(replacement_team.id) if replacement_team else None, "Technician Deactivation", "Deactivated Technician Transfer", batch_id)
+                                else:
+                                    setattr(store, tech_config["employee_field"], int(replacement_employee))
+                                    setattr(store, tech_config["team_field"], int(replacement_team.id) if replacement_team else None)
+                                    changed = True
                                 new_value = replacement_name
                             else:
+                                changed = False
                                 new_value = "Left assigned to inactive technician"
+                            if not changed:
+                                continue
                             audit_rows.append({"store_id": int(store.id), "store_number": store.store_number, "old": old_value, "new": new_value})
                     for audit in audit_rows:
                         log_action(
@@ -3556,7 +3789,8 @@ if selected_group in ("PMT", "Calibration"):
                 active_export_df = st.session_state.get(rebalance_key)
             elif isinstance(st.session_state.get(last_rebalance_export_key), pd.DataFrame) and not st.session_state.get(last_rebalance_export_key).empty:
                 active_export_df = st.session_state.get(last_rebalance_export_key)
-            render_store_change_excel_export(selected_group, active_export_df, "bottom")
+            if selected_group != "PMT":
+                render_store_change_excel_export(selected_group, active_export_df, "bottom")
 
     with st.expander(f"Add or Update {selected_group} Technician", expanded=tech_summary.empty):
         with st.form(f"{selected_group}_technician_profile_form", clear_on_submit=False):
@@ -3639,7 +3873,8 @@ if selected_group in ("PMT", "Calibration"):
         tech_table["base_city_state"] = tech_table.apply(lambda row: ", ".join([value for value in [row.get("base_city"), row.get("base_state")] if value]), axis=1)
         tech_table["unscheduled_stores"] = (tech_table["assigned_stores"].fillna(0) - tech_table["scheduled_this_cycle"].fillna(0)).clip(lower=0).astype(int)
         header = st.columns([0.18, 0.08, 0.13, 0.13, 0.10, 0.10, 0.10, 0.06, 0.06, 0.06])
-        for col, label in zip(header, [f"{selected_group} Technician", "Status", "Home City", "Base City", "Assigned", "Scheduled", "Unscheduled", "View", "Export", "Remove"]):
+        export_header = "Export" if selected_group != "PMT" else "Reports"
+        for col, label in zip(header, [f"{selected_group} Technician", "Status", "Home City", "Base City", "Assigned", "Scheduled", "Unscheduled", "View", export_header, "Remove"]):
             col.markdown(f"**{label}**")
         for _, tech in tech_table.iterrows():
             cols = st.columns([0.18, 0.08, 0.13, 0.13, 0.10, 0.10, 0.10, 0.06, 0.06, 0.06])
@@ -3653,12 +3888,15 @@ if selected_group in ("PMT", "Calibration"):
             if cols[7].button("View", key=f"{selected_group}_view_{tech['employee_id']}"):
                 st.session_state[f"{selected_group}_map_employee_id"] = int(tech["employee_id"])
                 st.rerun()
-            cols[8].download_button(
-                "Export",
-                data=excel_bytes(technician_store_export(stores_df, selected_group, tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"], int(tech["employee_id"]), include_distance=True, employees_df=tech_summary)),
-                file_name=f"{selected_group.lower()}_{str(tech['technician']).replace(' ', '_').lower()}_stores.xlsx",
-                key=f"{selected_group}_export_{tech['employee_id']}",
-            )
+            if selected_group != "PMT":
+                cols[8].download_button(
+                    "Export",
+                    data=excel_bytes(technician_store_export(stores_df, selected_group, tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"], int(tech["employee_id"]), include_distance=True, employees_df=tech_summary)),
+                    file_name=f"{selected_group.lower()}_{str(tech['technician']).replace(' ', '_').lower()}_stores.xlsx",
+                    key=f"{selected_group}_export_{tech['employee_id']}",
+                )
+            else:
+                cols[8].caption("Export Center")
             if cols[9].button("Remove", key=f"{selected_group}_remove_{tech['employee_id']}"):
                 st.session_state[f"{selected_group}_remove_tech_id"] = int(tech["employee_id"])
                 st.rerun()
@@ -3722,7 +3960,10 @@ if selected_group in ("PMT", "Calibration"):
         technicians_df=tech_summary,
     )
     if tech_map:
-        st.download_button(f"Export {selected_group} Map", data=map_html(tech_map), file_name=f"{selected_group.lower()}_assignment_map.html")
+        if selected_group != "PMT":
+            st.download_button(f"Export {selected_group} Map", data=map_html(tech_map), file_name=f"{selected_group.lower()}_assignment_map.html")
+        else:
+            st.caption("PMT map export is available in the PMT Export Center at the bottom of this page.")
 
     st.subheader(f"{selected_group} Map-Based Assignment Editing")
     drawings = tech_map_data.get("all_drawings") if tech_map_data else []
@@ -3760,6 +4001,8 @@ if selected_group in ("PMT", "Calibration"):
     edit_cols = st.columns(3)
     if edit_cols[0].button(f"Assign Selected Stores to {selected_group}", disabled=not selected_store_ids or target_tech is None, type="primary"):
         audit_rows = []
+        batch_id = uuid.uuid4().hex
+        change_source = "PMT Map" if map_selected_ids else "Manual Assignment"
         target_name = tech_summary.set_index("employee_id").loc[int(target_tech), "technician"] if not tech_summary.empty else f"Employee {target_tech}"
         with session_scope() as session:
             employee = session.get(Employee, int(target_tech))
@@ -3768,8 +4011,14 @@ if selected_group in ("PMT", "Calibration"):
                 store = session.get(Store, int(store_id))
                 if store:
                     old_value = getattr(store, tech_config["employee_field"])
-                    setattr(store, tech_config["employee_field"], int(target_tech))
-                    setattr(store, tech_config["team_field"], int(team.id) if team else None)
+                    if selected_group == "PMT":
+                        changed = apply_pmt_assignment_change(store, int(target_tech), int(team.id) if team else None, change_source, "Reassigned", batch_id)
+                    else:
+                        setattr(store, tech_config["employee_field"], int(target_tech))
+                        setattr(store, tech_config["team_field"], int(team.id) if team else None)
+                        changed = True
+                    if not changed:
+                        continue
                     audit_rows.append({"store_id": int(store.id), "store_number": store.store_number, "old": old_value, "new": target_name})
         for audit in audit_rows:
             log_action(
@@ -3779,17 +4028,25 @@ if selected_group in ("PMT", "Calibration"):
                 description=f"Store {audit['store_number']}: {audit['old']} to {audit['new']} by map/manual assignment.",
             )
         sync_technician_areas(selected_group, tech_config["employee_field"], tech_config["team_field"])
-        st.success(f"Updated {len(selected_store_ids)} {selected_group} assignment(s).")
+        st.success(f"Updated {len(audit_rows)} {selected_group} assignment(s).")
         st.rerun()
     if edit_cols[1].button(f"Remove {selected_group} From Selected Stores", disabled=not selected_store_ids, type="secondary"):
         audit_rows = []
+        batch_id = uuid.uuid4().hex
+        change_source = "PMT Map" if map_selected_ids else "Manual Assignment"
         with session_scope() as session:
             for store_id in selected_store_ids:
                 store = session.get(Store, int(store_id))
                 if store:
                     old_value = getattr(store, tech_config["employee_field"])
-                    setattr(store, tech_config["employee_field"], None)
-                    setattr(store, tech_config["team_field"], None)
+                    if selected_group == "PMT":
+                        changed = clear_pmt_assignment_change(store, change_source, "Removed", batch_id)
+                    else:
+                        setattr(store, tech_config["employee_field"], None)
+                        setattr(store, tech_config["team_field"], None)
+                        changed = True
+                    if not changed:
+                        continue
                     audit_rows.append({"store_id": int(store.id), "store_number": store.store_number, "old": old_value})
         for audit in audit_rows:
             log_action(
@@ -3799,13 +4056,126 @@ if selected_group in ("PMT", "Calibration"):
                 description=f"Store {audit['store_number']}: {audit['old']} cleared by map/manual assignment.",
             )
         sync_technician_areas(selected_group, tech_config["employee_field"], tech_config["team_field"])
-        st.success(f"Removed {selected_group} assignment from {len(selected_store_ids)} store(s).")
+        st.success(f"Removed {selected_group} assignment from {len(audit_rows)} store(s).")
         st.rerun()
-    edit_cols[2].download_button(
-        f"Export {selected_group} Unassigned Stores",
-        data=excel_bytes(technician_store_export(stores_df, selected_group, tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"], unassigned_only=True)),
-        file_name=f"{selected_group.lower()}_unassigned_stores.xlsx",
-    )
+    if selected_group != "PMT":
+        edit_cols[2].download_button(
+            f"Export {selected_group} Unassigned Stores",
+            data=excel_bytes(technician_store_export(stores_df, selected_group, tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"], unassigned_only=True)),
+            file_name=f"{selected_group.lower()}_unassigned_stores.xlsx",
+        )
+    else:
+        edit_cols[2].info("PMT unassigned-store export is in the PMT Export Center.")
+    if selected_group == "PMT":
+        st.divider()
+        st.subheader("PMT Export Center")
+        st.caption("All PMT exports for this page are collected here.")
+        export_tabs = st.tabs(["Assignment Change Reports", "Current Assignment Reports", "Coverage and Map Reports", "Unassigned Store Reports"])
+
+        with export_tabs[0]:
+            default_start = date.today() - timedelta(days=6)
+            default_end = date.today()
+            filter_cols = st.columns([0.18, 0.18, 0.22, 0.22, 0.20])
+            change_start = filter_cols[0].date_input("Start date", value=default_start, key="pmt_change_start")
+            change_end = filter_cols[1].date_input("End date", value=default_end, key="pmt_change_end")
+            source_options = ["All", "Territory Rebalance", "PMT Map", "Manual Assignment", "Technician Deactivation", "Assignment Import", "Other Existing PMT Tool"]
+            source_filter = filter_cols[2].selectbox("Change source", source_options, key="pmt_change_source_filter")
+            tech_names = sorted(
+                set(stores_df["pmt_person"].fillna("").astype(str).str.strip().tolist())
+                | set(tech_summary["technician"].fillna("").astype(str).str.strip().tolist() if not tech_summary.empty else [])
+            )
+            tech_names = [name for name in tech_names if name]
+            technician_filter = filter_cols[3].selectbox("Technician", ["All"] + tech_names, key="pmt_change_technician_filter")
+            store_search = filter_cols[4].text_input("Store number", key="pmt_change_store_search")
+            if change_end < change_start:
+                st.error("End date cannot be before start date.")
+                events_df = pd.DataFrame()
+            else:
+                events_df = pmt_assignment_change_events(change_start, change_end, source_filter, technician_filter, store_search)
+            consolidated_df = consolidated_pmt_assignment_changes(events_df)
+            detailed_df = detailed_pmt_assignment_changes(events_df)
+            metric_cols = st.columns(3)
+            metric_cols[0].metric("Assignment Events", len(events_df))
+            metric_cols[1].metric("Unique Stores Affected", events_df["store_id"].nunique() if not events_df.empty else 0)
+            earliest = events_df["changed_at"].min() if not events_df.empty else ""
+            metric_cols[2].metric("History Starts", str(earliest)[:19] if earliest else "No records yet")
+            if events_df.empty:
+                st.info("No PMT assignment history was found for the selected range. PMT assignment history is available beginning when this logging feature is enabled.")
+            else:
+                st.markdown("**Consolidated Corporate Report Preview**")
+                st.dataframe(consolidated_df, use_container_width=True, hide_index=True)
+                c1, c2 = st.columns(2)
+                c1.download_button(
+                    "Download Consolidated Assignment Change Report",
+                    data=excel_bytes(consolidated_df),
+                    file_name="pmt_assignment_changes_consolidated.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    disabled=consolidated_df.empty,
+                )
+                c2.download_button(
+                    "Download Detailed Assignment Audit Report",
+                    data=excel_bytes(detailed_df),
+                    file_name="pmt_assignment_changes_detailed.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    disabled=detailed_df.empty,
+                )
+                with st.expander("Detailed Assignment Audit Preview", expanded=False):
+                    st.dataframe(detailed_df, use_container_width=True, hide_index=True)
+
+        with export_tabs[1]:
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "Export Current PMT Assignments",
+                data=excel_bytes(technician_store_export(stores_df, "PMT", tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"])),
+                file_name="pmt_store_assignments.xlsx",
+                disabled=stores_df.empty,
+            )
+            technician_export = c2.selectbox(
+                "Individual technician export",
+                [None] + tech_summary["employee_id"].tolist() if not tech_summary.empty else [None],
+                format_func=lambda value: "Select PMT technician" if value is None else tech_summary.set_index("employee_id").loc[value, "technician"],
+                key="pmt_export_technician",
+            )
+            if technician_export is not None:
+                tech_name = tech_summary.set_index("employee_id").loc[int(technician_export), "technician"]
+                st.download_button(
+                    f"Export {tech_name} Stores",
+                    data=excel_bytes(technician_store_export(stores_df, "PMT", tech_config["employee_field"], tech_config["person_column"], tech_config["area_column"], int(technician_export), include_distance=True, employees_df=tech_summary)),
+                    file_name=f"pmt_{str(tech_name).replace(' ', '_').lower()}_stores.xlsx",
+                )
+
+        with export_tabs[2]:
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "Export PMT Geographic Coverage",
+                data=excel_bytes(coverage if not coverage.empty else pd.DataFrame()),
+                file_name="pmt_geographic_coverage.xlsx",
+                disabled=coverage.empty,
+            )
+            c2.download_button(
+                "Export Current PMT Map",
+                data=map_html(tech_map) if tech_map else "",
+                file_name="pmt_assignment_map.html",
+                disabled=not bool(tech_map),
+            )
+
+        with export_tabs[3]:
+            unassigned_export = technician_store_export(
+                stores_df,
+                "PMT",
+                tech_config["employee_field"],
+                tech_config["person_column"],
+                tech_config["area_column"],
+                unassigned_only=True,
+            )
+            st.metric("Unassigned PMT Stores", len(unassigned_export))
+            st.dataframe(unassigned_export.head(100), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Export PMT Unassigned Stores",
+                data=excel_bytes(unassigned_export),
+                file_name="pmt_unassigned_stores.xlsx",
+                disabled=unassigned_export.empty,
+            )
     st.stop()
 
 if selected_group == "Brand Enhancement":
