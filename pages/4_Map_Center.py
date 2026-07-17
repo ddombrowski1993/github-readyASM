@@ -458,7 +458,8 @@ def stores_query():
         left join employees ce on ce.id = s.assigned_calibration_employee_id
         where s.active = true
         order by s.store_number
-        """
+        """,
+        use_cache=False,
     )
 
 
@@ -1010,13 +1011,23 @@ def render_area_manager_map(
 
     for _, row in valid.iterrows():
         state = store_status_for_map(row, group, selected_team_id, selected_ids)
+        if group == "PMT":
+            tooltip_assignment = f"PMT Technician: {row.get('pmt_person') or 'Unassigned'}"
+        elif group == "Calibration":
+            tooltip_assignment = f"Calibration Technician: {row.get('calibration_person') or 'Unassigned'}"
+        elif group == "Brand Enhancement":
+            tooltip_assignment = f"Brand Area: {row.get('brand_area') or 'Unassigned'}"
+        else:
+            tooltip_assignment = f"PMT Technician: {row.get('pmt_person') or 'Unassigned'}"
         popup = f"""
         <b>Store {row.get('store_number','')}</b><br>
         {row.get('address','')}<br>
         {row.get('city','')}, {row.get('state','')} {row.get('zip','')}<br><br>
         Brand Enhancement: {row.get('brand_area') or 'Unassigned'}<br>
-        PMT: {row.get('pmt_person') or row.get('pmt_area') or 'Unassigned'}<br>
-        Calibration: {row.get('calibration_area') or row.get('calibration_person') or 'Unassigned'}<br><br>
+        PMT Technician: {row.get('pmt_person') or 'Unassigned'}<br>
+        PMT Area: {row.get('pmt_area') or 'Unassigned'}<br>
+        Calibration Technician: {row.get('calibration_person') or 'Unassigned'}<br>
+        Calibration Area: {row.get('calibration_area') or 'Unassigned'}<br><br>
         Use the manual add/remove controls below the map to change this store.
         """
         folium.CircleMarker(
@@ -1028,7 +1039,7 @@ def render_area_manager_map(
             fill_color=(stable_color(row.get("pmt_person")) if group == "PMT" and row.get("pmt_person") else stable_color(row.get("calibration_person")) if group == "Calibration" and row.get("calibration_person") else marker_color(state)),
             fill_opacity=0.92,
             popup=folium.Popup(popup, max_width=340),
-            tooltip=f"Store {row.get('store_number','')} - {state.replace('_', ' ')}",
+            tooltip=f"Store {row.get('store_number','')} - {tooltip_assignment}",
         ).add_to(fmap)
 
     if enable_draw:

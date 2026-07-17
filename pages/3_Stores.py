@@ -244,6 +244,10 @@ def find_store_by_number(store_number):
         use_cache=False,
     )
 
+
+def is_active_store_value(value):
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
 if selected_section == "Store List":
     stores = active_store_rows()
     city_summary = active_store_city_summary()
@@ -548,12 +552,25 @@ if selected_section == "Add Individual Store Manually":
         if not cleaned_store_number:
             st.error("Enter a valid 4-6 digit store number.")
             st.stop()
+        existing = find_store_by_number(cleaned_store_number)
+        existing_store_id = int(existing.iloc[0]["id"]) if not existing.empty else None
+        if not existing.empty and is_active_store_value(existing.iloc[0]["active"]):
+            existing_store = existing.iloc[0]
+            st.warning(f"Store {cleaned_store_number} is already part of your active store list.")
+            st.caption(
+                build_address(
+                    existing_store.get("address", ""),
+                    existing_store.get("city", ""),
+                    existing_store.get("state", ""),
+                    existing_store.get("zip", ""),
+                )
+                or "No saved address on this store."
+            )
+            st.stop()
         if not any(value.strip() for value in [manual_address, manual_city, manual_state, manual_zip]):
             st.error("Enter at least a street address, city/state, or ZIP so the app can find coordinates.")
             st.stop()
 
-        existing = find_store_by_number(cleaned_store_number)
-        existing_store_id = int(existing.iloc[0]["id"]) if not existing.empty else None
         lookup_result, diagnostics = geocode_address(
             manual_address,
             manual_city,
@@ -606,14 +623,14 @@ if selected_section == "Add Individual Store Manually":
                 store.assigned_calibration_team_id = None
             saved_store_id = store.id
 
-        action = "manual store added" if existing_store_id is None else "manual store updated"
+        action = "manual store added" if existing_store_id is None else "manual store reactivated"
         description = (
             f"{cleaned_store_number} | {build_address(manual_address, manual_city, manual_state, manual_zip)} | "
             f"{lookup_result['latitude']}, {lookup_result['longitude']}"
         )
         log_action(action, "stores", int(saved_store_id), description)
         st.session_state["manual_store_add_result"] = {
-            "action": "added" if existing_store_id is None else "updated",
+            "action": "added" if existing_store_id is None else "reactivated",
             "store_number": cleaned_store_number,
             "address": build_address(manual_address, manual_city, manual_state, manual_zip),
             "latitude": lookup_result["latitude"],
