@@ -239,10 +239,82 @@ def _init_db_for_schema(url, schema):
     engine = get_engine(url, schema=schema or None)
     Base.metadata.create_all(engine)
     ensure_undo_table(engine)
+    ensure_pmt_assignment_changes_table(engine)
     ensure_performance_indexes(engine)
     ensure_schema_updates(engine)
     seed_core_data()
     return True
+
+
+def ensure_pmt_assignment_changes_table(engine=None):
+    if engine is not None:
+        _ensure_pmt_assignment_changes_table_for_engine(engine)
+        return True
+    schema = current_account_schema() or ""
+    _ensure_pmt_assignment_changes_table_for_schema(get_database_url(), schema)
+    return True
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_pmt_assignment_changes_table_for_schema(url, schema):
+    engine = get_engine(url, schema=schema or None)
+    _ensure_pmt_assignment_changes_table_for_engine(engine)
+    return True
+
+
+def _ensure_pmt_assignment_changes_table_for_engine(engine):
+    with engine.begin() as conn:
+        _apply_workspace_search_path(conn)
+        if engine.dialect.name == "sqlite":
+            conn.execute(
+                text(
+                    """
+                    create table if not exists pmt_assignment_changes (
+                        id integer primary key autoincrement,
+                        store_id integer not null,
+                        store_number varchar(80),
+                        city varchar(120),
+                        state varchar(20),
+                        previous_employee_id integer,
+                        previous_technician varchar(220) default 'Unassigned',
+                        new_employee_id integer,
+                        new_technician varchar(220) default 'Unassigned',
+                        changed_at timestamp not null,
+                        changed_by varchar(220),
+                        change_source varchar(120) not null,
+                        change_action varchar(120) not null,
+                        batch_id varchar(80)
+                    )
+                    """
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    create table if not exists pmt_assignment_changes (
+                        id serial primary key,
+                        store_id integer not null,
+                        store_number varchar(80),
+                        city varchar(120),
+                        state varchar(20),
+                        previous_employee_id integer,
+                        previous_technician varchar(220) default 'Unassigned',
+                        new_employee_id integer,
+                        new_technician varchar(220) default 'Unassigned',
+                        changed_at timestamp not null,
+                        changed_by varchar(220),
+                        change_source varchar(120) not null,
+                        change_action varchar(120) not null,
+                        batch_id varchar(80)
+                    )
+                    """
+                )
+            )
+        conn.execute(text("create index if not exists ix_pmt_assignment_changes_changed_at on pmt_assignment_changes (changed_at)"))
+        conn.execute(text("create index if not exists ix_pmt_assignment_changes_store on pmt_assignment_changes (store_id, changed_at)"))
+        conn.execute(text("create index if not exists ix_pmt_assignment_changes_store_number on pmt_assignment_changes (store_number)"))
+        conn.execute(text("create index if not exists ix_pmt_assignment_changes_batch_id on pmt_assignment_changes (batch_id)"))
 
 
 def ensure_performance_indexes(engine):

@@ -17,7 +17,7 @@ from folium.plugins import Draw, FastMarkerCluster, MarkerCluster
 from streamlit_folium import st_folium
 
 from src.anchor_store import app_city_center_for
-from src.database import active_employees, log_action, safe_query, session_scope, teams
+from src.database import active_employees, ensure_pmt_assignment_changes_table, log_action, safe_query, session_scope, teams
 from src.exports import csv_bytes, excel_bytes
 from src.geo_coverage import geographic_coverage_summary
 from src.geocoding import geocode_address
@@ -1999,6 +1999,7 @@ def rebalance_store_change_export(preview_df):
 
 
 def pmt_assignment_change_events(start_date, end_date, source_filter="All", technician_filter="All", store_search=""):
+    ensure_pmt_assignment_changes_table()
     params = {
         "start": start_date,
         "end_exclusive": end_date + timedelta(days=1),
