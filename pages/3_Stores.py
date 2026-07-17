@@ -7,6 +7,7 @@ st.set_page_config(page_title="Stores", layout="wide")
 
 from src.database import log_action, safe_query, session_scope, stores_for_select
 from src.exports import download_table, excel_bytes
+from src.geocoding import build_address, geocode_address
 from src.imports import clean_store_number, import_stores, sample_store_template
 from src.manager_rollup import manager_rollup_query
 from src.models import Store
@@ -169,9 +170,9 @@ if st.session_state.get("account_role") == "Manager" and st.session_state.get("m
     st.stop()
 
 ensure_database_or_stop()
-page_header("Stores", "Master store database, uploads, store details, location data, and city management.")
+page_header("Stores", "Master store database, uploads, store details, location data, and one-off store adds.")
 
-store_sections = ["Store List", "Upload Stores", "Store Details", "City Manager"]
+store_sections = ["Store List", "Upload Stores", "Store Details", "Add Individual Store Manually"]
 try:
     requested_section = st.query_params.get("stores_section")
     if isinstance(requested_section, list):
@@ -228,6 +229,20 @@ def missing_city_total():
         "select count(*) as missing_city_count from stores where active = true and nullif(trim(coalesce(city,'')), '') is null"
     )
     return int(result.iloc[0]["missing_city_count"]) if not result.empty else 0
+
+
+def find_store_by_number(store_number):
+    return safe_query(
+        """
+        select id, store_number, store_name, address, city, state, zip, latitude, longitude, active,
+               assigned_pmt_employee_id, assigned_brand_employee_id, assigned_calibration_employee_id,
+               assigned_pmt_team_id, assigned_brand_team_id, assigned_calibration_team_id
+        from stores
+        where store_number = :store_number
+        """,
+        {"store_number": store_number},
+        use_cache=False,
+    )
 
 if selected_section == "Store List":
     stores = active_store_rows()
@@ -513,48 +528,111 @@ if selected_section == "Store Details":
         st.subheader("Uploaded Files")
         st.dataframe(safe_query("select * from uploaded_files where related_table = 'stores' and related_id = :id", {"id": int(selected)}), use_container_width=True, hide_index=True)
 
-if selected_section == "City Manager":
-    city_summary = active_store_city_summary()
-    missing_city_count = missing_city_total()
-    st.subheader("Cities in Store Database")
-    store_count = int(city_summary["store_count"].sum()) if not city_summary.empty else 0
-    if store_count == 0 and missing_city_count == 0:
-        st.info("No stores found. Upload stores with city/state values to use City Manager.")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Cities Listed", len(city_summary))
-    m2.metric("Stores With City", store_count)
-    with m3:
-        metric_help_card("Stores Missing City", missing_city_count, "Active stores with blank city. This affects filtering, reports, and assignment cleanup.")
-    st.dataframe(city_summary, use_container_width=True, hide_index=True, height=360)
+if selected_section == "Add Individual Store Manually":
+    st.subheader("Add Individual Store Manually")
+    st.caption("Use this for a one-off new building or store that is not in your current upload file.")
 
-    missing_city_stores = safe_query(
-        """
-        select id, store_number, store_name, address, city, state, zip
-        from stores
-        where active = true and nullif(trim(coalesce(city,'')), '') is null
-        order by store_number
-        """
-    )
-    st.subheader("Stores Missing City")
-    st.dataframe(missing_city_stores, use_container_width=True, hide_index=True, height=360)
-
-    if not missing_city_stores.empty:
-        st.caption("Update city/state for one store at a time here, or upload a corrected store file with city columns.")
-        store_lookup = missing_city_stores.set_index("id")
-        missing_store_id = st.selectbox(
-            "Store missing city",
-            missing_city_stores["id"].tolist(),
-            format_func=lambda x: f"{store_lookup.loc[x, 'store_number']} - {store_lookup.loc[x, 'address'] or 'No address'}",
-            key="missing_city_store",
-        )
+    with st.form("manual_store_add_form"):
         c1, c2 = st.columns(2)
-        new_city = c1.text_input("City", key="missing_city_new_city")
-        new_state = c2.text_input("State", value=str(store_lookup.loc[missing_store_id, "state"] or ""), key="missing_city_new_state")
-        if st.button("Update Store City", disabled=not new_city.strip(), key="missing_city_update"):
-            with session_scope() as session:
-                store = session.get(Store, int(missing_store_id))
-                store.city = new_city.strip()
-                store.state = new_state.strip()
-            log_action("store city updated", "stores", int(missing_store_id), f"{new_city.strip()}, {new_state.strip()}")
-            st.success("Store city updated.")
-            st.rerun()
+        manual_store_number = c1.text_input("Store Number", key="manual_store_number")
+        manual_store_name = c2.text_input("Store Name", key="manual_store_name")
+        manual_address = st.text_input("Street Address", key="manual_store_address")
+        c3, c4, c5 = st.columns([2, 1, 1])
+        manual_city = c3.text_input("City", key="manual_store_city")
+        manual_state = c4.text_input("State", key="manual_store_state")
+        manual_zip = c5.text_input("ZIP", key="manual_store_zip")
+        submitted = st.form_submit_button("Find Coordinates and Save Store")
+
+    cleaned_store_number = clean_store_number(manual_store_number)
+    if submitted:
+        if not cleaned_store_number:
+            st.error("Enter a valid 4-6 digit store number.")
+            st.stop()
+        if not any(value.strip() for value in [manual_address, manual_city, manual_state, manual_zip]):
+            st.error("Enter at least a street address, city/state, or ZIP so the app can find coordinates.")
+            st.stop()
+
+        existing = find_store_by_number(cleaned_store_number)
+        existing_store_id = int(existing.iloc[0]["id"]) if not existing.empty else None
+        lookup_result, diagnostics = geocode_address(
+            manual_address,
+            manual_city,
+            manual_state,
+            manual_zip,
+            return_diagnostics=True,
+        )
+        if not lookup_result:
+            st.error("The app could not find latitude and longitude for that address. Check the address and try again.")
+            with st.expander("Lookup attempts", expanded=False):
+                st.dataframe(pd.DataFrame(diagnostics), use_container_width=True, hide_index=True)
+            st.stop()
+        assignment_columns = [
+            "assigned_pmt_employee_id",
+            "assigned_brand_employee_id",
+            "assigned_calibration_employee_id",
+            "assigned_pmt_team_id",
+            "assigned_brand_team_id",
+            "assigned_calibration_team_id",
+        ]
+        existing_has_assignment = (
+            not existing.empty
+            and any(pd.notna(existing.iloc[0][column]) for column in assignment_columns)
+        )
+
+        with session_scope(action_label="Manual store add") as session:
+            store = session.get(Store, existing_store_id) if existing_store_id else None
+            created = store is None
+            if created:
+                store = Store(store_number=cleaned_store_number)
+                session.add(store)
+                session.flush()
+            store.store_name = manual_store_name.strip() or store.store_name
+            store.address = manual_address.strip() or store.address
+            store.city = manual_city.strip() or store.city
+            store.state = manual_state.strip() or store.state
+            store.zip = manual_zip.strip() or store.zip
+            store.latitude = float(lookup_result["latitude"])
+            store.longitude = float(lookup_result["longitude"])
+            store.store_status = store.store_status or "Not Started"
+            store.priority = store.priority or "Medium"
+            store.notes = store.notes or ""
+            store.active = True
+            if created:
+                store.assigned_pmt_employee_id = None
+                store.assigned_brand_employee_id = None
+                store.assigned_calibration_employee_id = None
+                store.assigned_pmt_team_id = None
+                store.assigned_brand_team_id = None
+                store.assigned_calibration_team_id = None
+            saved_store_id = store.id
+
+        action = "manual store added" if existing_store_id is None else "manual store updated"
+        description = (
+            f"{cleaned_store_number} | {build_address(manual_address, manual_city, manual_state, manual_zip)} | "
+            f"{lookup_result['latitude']}, {lookup_result['longitude']}"
+        )
+        log_action(action, "stores", int(saved_store_id), description)
+        st.session_state["manual_store_add_result"] = {
+            "action": "added" if existing_store_id is None else "updated",
+            "store_number": cleaned_store_number,
+            "address": build_address(manual_address, manual_city, manual_state, manual_zip),
+            "latitude": lookup_result["latitude"],
+            "longitude": lookup_result["longitude"],
+            "match": lookup_result.get("display_name", ""),
+            "quality": lookup_result.get("match_quality", "Address match"),
+            "assignment": "Existing assignment preserved" if existing_has_assignment else "Unassigned",
+        }
+        st.rerun()
+
+    result = st.session_state.get("manual_store_add_result")
+    if result:
+        st.success(f"Store {result['store_number']} {result['action']} and saved to your active store list.")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Latitude", f"{float(result['latitude']):.6f}")
+        m2.metric("Longitude", f"{float(result['longitude']):.6f}")
+        m3.metric("Assignment", result.get("assignment", "Unassigned"))
+        st.caption(f"Matched: {result['match'] or result['address']} ({result['quality']})")
+
+    st.subheader("Active Store List Preview")
+    manual_store_preview = active_store_rows().head(25)
+    st.dataframe(manual_store_preview, use_container_width=True, hide_index=True)
