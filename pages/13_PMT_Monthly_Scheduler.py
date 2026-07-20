@@ -3790,9 +3790,15 @@ with tab_manage:
                 format_func=lambda value: pmt_people.set_index("employee_id").loc[value, "technician_name"],
                 key=f"pmt_manual_add_employee_{selected_run}",
             )
-            add_month_options = [add_months(month_start(date.today()), offset) for offset in range(-3, 13)]
+            current_month = month_start(date.today())
+            add_month_options = [add_months(current_month, offset) for offset in range(0, 13)]
             if not run_items.empty and "month_start" in run_items.columns:
-                add_month_options = sorted(set(add_month_options + [scalar_date(value) for value in run_items["month_start"].dropna().tolist() if scalar_date(value)]))
+                future_run_months = [
+                    value
+                    for value in [scalar_date(item) for item in run_items["month_start"].dropna().tolist()]
+                    if value and value >= current_month
+                ]
+                add_month_options = sorted(set(add_month_options + future_run_months))
             add_month = add_cols[1].selectbox(
                 "Month to add into",
                 add_month_options,
@@ -3921,10 +3927,6 @@ with tab_manage:
                         "Use the move button below if you want to move those existing schedule rows to this PMT."
                     )
                 add_notes = st.text_input("Add note", value="Manually added from assigned PMT stores", key=f"pmt_manual_add_notes_{selected_run}_{add_employee}")
-                if st.button("Add Selected Assigned Stores To Schedule", type="primary", disabled=not selected_store_ids, key=f"pmt_manual_add_button_{selected_run}_{add_employee}"):
-                    added = add_assigned_stores_to_pmt_run(selected_run, add_employee, selected_store_ids, add_month, add_notes)
-                    st.success(f"Added {added} assigned store(s) to the selected PMT schedule run.")
-                    st.rerun()
                 confirm_conflict_move = st.checkbox(
                     "Move selected conflicting schedule rows to this PMT. Store ownership assignments will not be changed.",
                     value=False,
@@ -3939,7 +3941,13 @@ with tab_manage:
                     moved = move_scheduled_stores_to_pmt(selected_run, add_employee, selected_conflict_store_ids, add_month, add_notes)
                     st.success(f"Moved {moved} existing schedule item(s) to the selected PMT. Store assignments were not changed.")
                     st.rerun()
-                st.markdown("**Manual first month, auto-fill remaining months**")
+                st.markdown("**Schedule selected stores**")
+                schedule_mode_choice = st.radio(
+                    "Scheduling mode",
+                    ["Only schedule the stores I selected", "Schedule selected stores first, then auto-fill the rest"],
+                    horizontal=True,
+                    key=f"pmt_manual_schedule_mode_{selected_run}_{add_employee}",
+                )
                 fill_cols = st.columns(3)
                 fill_capacity = fill_cols[0].number_input(
                     "Stores per month",
@@ -3957,17 +3965,15 @@ with tab_manage:
                     format_func=month_label,
                     key=f"pmt_manual_auto_end_{selected_run}_{add_employee}_{add_month}",
                 )
-                auto_fill_remaining = fill_cols[2].checkbox(
-                    "Auto-fill stores after my selected first stores",
-                    value=True,
-                    key=f"pmt_manual_auto_remaining_{selected_run}_{add_employee}",
-                )
+                preview_remainder = fill_cols[2].checkbox("Preview remaining count", value=True, key=f"pmt_manual_auto_preview_{selected_run}_{add_employee}")
                 available_sorted = candidate_stores[~candidate_stores["already_scheduled"]].copy()
                 selected_set = set(selected_store_ids)
                 remaining_ids = available_sorted.loc[~available_sorted["store_id"].astype(int).isin(selected_set), "store_id"].dropna().astype(int).tolist()
-                fill_store_ids = selected_store_ids + (remaining_ids if auto_fill_remaining else [])
-                st.caption(f"This will add {len(selected_store_ids)} manually selected store(s) first, then {len(remaining_ids) if auto_fill_remaining else 0} remaining store(s) in the current sort order.")
-                if st.button("Add Manual First Stores And Auto-Fill Rest", type="primary", disabled=not fill_store_ids, key=f"pmt_manual_auto_fill_button_{selected_run}_{add_employee}"):
+                include_remaining = schedule_mode_choice == "Schedule selected stores first, then auto-fill the rest"
+                fill_store_ids = selected_store_ids + (remaining_ids if include_remaining else [])
+                if preview_remainder:
+                    st.caption(f"This will add {len(selected_store_ids)} selected store(s) first, then {len(remaining_ids) if include_remaining else 0} remaining store(s) in the current sort order.")
+                if st.button("Schedule Stores", type="primary", disabled=not fill_store_ids, key=f"pmt_manual_auto_fill_button_{selected_run}_{add_employee}"):
                     result = add_assigned_stores_auto_fill_to_pmt_run(
                         selected_run,
                         add_employee,
