@@ -3799,11 +3799,16 @@ with tab_manage:
                     if value and value >= current_month
                 ]
                 add_month_options = sorted(set(add_month_options + future_run_months))
+            add_month_options = [value for value in add_month_options if value >= current_month]
+            add_month_default_index = 0
+            if current_month in add_month_options:
+                add_month_default_index = add_month_options.index(current_month)
             add_month = add_cols[1].selectbox(
                 "Month to add into",
                 add_month_options,
+                index=add_month_default_index,
                 format_func=month_label,
-                key=f"pmt_manual_add_month_{selected_run}_{add_employee}",
+                key=f"pmt_manual_add_month_v2_{selected_run}_{add_employee}",
             )
             sort_choice = add_cols[2].selectbox(
                 "Suggested order",
