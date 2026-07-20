@@ -14,7 +14,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from src.database import active_employees, log_action, safe_query, session_scope
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
@@ -1618,6 +1618,7 @@ def normalize_existing_pmt_schedule_upload(raw_df, mapping):
                 store_lookup.setdefault(store_key, store_row)
     rows = []
     problems = []
+    first_workday_cache = {}
     for index, source_row in raw_df.fillna("").iterrows():
         tech_name = clean(source_row.get(mapping.get("technician_name", ""), ""))
         store_number = clean(source_row.get(mapping.get("store_number", ""), ""))
@@ -1632,7 +1633,14 @@ def normalize_existing_pmt_schedule_upload(raw_df, mapping):
         schedule_date = scalar_date(source_row.get(mapping.get("schedule_date", ""), ""))
         schedule_month = scalar_date(source_row.get(mapping.get("schedule_month", ""), ""))
         if schedule_date is None and schedule_month is not None:
-            schedule_date = first_workday(month_start(schedule_month), employee_id=int(employee["id"])) if employee else month_start(schedule_month)
+            schedule_month_start = month_start(schedule_month)
+            if employee:
+                cache_key = (int(employee["id"]), schedule_month_start)
+                if cache_key not in first_workday_cache:
+                    first_workday_cache[cache_key] = first_workday(schedule_month_start, employee_id=int(employee["id"]))
+                schedule_date = first_workday_cache[cache_key]
+            else:
+                schedule_date = schedule_month_start
         sequence_number = scalar_int(source_row.get(mapping.get("sequence_number", ""), ""), 0)
         if employee is None:
             problems.append({"Row": index + 2, "Problem": "Technician not matched to an active employee", "Value": tech_name})
@@ -1718,22 +1726,25 @@ def import_existing_pmt_schedule(normalized, run_name):
         )
         session.add(schedule)
         session.flush()
+        item_rows = []
         for _, row in normalized.iterrows():
-            session.add(
-                ScheduleItem(
-                    schedule_id=schedule.id,
-                    schedule_date=row["schedule_date"],
-                    sequence_number=int(row["sequence_number"]),
-                    store_id=int(row["store_id"]),
-                    employee_id=int(row["employee_id"]),
-                    work_type="PMT",
-                    status=clean(row.get("status", "")) or "Scheduled",
-                    schedule_source="Imported Existing PMT Schedule",
-                    pmt_schedule_run_id=run.id,
-                    cycle_label=cycle_label,
-                    completion_notes=clean(row.get("notes", "")),
-                )
+            item_rows.append(
+                {
+                    "schedule_id": schedule.id,
+                    "schedule_date": row["schedule_date"],
+                    "sequence_number": int(row["sequence_number"]),
+                    "store_id": int(row["store_id"]),
+                    "employee_id": int(row["employee_id"]),
+                    "work_type": "PMT",
+                    "status": clean(row.get("status", "")) or "Scheduled",
+                    "schedule_source": "Imported Existing PMT Schedule",
+                    "pmt_schedule_run_id": run.id,
+                    "cycle_label": cycle_label,
+                    "completion_notes": clean(row.get("notes", "")),
+                }
             )
+        if item_rows:
+            session.execute(insert(ScheduleItem), item_rows)
         run_id = run.id
     log_action("pmt existing schedule imported", "pmt_schedule_runs", int(run_id), f"{len(normalized)} PMT schedule items imported")
     return {"run_id": run_id, "created": len(normalized)}
@@ -3430,7 +3441,8 @@ with tab_manage:
                     )
                     confirm_import = st.checkbox("I reviewed this imported schedule and want to create a PMT schedule run.", key="pmt_confirm_existing_schedule_import")
                     if st.button("Import Existing PMT Schedule", type="primary", disabled=not confirm_import, key="pmt_import_existing_schedule_button"):
-                        result = import_existing_pmt_schedule(imported_preview, import_run_name)
+                        with st.spinner(f"Importing {len(imported_preview):,} PMT schedule item(s)..."):
+                            result = import_existing_pmt_schedule(imported_preview, import_run_name)
                         st.success(f"Imported PMT schedule run #{result['run_id']} with {result['created']} schedule item(s).")
                         st.rerun()
 
