@@ -3819,6 +3819,23 @@ with tab_manage:
             )
             all_assigned_stores = assigned_pmt_store_candidates(add_employee, selected_run, include_scheduled=True)
             candidate_stores = assigned_pmt_store_candidates(add_employee, selected_run, include_scheduled=include_scheduled_review)
+            conflict_stores = pd.DataFrame()
+            if not all_assigned_stores.empty:
+                conflict_stores = all_assigned_stores.copy()
+                conflict_stores["scheduled_count"] = pd.to_numeric(conflict_stores.get("scheduled_count", 0), errors="coerce").fillna(0).astype(int)
+                conflict_stores["scheduled_employee_id"] = pd.to_numeric(conflict_stores.get("scheduled_employee_id"), errors="coerce")
+                conflict_stores = conflict_stores[
+                    (conflict_stores["scheduled_count"] > 0)
+                    & (conflict_stores["scheduled_employee_id"].fillna(0).astype(int) != int(add_employee))
+                ].copy()
+            if not conflict_stores.empty:
+                st.warning(
+                    f"{len(conflict_stores)} store(s) assigned to this PMT are already scheduled under another technician in this run. "
+                    "Turn on the review checkbox to select and move them without changing store assignments."
+                )
+                with st.expander("View schedule conflicts for this PMT", expanded=False):
+                    conflict_view_cols = ["store_number", "city", "state", "scheduled_technician", "scheduled_date", "distance_from_home"]
+                    st.dataframe(conflict_stores[conflict_view_cols], use_container_width=True, hide_index=True)
             if candidate_stores.empty:
                 scheduled_count = int((pd.to_numeric(all_assigned_stores.get("scheduled_count", 0), errors="coerce").fillna(0) > 0).sum()) if not all_assigned_stores.empty else 0
                 empty_cols = st.columns(2)
