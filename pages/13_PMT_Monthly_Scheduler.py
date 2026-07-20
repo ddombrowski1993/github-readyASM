@@ -1783,12 +1783,23 @@ def import_existing_pmt_schedule(normalized, run_name):
     return {"run_id": run_id, "created": len(normalized)}
 
 
-def assigned_pmt_store_candidates(employee_id, run_id=None):
+def assigned_pmt_store_candidates(employee_id, run_id=None, include_scheduled=False):
     params = {"employee_id": int(employee_id)}
     run_filter = ""
+    schedule_join = ""
+    schedule_columns = "null as scheduled_date, 0 as scheduled_count"
     if run_id is not None:
         params["run_id"] = int(run_id)
-        run_filter = """
+        schedule_columns = "min(si.schedule_date) as scheduled_date, count(si.id) as scheduled_count"
+        schedule_join = """
+        left join schedule_items si
+          on si.pmt_schedule_run_id = :run_id
+         and si.store_id = s.id
+         and si.work_type = 'PMT'
+         and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+        """
+        if not include_scheduled:
+            run_filter = """
           and not exists (
               select 1 from schedule_items si
               where si.pmt_schedule_run_id = :run_id
@@ -1796,17 +1807,21 @@ def assigned_pmt_store_candidates(employee_id, run_id=None):
                 and si.work_type = 'PMT'
                 and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
           )
-        """
+            """
     df = safe_query(
         f"""
         select s.id as store_id, s.store_number, s.address, s.city, s.state, s.zip,
                s.latitude, s.longitude, e.full_name as technician,
-               e.home_latitude, e.home_longitude
+               e.home_latitude, e.home_longitude,
+               {schedule_columns}
         from stores s
         join employees e on e.id = s.assigned_pmt_employee_id
+        {schedule_join}
         where s.active = true
           and s.assigned_pmt_employee_id = :employee_id
           {run_filter}
+        group by s.id, s.store_number, s.address, s.city, s.state, s.zip,
+                 s.latitude, s.longitude, e.full_name, e.home_latitude, e.home_longitude
         order by s.store_number
         """,
         params,
@@ -1824,6 +1839,91 @@ def assigned_pmt_store_candidates(employee_id, run_id=None):
         axis=1,
     )
     return df
+
+
+def add_assigned_stores_auto_fill_to_pmt_run(run_id, employee_id, store_ids, target_month, fill_end_month, monthly_capacity, notes=""):
+    if not store_ids:
+        return {"added": 0, "skipped": 0}
+    target_month = month_start(target_month)
+    fill_end_month = month_start(fill_end_month)
+    monthly_capacity = max(1, int(monthly_capacity))
+    added = 0
+    skipped = 0
+    cursor_month = target_month
+    now = datetime.utcnow()
+    with session_scope() as session:
+        schedule_id = session.scalar(
+            select(ScheduleItem.schedule_id)
+            .where(ScheduleItem.pmt_schedule_run_id == int(run_id))
+            .order_by(ScheduleItem.schedule_id)
+        )
+        run = session.get(PMTScheduleRun, int(run_id))
+        if schedule_id is None:
+            return {"added": 0, "skipped": len(store_ids)}
+        monthly_sequences = {}
+        def current_month_sequence(schedule_month):
+            if schedule_month not in monthly_sequences:
+                existing_max = session.scalar(
+                    select(ScheduleItem.sequence_number)
+                    .where(
+                        ScheduleItem.pmt_schedule_run_id == int(run_id),
+                        ScheduleItem.employee_id == int(employee_id),
+                        ScheduleItem.work_type == "PMT",
+                        ScheduleItem.schedule_date >= schedule_month,
+                        ScheduleItem.schedule_date < add_months(schedule_month, 1),
+                    )
+                    .order_by(ScheduleItem.sequence_number.desc())
+                ) or 0
+                monthly_sequences[schedule_month] = int(existing_max)
+            return monthly_sequences[schedule_month]
+
+        for store_id in store_ids:
+            if cursor_month > fill_end_month:
+                skipped += 1
+                continue
+            duplicate = session.scalar(
+                select(ScheduleItem.id).where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.employee_id == int(employee_id),
+                    ScheduleItem.store_id == int(store_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
+                )
+            )
+            if duplicate:
+                skipped += 1
+                continue
+            if current_month_sequence(cursor_month) >= monthly_capacity:
+                cursor_month = add_months(cursor_month, 1)
+                if cursor_month > fill_end_month:
+                    skipped += 1
+                    continue
+                current_month_sequence(cursor_month)
+            monthly_sequences[cursor_month] += 1
+            schedule_date = first_workday(cursor_month, employee_id=int(employee_id))
+            session.add(
+                ScheduleItem(
+                    schedule_id=int(schedule_id),
+                    schedule_date=schedule_date,
+                    sequence_number=int(monthly_sequences[cursor_month]),
+                    store_id=int(store_id),
+                    employee_id=int(employee_id),
+                    work_type="PMT",
+                    status="Scheduled",
+                    schedule_source="PMT Manual And Auto Fill",
+                    pmt_schedule_run_id=int(run_id),
+                    cycle_label=month_label(cursor_month),
+                    completion_notes=clean(notes),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            added += 1
+        if run and added:
+            run.store_count = int(run.store_count or 0) + added
+            run.cycle_end = max(run.cycle_end or target_month, add_months(fill_end_month, 1) - timedelta(days=1))
+    log_action("pmt assigned stores auto filled", "pmt_schedule_runs", int(run_id), f"{added} stores added and {skipped} skipped")
+    return {"added": added, "skipped": skipped}
 
 
 def add_assigned_stores_to_pmt_run(run_id, employee_id, store_ids, target_month, notes=""):
@@ -3578,6 +3678,43 @@ with tab_manage:
         ] if not run_items.empty else pd.DataFrame()
         st.dataframe(run_item_view, use_container_width=True, hide_index=True)
         st.download_button("Export Selected PMT Run", data=excel_bytes(run_item_view), file_name=f"pmt_schedule_run_{selected_run}.xlsx", key=f"export_selected_pmt_run_{selected_run}")
+        if not run_items.empty:
+            with st.expander("View selected PMT run route map", expanded=True):
+                map_cols = st.columns(3)
+                map_tech_options = (
+                    run_items[["employee_id", "technician"]]
+                    .dropna(subset=["employee_id"])
+                    .drop_duplicates()
+                    .sort_values("technician")
+                )
+                map_employee = map_cols[0].selectbox(
+                    "Map PMT",
+                    map_tech_options["employee_id"].astype(int).tolist(),
+                    format_func=lambda value: map_tech_options.set_index("employee_id").loc[value, "technician"],
+                    key=f"pmt_manage_map_employee_{selected_run}",
+                )
+                map_employee_items = run_items[run_items["employee_id"] == int(map_employee)].copy()
+                map_months = sorted(map_employee_items["month_start"].dropna().unique().tolist())
+                map_month = map_cols[1].selectbox(
+                    "Map month",
+                    map_months,
+                    format_func=month_label,
+                    key=f"pmt_manage_map_month_{selected_run}_{map_employee}",
+                )
+                map_show_all = map_cols[2].checkbox("Show all future months", value=False, key=f"pmt_manage_map_future_{selected_run}_{map_employee}_{map_month}")
+                map_scope = map_employee_items[map_employee_items["month_start"] >= map_month].copy() if map_show_all else map_employee_items[map_employee_items["month_start"] == map_month].copy()
+                map_scope = map_scope.sort_values(["schedule_date", "sequence_number", "store_number"])
+                if map_scope.empty:
+                    st.info("No scheduled stores found for this PMT/month.")
+                else:
+                    render_store_map(
+                        map_scope,
+                        color_by="month" if map_show_all else "status",
+                        show_route_path=True,
+                        max_route_points=200,
+                        static_preview=True,
+                        height=560,
+                    )
 
         section_header("Manage Step 3: Add Assigned Stores Manually", "Pick stores from a PMT's saved assignments and add them to the selected run without rebuilding the schedule.", "blue")
         pmt_people = active_pmt_employee_summary()
@@ -3613,37 +3750,98 @@ with tab_manage:
                 step=1,
                 key=f"pmt_manual_add_limit_{selected_run}_{add_employee}",
             )
-            candidate_stores = assigned_pmt_store_candidates(add_employee, selected_run)
+            include_scheduled_review = st.checkbox(
+                "Include stores already scheduled in this run for review",
+                value=False,
+                key=f"pmt_manual_add_include_scheduled_{selected_run}_{add_employee}",
+            )
+            all_assigned_stores = assigned_pmt_store_candidates(add_employee, selected_run, include_scheduled=True)
+            candidate_stores = assigned_pmt_store_candidates(add_employee, selected_run, include_scheduled=include_scheduled_review)
             if candidate_stores.empty:
-                st.info("This PMT has no assigned stores available to add to this selected run.")
+                scheduled_count = int((pd.to_numeric(all_assigned_stores.get("scheduled_count", 0), errors="coerce").fillna(0) > 0).sum()) if not all_assigned_stores.empty else 0
+                empty_cols = st.columns(2)
+                empty_cols[0].metric("Assigned to PMT", len(all_assigned_stores))
+                empty_cols[1].metric("Already scheduled in this run", scheduled_count)
+                st.info("This PMT has no assigned stores available to add to this selected run. Turn on the review checkbox above to see stores already scheduled in the run.")
             else:
                 candidate_stores = candidate_stores.copy()
+                candidate_stores["already_scheduled"] = pd.to_numeric(candidate_stores.get("scheduled_count", 0), errors="coerce").fillna(0).astype(int) > 0
                 if sort_choice == "Farthest from home first":
                     candidate_stores = candidate_stores.sort_values(["distance_from_home", "store_number"], ascending=[False, True], na_position="last")
                 elif sort_choice == "Store number":
                     candidate_stores = candidate_stores.sort_values("store_number")
                 else:
                     candidate_stores = candidate_stores.sort_values(["distance_from_home", "store_number"], ascending=[True, True], na_position="last")
+                total_assigned = len(all_assigned_stores)
+                available_to_add = int((pd.to_numeric(all_assigned_stores.get("scheduled_count", 0), errors="coerce").fillna(0) == 0).sum()) if not all_assigned_stores.empty else len(candidate_stores)
+                count_cols = st.columns(3)
+                count_cols[0].metric("Assigned to PMT", total_assigned)
+                count_cols[1].metric("Available to add", available_to_add)
+                count_cols[2].metric("Showing", min(int(add_limit), len(candidate_stores)))
                 candidate_view = candidate_stores.head(int(add_limit)).copy()
                 candidate_view["Add"] = False
-                manual_add_columns = ["Add", "store_id", "store_number", "city", "state", "distance_from_home", "address"]
+                manual_add_columns = ["Add", "already_scheduled", "store_id", "store_number", "city", "state", "distance_from_home", "address"]
                 edited_candidates = st.data_editor(
                     candidate_view[manual_add_columns],
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["store_id", "store_number", "city", "state", "distance_from_home", "address"],
+                    disabled=["already_scheduled", "store_id", "store_number", "city", "state", "distance_from_home", "address"],
                     column_config={
                         "Add": st.column_config.CheckboxColumn("Add"),
+                        "already_scheduled": st.column_config.CheckboxColumn("Already Scheduled"),
                         "store_id": None,
                         "distance_from_home": st.column_config.NumberColumn("Miles From Home", format="%.1f"),
                     },
                     key=f"pmt_manual_add_editor_{selected_run}_{add_employee}_{add_month}_{sort_choice}_{add_limit}",
                 )
-                selected_store_ids = edited_candidates.loc[edited_candidates["Add"].astype(bool), "store_id"].dropna().astype(int).tolist()
+                selected_rows = edited_candidates[edited_candidates["Add"].astype(bool)].copy()
+                selected_store_ids = selected_rows.loc[~selected_rows["already_scheduled"].astype(bool), "store_id"].dropna().astype(int).tolist()
+                if not selected_rows.empty and len(selected_store_ids) < len(selected_rows):
+                    st.warning("Stores already scheduled in this run were ignored so duplicates are not created.")
                 add_notes = st.text_input("Add note", value="Manually added from assigned PMT stores", key=f"pmt_manual_add_notes_{selected_run}_{add_employee}")
                 if st.button("Add Selected Assigned Stores To Schedule", type="primary", disabled=not selected_store_ids, key=f"pmt_manual_add_button_{selected_run}_{add_employee}"):
                     added = add_assigned_stores_to_pmt_run(selected_run, add_employee, selected_store_ids, add_month, add_notes)
                     st.success(f"Added {added} assigned store(s) to the selected PMT schedule run.")
+                    st.rerun()
+                st.markdown("**Manual first month, auto-fill remaining months**")
+                fill_cols = st.columns(3)
+                fill_capacity = fill_cols[0].number_input(
+                    "Stores per month",
+                    min_value=1,
+                    max_value=100,
+                    value=10,
+                    step=1,
+                    key=f"pmt_manual_auto_capacity_{selected_run}_{add_employee}",
+                )
+                fill_end_options = [add_months(add_month, offset) for offset in range(0, 13)]
+                fill_end_month = fill_cols[1].selectbox(
+                    "Fill through",
+                    fill_end_options,
+                    index=min(5, len(fill_end_options) - 1),
+                    format_func=month_label,
+                    key=f"pmt_manual_auto_end_{selected_run}_{add_employee}_{add_month}",
+                )
+                auto_fill_remaining = fill_cols[2].checkbox(
+                    "Auto-fill stores after my selected first stores",
+                    value=True,
+                    key=f"pmt_manual_auto_remaining_{selected_run}_{add_employee}",
+                )
+                available_sorted = candidate_stores[~candidate_stores["already_scheduled"]].copy()
+                selected_set = set(selected_store_ids)
+                remaining_ids = available_sorted.loc[~available_sorted["store_id"].astype(int).isin(selected_set), "store_id"].dropna().astype(int).tolist()
+                fill_store_ids = selected_store_ids + (remaining_ids if auto_fill_remaining else [])
+                st.caption(f"This will add {len(selected_store_ids)} manually selected store(s) first, then {len(remaining_ids) if auto_fill_remaining else 0} remaining store(s) in the current sort order.")
+                if st.button("Add Manual First Stores And Auto-Fill Rest", type="primary", disabled=not fill_store_ids, key=f"pmt_manual_auto_fill_button_{selected_run}_{add_employee}"):
+                    result = add_assigned_stores_auto_fill_to_pmt_run(
+                        selected_run,
+                        add_employee,
+                        fill_store_ids,
+                        add_month,
+                        fill_end_month,
+                        fill_capacity,
+                        add_notes,
+                    )
+                    st.success(f"Added {result['added']} store(s). Skipped {result['skipped']} store(s).")
                     st.rerun()
 
         section_header("Manage Step 4: Manual Month And Stop Order", "Move stores up, push stores to another month, or reorder a PMT's route after complaints or special circumstances.", "orange")
