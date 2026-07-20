@@ -1787,16 +1787,23 @@ def assigned_pmt_store_candidates(employee_id, run_id=None, include_scheduled=Fa
     params = {"employee_id": int(employee_id)}
     run_filter = ""
     schedule_join = ""
-    schedule_columns = "null as scheduled_date, 0 as scheduled_count"
+    schedule_columns = "null as scheduled_item_id, null as scheduled_employee_id, null as scheduled_technician, null as scheduled_date, 0 as scheduled_count"
     if run_id is not None:
         params["run_id"] = int(run_id)
-        schedule_columns = "min(si.schedule_date) as scheduled_date, count(si.id) as scheduled_count"
+        schedule_columns = """
+               min(si.id) as scheduled_item_id,
+               min(si.employee_id) as scheduled_employee_id,
+               max(se.full_name) as scheduled_technician,
+               min(si.schedule_date) as scheduled_date,
+               count(si.id) as scheduled_count
+        """
         schedule_join = """
         left join schedule_items si
           on si.pmt_schedule_run_id = :run_id
          and si.store_id = s.id
          and si.work_type = 'PMT'
          and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+        left join employees se on se.id = si.employee_id
         """
         if not include_scheduled:
             run_filter = """
@@ -1839,6 +1846,52 @@ def assigned_pmt_store_candidates(employee_id, run_id=None, include_scheduled=Fa
         axis=1,
     )
     return df
+
+
+def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, notes=""):
+    if not store_ids:
+        return 0
+    target_month = month_start(target_month)
+    moved = 0
+    with session_scope() as session:
+        max_sequence = session.scalar(
+            select(ScheduleItem.sequence_number)
+            .where(
+                ScheduleItem.pmt_schedule_run_id == int(run_id),
+                ScheduleItem.employee_id == int(employee_id),
+                ScheduleItem.work_type == "PMT",
+                ScheduleItem.schedule_date >= target_month,
+                ScheduleItem.schedule_date < add_months(target_month, 1),
+            )
+            .order_by(ScheduleItem.sequence_number.desc())
+        ) or 0
+        items = session.scalars(
+            select(ScheduleItem).where(
+                ScheduleItem.pmt_schedule_run_id == int(run_id),
+                ScheduleItem.store_id.in_([int(store_id) for store_id in store_ids]),
+                ScheduleItem.work_type == "PMT",
+                ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
+            )
+        ).all()
+        for item in items:
+            if item.employee_id == int(employee_id):
+                continue
+            max_sequence += 1
+            if item.original_schedule_date is None:
+                item.original_schedule_date = item.schedule_date
+            item.employee_id = int(employee_id)
+            item.schedule_date = first_workday(target_month, employee_id=int(employee_id))
+            item.sequence_number = int(max_sequence)
+            item.status = "Scheduled"
+            item.schedule_source = "PMT Schedule Conflict Move"
+            item.cycle_label = month_label(target_month)
+            note_parts = [clean(item.completion_notes), "Moved because store assignment belongs to selected PMT"]
+            if notes:
+                note_parts.append(clean(notes))
+            item.completion_notes = " | ".join([part for part in note_parts if part])
+            moved += 1
+    log_action("pmt scheduled stores moved to assigned pmt", "pmt_schedule_runs", int(run_id), f"{moved} scheduled item(s) moved to employee_id={int(employee_id)}")
+    return moved
 
 
 def add_assigned_stores_auto_fill_to_pmt_run(run_id, employee_id, store_ids, target_month, fill_end_month, monthly_capacity, notes=""):
@@ -1884,7 +1937,6 @@ def add_assigned_stores_auto_fill_to_pmt_run(run_id, employee_id, store_ids, tar
             duplicate = session.scalar(
                 select(ScheduleItem.id).where(
                     ScheduleItem.pmt_schedule_run_id == int(run_id),
-                    ScheduleItem.employee_id == int(employee_id),
                     ScheduleItem.store_id == int(store_id),
                     ScheduleItem.work_type == "PMT",
                     ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
@@ -1956,11 +2008,9 @@ def add_assigned_stores_to_pmt_run(run_id, employee_id, store_ids, target_month,
             duplicate = session.scalar(
                 select(ScheduleItem.id).where(
                     ScheduleItem.pmt_schedule_run_id == int(run_id),
-                    ScheduleItem.employee_id == int(employee_id),
                     ScheduleItem.store_id == int(store_id),
                     ScheduleItem.work_type == "PMT",
-                    ScheduleItem.schedule_date >= target_month,
-                    ScheduleItem.schedule_date < add_months(target_month, 1),
+                    ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
                 )
             )
             if duplicate:
@@ -2630,9 +2680,26 @@ with tab_build:
             st.dataframe(upload_problems, use_container_width=True, hide_index=True)
         if source_choice == "Upload PMT assignment Excel/CSV" and not assignments.empty:
             section_header("Build Step 3A: Save Uploaded PMT Assignments", "This writes the uploaded PMT-to-store assignments into the app. It does not publish a schedule.", "green", focus_key="pmt_focus_step", focus_value=3)
-            st.warning("Required after upload: click this save button before relying on these assignments in Areas and Maps, reports, or future scheduler runs.")
+            uploaded_schedule_date_col = best_column(original_columns, "schedule_date", "schedule")
+            uploaded_schedule_month_col = best_column(original_columns, "schedule_month", "schedule")
+            uploaded_schedule_sequence_col = best_column(original_columns, "sequence_number", "schedule")
+            uploaded_schedule_status_col = best_column(original_columns, "status", "schedule")
+            uploaded_schedule_notes_col = best_column(original_columns, "notes", "schedule")
+            schedule_like_upload = bool(uploaded_schedule_date_col or uploaded_schedule_month_col)
+            if schedule_like_upload:
+                st.error(
+                    "This upload appears to contain schedule dates or months. Saving assignments from this file will change store ownership. "
+                    "Use the schedule import section below if you only want to create or manage schedule rows."
+                )
+                confirm_assignment_overwrite = st.checkbox(
+                    "I understand this will change store ownership assignments, not just schedules.",
+                    key="pmt_confirm_schedule_like_assignment_save",
+                )
+            else:
+                st.warning("Required after upload: click this save button before relying on these assignments in Areas and Maps, reports, or future scheduler runs.")
+                confirm_assignment_overwrite = True
             save_cols = st.columns([0.35, 0.65])
-            if save_cols[0].button("Save Technician-to-Store Assignments", type="primary", key="pmt_save_uploaded_assignments"):
+            if save_cols[0].button("Save Technician-to-Store Assignments", type="primary", disabled=not confirm_assignment_overwrite, key="pmt_save_uploaded_assignments"):
                 with session_scope() as session:
                     saved_stores = 0
                     saved_employees = set()
@@ -2699,11 +2766,6 @@ with tab_build:
                 )
                 st.rerun()
             save_cols[1].caption("This saves store ownership only. It does not create schedule dates, route stops, or a manageable schedule run.")
-            uploaded_schedule_date_col = best_column(original_columns, "schedule_date", "schedule")
-            uploaded_schedule_month_col = best_column(original_columns, "schedule_month", "schedule")
-            uploaded_schedule_sequence_col = best_column(original_columns, "sequence_number", "schedule")
-            uploaded_schedule_status_col = best_column(original_columns, "status", "schedule")
-            uploaded_schedule_notes_col = best_column(original_columns, "notes", "schedule")
             if uploaded_schedule_date_col or uploaded_schedule_month_col:
                 st.markdown("**This upload also looks like a schedule**")
                 st.caption("Use this section when the file already has schedule dates or schedule months and you want it to appear in Manage Schedule.")
@@ -3766,6 +3828,8 @@ with tab_manage:
             else:
                 candidate_stores = candidate_stores.copy()
                 candidate_stores["already_scheduled"] = pd.to_numeric(candidate_stores.get("scheduled_count", 0), errors="coerce").fillna(0).astype(int) > 0
+                candidate_stores["scheduled_employee_id"] = pd.to_numeric(candidate_stores.get("scheduled_employee_id"), errors="coerce")
+                candidate_stores["scheduled_technician"] = candidate_stores.get("scheduled_technician", "").fillna("").astype(str)
                 if sort_choice == "Farthest from home first":
                     candidate_stores = candidate_stores.sort_values(["distance_from_home", "store_number"], ascending=[False, True], na_position="last")
                 elif sort_choice == "Store number":
@@ -3780,15 +3844,18 @@ with tab_manage:
                 count_cols[2].metric("Showing", min(int(add_limit), len(candidate_stores)))
                 candidate_view = candidate_stores.head(int(add_limit)).copy()
                 candidate_view["Add"] = False
-                manual_add_columns = ["Add", "already_scheduled", "store_id", "store_number", "city", "state", "distance_from_home", "address"]
+                manual_add_columns = ["Add", "already_scheduled", "scheduled_employee_id", "scheduled_technician", "scheduled_date", "store_id", "store_number", "city", "state", "distance_from_home", "address"]
                 edited_candidates = st.data_editor(
                     candidate_view[manual_add_columns],
                     use_container_width=True,
                     hide_index=True,
-                    disabled=["already_scheduled", "store_id", "store_number", "city", "state", "distance_from_home", "address"],
+                    disabled=["already_scheduled", "scheduled_employee_id", "scheduled_technician", "scheduled_date", "store_id", "store_number", "city", "state", "distance_from_home", "address"],
                     column_config={
                         "Add": st.column_config.CheckboxColumn("Add"),
                         "already_scheduled": st.column_config.CheckboxColumn("Already Scheduled"),
+                        "scheduled_employee_id": None,
+                        "scheduled_technician": st.column_config.TextColumn("Scheduled Under"),
+                        "scheduled_date": st.column_config.DateColumn("Scheduled Date"),
                         "store_id": None,
                         "distance_from_home": st.column_config.NumberColumn("Miles From Home", format="%.1f"),
                     },
@@ -3796,12 +3863,39 @@ with tab_manage:
                 )
                 selected_rows = edited_candidates[edited_candidates["Add"].astype(bool)].copy()
                 selected_store_ids = selected_rows.loc[~selected_rows["already_scheduled"].astype(bool), "store_id"].dropna().astype(int).tolist()
+                selected_conflict_rows = selected_rows[
+                    selected_rows["already_scheduled"].astype(bool)
+                    & (
+                        pd.to_numeric(selected_rows.get("scheduled_employee_id"), errors="coerce").fillna(0).astype(int)
+                        != int(add_employee)
+                    )
+                ].copy()
+                selected_conflict_store_ids = selected_conflict_rows["store_id"].dropna().astype(int).tolist()
                 if not selected_rows.empty and len(selected_store_ids) < len(selected_rows):
                     st.warning("Stores already scheduled in this run were ignored so duplicates are not created.")
+                if selected_conflict_store_ids:
+                    st.warning(
+                        f"{len(selected_conflict_store_ids)} selected store(s) are assigned to this PMT but already scheduled under another technician in this run. "
+                        "Use the move button below if you want to move those existing schedule rows to this PMT."
+                    )
                 add_notes = st.text_input("Add note", value="Manually added from assigned PMT stores", key=f"pmt_manual_add_notes_{selected_run}_{add_employee}")
                 if st.button("Add Selected Assigned Stores To Schedule", type="primary", disabled=not selected_store_ids, key=f"pmt_manual_add_button_{selected_run}_{add_employee}"):
                     added = add_assigned_stores_to_pmt_run(selected_run, add_employee, selected_store_ids, add_month, add_notes)
                     st.success(f"Added {added} assigned store(s) to the selected PMT schedule run.")
+                    st.rerun()
+                confirm_conflict_move = st.checkbox(
+                    "Move selected conflicting schedule rows to this PMT. Store ownership assignments will not be changed.",
+                    value=False,
+                    key=f"pmt_confirm_conflict_move_{selected_run}_{add_employee}",
+                )
+                if st.button(
+                    "Move Selected Scheduled Conflicts To This PMT",
+                    type="secondary",
+                    disabled=not selected_conflict_store_ids or not confirm_conflict_move,
+                    key=f"pmt_move_conflicts_{selected_run}_{add_employee}",
+                ):
+                    moved = move_scheduled_stores_to_pmt(selected_run, add_employee, selected_conflict_store_ids, add_month, add_notes)
+                    st.success(f"Moved {moved} existing schedule item(s) to the selected PMT. Store assignments were not changed.")
                     st.rerun()
                 st.markdown("**Manual first month, auto-fill remaining months**")
                 fill_cols = st.columns(3)
