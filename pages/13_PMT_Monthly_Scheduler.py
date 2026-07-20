@@ -3976,8 +3976,14 @@ with tab_manage:
                 remaining_ids = available_sorted.loc[~available_sorted["store_id"].astype(int).isin(selected_set), "store_id"].dropna().astype(int).tolist()
                 include_remaining = schedule_mode_choice == "Schedule selected stores first, then auto-fill the rest"
                 fill_store_ids = selected_store_ids + (remaining_ids if include_remaining else [])
+                selected_store_numbers = selected_rows.loc[~selected_rows["already_scheduled"].astype(bool), "store_number"].astype(str).tolist()
+                summary_cols = st.columns(3)
+                summary_cols[0].metric("Manual stores selected", len(selected_store_ids))
+                summary_cols[1].metric("Auto-fill stores", len(remaining_ids) if include_remaining else 0)
+                summary_cols[2].metric("Total to schedule", len(fill_store_ids))
                 if preview_remainder:
-                    st.caption(f"This will add {len(selected_store_ids)} selected store(s) first, then {len(remaining_ids) if include_remaining else 0} remaining store(s) in the current sort order.")
+                    st.caption("Manual stores that will be scheduled first: " + (", ".join(selected_store_numbers[:20]) if selected_store_numbers else "None selected yet"))
+                    st.caption(f"After those, auto-fill will use the remaining available stores in the current `{sort_choice}` order." if include_remaining else "Auto-fill is off for this action.")
                 if st.button("Schedule Stores", type="primary", disabled=not fill_store_ids, key=f"pmt_manual_auto_fill_button_{selected_run}_{add_employee}"):
                     result = add_assigned_stores_auto_fill_to_pmt_run(
                         selected_run,
