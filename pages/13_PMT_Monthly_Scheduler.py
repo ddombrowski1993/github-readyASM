@@ -14,7 +14,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select
 
 from src.database import active_employees, log_action, safe_query, session_scope
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
@@ -1317,32 +1317,37 @@ def pmt_rotation_gaps_for_period(cycle_start, months):
 
 def pmt_rotation_gap_summary(cycle_start, months):
     cycle_start = month_start(cycle_start)
-    cycle_end = add_months(cycle_start, int(months)) - timedelta(days=1)
+    cycle_end_exclusive = add_months(cycle_start, int(months))
     return safe_query(
         """
-        select
-            e.id as employee_id,
-            e.full_name as technician,
-            count(distinct s.id) as assigned_stores,
-            count(distinct si.store_id) as unique_stores_scheduled,
-            max(coalesce(e.monthly_pmt_store_target, 10)) as monthly_target,
-            max(coalesce(e.monthly_pmt_store_target, 10)) * :months as period_capacity,
-            max(0, count(distinct s.id) - count(distinct si.store_id)) as assigned_stores_not_scheduled,
-            sum(case when si.status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Carryover','Overdue','Skipped','Cancelled') then 1 else 0 end) as scheduled_not_completed
-        from employees e
-        join stores s on s.assigned_pmt_employee_id = e.id and s.active = true
-        left join schedule_items si
-          on si.work_type = 'PMT'
-         and si.employee_id = e.id
-         and si.store_id = s.id
-         and date(si.schedule_date) >= date(:cycle_start)
-         and date(si.schedule_date) <= date(:cycle_end)
-        where e.active = true
-        group by e.id, e.full_name
-        having assigned_stores_not_scheduled > 0 or scheduled_not_completed > 0
-        order by assigned_stores_not_scheduled desc, scheduled_not_completed desc, e.full_name
+        with technician_rotation as (
+            select
+                e.id as employee_id,
+                e.full_name as technician,
+                count(distinct s.id) as assigned_stores,
+                count(distinct si.store_id) as unique_stores_scheduled,
+                max(coalesce(e.monthly_pmt_store_target, 10)) as monthly_target,
+                max(coalesce(e.monthly_pmt_store_target, 10)) * cast(:months as bigint) as period_capacity,
+                greatest(0::bigint, count(distinct s.id) - count(distinct si.store_id)) as assigned_stores_not_scheduled,
+                count(distinct case when si.status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Carryover','Overdue','Skipped','Cancelled','Canceled') then si.id end) as scheduled_not_completed
+            from employees e
+            join stores s on s.assigned_pmt_employee_id = e.id and s.active = true
+            left join schedule_items si
+              on si.work_type = 'PMT'
+             and si.employee_id = e.id
+             and si.store_id = s.id
+             and si.schedule_date >= cast(:cycle_start as date)
+             and si.schedule_date < cast(:cycle_end_exclusive as date)
+            where e.active = true
+            group by e.id, e.full_name
+        )
+        select *
+        from technician_rotation
+        where assigned_stores_not_scheduled > 0
+           or scheduled_not_completed > 0
+        order by assigned_stores_not_scheduled desc, scheduled_not_completed desc, technician
         """,
-        {"cycle_start": cycle_start, "cycle_end": cycle_end, "months": int(months)},
+        {"cycle_start": cycle_start, "cycle_end_exclusive": cycle_end_exclusive, "months": int(months)},
     )
 
 
@@ -1749,6 +1754,11 @@ def import_existing_pmt_schedule(normalized, run_name):
         if item_rows:
             session.execute(insert(ScheduleItem), item_rows)
             session.flush()
+            saved_count = session.scalar(
+                select(func.count(ScheduleItem.id)).where(ScheduleItem.pmt_schedule_run_id == int(run.id))
+            )
+            if int(saved_count or 0) != len(item_rows):
+                raise RuntimeError(f"Expected to save {len(item_rows)} PMT schedule items, but saved {int(saved_count or 0)}.")
         run_id = run.id
     log_action("pmt existing schedule imported", "pmt_schedule_runs", int(run_id), f"{len(normalized)} PMT schedule items imported")
     return {"run_id": run_id, "created": len(normalized)}
@@ -2503,7 +2513,7 @@ with tab_build:
             section_header("Build Step 3A: Save Uploaded PMT Assignments", "This writes the uploaded PMT-to-store assignments into the app. It does not publish a schedule.", "green", focus_key="pmt_focus_step", focus_value=3)
             st.warning("Required after upload: click this save button before relying on these assignments in Areas and Maps, reports, or future scheduler runs.")
             save_cols = st.columns([0.35, 0.65])
-            if save_cols[0].button("Save Uploaded PMT Assignments to App", type="primary", key="pmt_save_uploaded_assignments"):
+            if save_cols[0].button("Save Technician-to-Store Assignments", type="primary", key="pmt_save_uploaded_assignments"):
                 with session_scope() as session:
                     saved_stores = 0
                     saved_employees = set()
@@ -2569,7 +2579,76 @@ with tab_build:
                     f"Stores assigned: {saved_stores}. Stores skipped: {len(upload_problems)}. Problems found: {len(upload_problems) + len(problems)}."
                 )
                 st.rerun()
-            save_cols[1].caption("After saving, go to Step 4 if there are Must Fix issues. If not, continue to Step 5 and generate the draft in Step 6.")
+            save_cols[1].caption("This saves store ownership only. It does not create schedule dates, route stops, or a manageable schedule run.")
+            uploaded_schedule_date_col = best_column(original_columns, "schedule_date", "schedule")
+            uploaded_schedule_month_col = best_column(original_columns, "schedule_month", "schedule")
+            uploaded_schedule_sequence_col = best_column(original_columns, "sequence_number", "schedule")
+            uploaded_schedule_status_col = best_column(original_columns, "status", "schedule")
+            uploaded_schedule_notes_col = best_column(original_columns, "notes", "schedule")
+            if uploaded_schedule_date_col or uploaded_schedule_month_col:
+                st.markdown("**This upload also looks like a schedule**")
+                st.caption("Use this section when the file already has schedule dates or schedule months and you want it to appear in Manage Schedule.")
+                with st.expander("Import this upload as an existing PMT schedule", expanded=True):
+                    schedule_options = [""] + original_columns
+                    sc1, sc2, sc3 = st.columns(3)
+                    inline_schedule_tech_col = selectbox_with_default(sc1, "Technician", schedule_options, tech_col, "pmt_inline_schedule_tech_col")
+                    inline_schedule_store_col = selectbox_with_default(sc2, "Store Number", schedule_options, store_col, "pmt_inline_schedule_store_col")
+                    inline_schedule_date_col = selectbox_with_default(sc3, "Schedule Date", schedule_options, uploaded_schedule_date_col, "pmt_inline_schedule_date_col")
+                    sc4, sc5, sc6, sc7 = st.columns(4)
+                    inline_schedule_month_col = selectbox_with_default(sc4, "Month if no date", schedule_options, uploaded_schedule_month_col, "pmt_inline_schedule_month_col")
+                    inline_schedule_sequence_col = selectbox_with_default(sc5, "Stop / Sequence", schedule_options, uploaded_schedule_sequence_col, "pmt_inline_schedule_sequence_col")
+                    inline_schedule_status_col = selectbox_with_default(sc6, "Status", schedule_options, uploaded_schedule_status_col, "pmt_inline_schedule_status_col")
+                    inline_schedule_notes_col = selectbox_with_default(sc7, "Notes", schedule_options, uploaded_schedule_notes_col, "pmt_inline_schedule_notes_col")
+                    inline_mapping = {
+                        "technician_name": inline_schedule_tech_col,
+                        "store_number": inline_schedule_store_col,
+                        "schedule_date": inline_schedule_date_col,
+                        "schedule_month": inline_schedule_month_col,
+                        "sequence_number": inline_schedule_sequence_col,
+                        "status": inline_schedule_status_col,
+                        "notes": inline_schedule_notes_col,
+                    }
+                    inline_missing = []
+                    if not inline_schedule_tech_col:
+                        inline_missing.append("Technician")
+                    if not inline_schedule_store_col:
+                        inline_missing.append("Store Number")
+                    if not inline_schedule_date_col and not inline_schedule_month_col:
+                        inline_missing.append("Schedule Date or Month")
+                    inline_preview, inline_problems = normalize_existing_pmt_schedule_upload(incoming, inline_mapping) if not inline_missing else (pd.DataFrame(), pd.DataFrame())
+                    if inline_missing:
+                        st.error("Missing required schedule mapping: " + ", ".join(inline_missing))
+                    elif inline_preview.empty:
+                        st.warning("No valid schedule rows were found after matching technicians, stores, and schedule dates.")
+                    else:
+                        sm1, sm2, sm3, sm4 = st.columns(4)
+                        sm1.metric("Schedule Rows Ready", len(inline_preview))
+                        sm2.metric("Technicians", inline_preview["employee_id"].nunique())
+                        sm3.metric("Unique Stores", inline_preview["store_id"].nunique())
+                        sm4.metric("Warnings / Problems", len(inline_problems))
+                        if not inline_problems.empty:
+                            with st.expander("Schedule import warnings", expanded=False):
+                                st.dataframe(inline_problems, use_container_width=True, hide_index=True)
+                        schedule_preview_columns = ["technician", "month", "schedule_date", "sequence_number", "store_number", "city", "state", "status", "notes"]
+                        st.dataframe(inline_preview[schedule_preview_columns].head(100), use_container_width=True, hide_index=True)
+                        inline_start = inline_preview["schedule_date"].min()
+                        inline_end = inline_preview["schedule_date"].max()
+                        inline_run_name = st.text_input(
+                            "Schedule run name",
+                            value=f"Imported PMT Schedule {month_label(month_start(inline_start))} - {month_label(month_start(inline_end))}",
+                            key="pmt_inline_schedule_run_name",
+                        )
+                        inline_confirm = st.checkbox("I reviewed this schedule import and want to create a manageable PMT schedule run.", key="pmt_inline_schedule_confirm")
+                        if st.button("Import This Upload As Existing PMT Schedule", type="primary", disabled=not inline_confirm, key="pmt_inline_schedule_import_button"):
+                            try:
+                                with st.spinner(f"Creating PMT schedule run with {len(inline_preview):,} item(s)..."):
+                                    result = import_existing_pmt_schedule(inline_preview, inline_run_name)
+                                st.success(f"Imported PMT schedule run #{result['run_id']} with {result['created']} schedule item(s). Open Manage Schedule to review and edit it.")
+                            except Exception as exc:
+                                st.error(f"PMT schedule import failed: {exc}")
+                                st.stop()
+            else:
+                st.info("If this file is your already-made schedule, it needs a mapped Schedule Date or Month column. The assignment save button will not create a manageable schedule.")
         if problems.empty:
             st.success("Data check passed. You can generate a draft schedule.")
         else:
