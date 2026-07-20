@@ -1727,6 +1727,7 @@ def import_existing_pmt_schedule(normalized, run_name):
         session.add(schedule)
         session.flush()
         item_rows = []
+        now = datetime.utcnow()
         for _, row in normalized.iterrows():
             item_rows.append(
                 {
@@ -1741,10 +1742,13 @@ def import_existing_pmt_schedule(normalized, run_name):
                     "pmt_schedule_run_id": run.id,
                     "cycle_label": cycle_label,
                     "completion_notes": clean(row.get("notes", "")),
+                    "created_at": now,
+                    "updated_at": now,
                 }
             )
         if item_rows:
             session.execute(insert(ScheduleItem), item_rows)
+            session.flush()
         run_id = run.id
     log_action("pmt existing schedule imported", "pmt_schedule_runs", int(run_id), f"{len(normalized)} PMT schedule items imported")
     return {"run_id": run_id, "created": len(normalized)}
@@ -3440,11 +3444,21 @@ with tab_manage:
                         key="pmt_existing_schedule_run_name",
                     )
                     confirm_import = st.checkbox("I reviewed this imported schedule and want to create a PMT schedule run.", key="pmt_confirm_existing_schedule_import")
+                    import_success = st.session_state.get("pmt_existing_schedule_import_success")
+                    if import_success:
+                        st.success(import_success)
+                        st.info("The imported run is saved. Leave the uploader or refresh the page when you want to select it in Manage Step 2.")
                     if st.button("Import Existing PMT Schedule", type="primary", disabled=not confirm_import, key="pmt_import_existing_schedule_button"):
-                        with st.spinner(f"Importing {len(imported_preview):,} PMT schedule item(s)..."):
-                            result = import_existing_pmt_schedule(imported_preview, import_run_name)
-                        st.success(f"Imported PMT schedule run #{result['run_id']} with {result['created']} schedule item(s).")
-                        st.rerun()
+                        try:
+                            with st.spinner(f"Importing {len(imported_preview):,} PMT schedule item(s)..."):
+                                result = import_existing_pmt_schedule(imported_preview, import_run_name)
+                            success_message = f"Imported PMT schedule run #{result['run_id']} with {result['created']} schedule item(s)."
+                            st.session_state["pmt_existing_schedule_import_success"] = success_message
+                            st.success(success_message)
+                            st.info("The save completed. Refresh the page or clear the upload to select the imported run below.")
+                        except Exception as exc:
+                            st.error(f"PMT schedule import failed: {exc}")
+                            st.stop()
 
     section_header("Manage Step 2: Select Published PMT Schedule", "Choose the published or imported PMT run you want to review or adjust.", "gray")
     runs = safe_query(
