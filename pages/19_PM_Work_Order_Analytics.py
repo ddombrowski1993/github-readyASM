@@ -1,3 +1,5 @@
+import hashlib
+import re
 from datetime import date
 
 import pandas as pd
@@ -75,6 +77,10 @@ def download_df(df, label, filename, key):
     )
 
 
+def safe_key_part(value):
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "")).strip("_")[:80]
+
+
 def filtered_snapshot(df):
     filtered = df.copy()
     if filtered.empty:
@@ -120,6 +126,7 @@ with st.expander("Upload Current Work Order Report", expanded=True):
     upload = st.file_uploader("Upload .xlsx work-order export", type=["xlsx"], key="pm_wo_upload")
     if upload:
         file_bytes, sheet_names = read_workbook_sheets(upload)
+        file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
         sheet_name = st.selectbox("Worksheet", sheet_names, key="pm_wo_sheet")
         incoming = read_upload_dataframe(file_bytes, sheet_name)
         detected_mapping, ambiguous = detect_column_mapping(incoming.columns.tolist())
@@ -132,31 +139,43 @@ with st.expander("Upload Current Work Order Report", expanded=True):
         for index, field in enumerate(NORMALIZED_FIELDS):
             default = detected_mapping.get(field, "")
             label = FIELD_LABELS.get(field, field)
+            mapping_key = f"pm_wo_map_{safe_key_part(workspace_key())}_{file_hash}_{safe_key_part(sheet_name)}_{field}"
             manual_mapping[field] = cols[index % 3].selectbox(
                 label,
                 options,
                 index=options.index(default) if default in options else 0,
-                key=f"pm_wo_map_{field}",
+                key=mapping_key,
             )
         normalized = normalize_records(incoming, manual_mapping)
         normalized = apply_duration_rules(normalized)
         validation = validate_normalized(normalized, manual_mapping, ambiguous)
-        v1, v2, v3, v4, v5 = st.columns(5)
+        v1, v2, v3, v4, v5, v6 = st.columns(6)
         v1.metric("Rows", f"{validation['rows']:,}")
         v2.metric("Unique WOs", f"{validation['unique_work_orders']:,}")
-        v3.metric("Duplicate IDs", validation["duplicate_work_order_ids"])
-        v4.metric("Missing WO IDs", validation["missing_work_order_ids"])
-        v5.metric("Invalid Durations", validation["missing_or_invalid_durations"])
+        v3.metric("Duplicate Rows", validation["duplicate_work_order_ids"])
+        v4.metric("Duplicate WO IDs", validation["duplicate_unique_work_order_ids"])
+        v5.metric("Missing WO IDs", validation["missing_work_order_ids"])
+        v6.metric("Invalid Durations", validation["missing_or_invalid_durations"])
         if validation["missing_required"]:
             st.error("Missing required mappings: " + ", ".join(FIELD_LABELS[field] for field in validation["missing_required"]))
+        if validation["mapping_errors"]:
+            for error in validation["mapping_errors"]:
+                st.error(error)
         if validation["unrecognized_statuses"]:
             st.warning("Unrecognized statuses will be grouped as Other: " + ", ".join(validation["unrecognized_statuses"]))
         if ambiguous:
-            with st.expander("Ambiguous Detected Columns", expanded=False):
-                st.json(ambiguous)
+            with st.expander("Column Mapping Recommendations", expanded=False):
+                for field, details in ambiguous.items():
+                    st.markdown(f"**{FIELD_LABELS.get(field, field)}**")
+                    st.caption(f"Recommended: {details.get('recommended', '')}")
+                    others = details.get("other_candidates") or []
+                    if others:
+                        st.caption("Other possible columns: " + ", ".join(others))
+                    st.caption(f"{details.get('recommended', '')} was selected because it is the strongest header match. Review the dropdown before importing.")
         st.subheader("Validation Preview")
         preview_cols = [
             "work_order_id",
+            "record_number",
             "store_number",
             "created_at",
             "status",
@@ -171,6 +190,23 @@ with st.expander("Upload Current Work Order Report", expanded=True):
             "duration_status",
         ]
         display_df(normalized, preview_cols, max_rows=50)
+        if validation["duplicate_work_order_ids"]:
+            duplicate_preview = normalized[
+                normalized["work_order_id"].replace("", pd.NA).notna()
+                & normalized["work_order_id"].duplicated(keep=False)
+            ].copy()
+            duplicate_cols = [
+                "source_row_number",
+                "work_order_id",
+                "record_number",
+                "store_number",
+                "status",
+                "short_description",
+                "pm_technician",
+            ]
+            with st.expander("Duplicate Work Order Preview", expanded=False):
+                display_df(duplicate_preview, duplicate_cols, max_rows=100)
+                download_df(duplicate_preview[duplicate_cols], "Download Duplicate Preview", "pm_work_order_duplicate_preview.xlsx", "pm_wo_duplicate_preview")
         import_disabled = not validation["can_import"]
         if st.button("Import and Compare", type="primary", disabled=import_disabled):
             summary = import_and_compare(normalized, upload.name, file_bytes, sheet_name)

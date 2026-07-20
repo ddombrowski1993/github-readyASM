@@ -80,9 +80,9 @@ FIELD_LABELS = {
 }
 
 HEADER_ALIASES = {
-    "work_order_id": ["work order", "workorder", "work order number", "work order #", "wo number", "wo #", "number"],
-    "record_number": ["number", "record number", "ticket number"],
-    "store_number": ["site number", "store number", "location number", "711 store number", "store #"],
+    "work_order_id": ["work order", "workorder", "work order number", "work order id", "workorder number", "wo number", "wo id", "wo #"],
+    "record_number": ["number", "record number", "task number", "ticket number"],
+    "store_number": ["site number", "store number", "location number", "7-eleven id", "7 eleven id", "711 store number", "store #"],
     "location": ["location", "store details", "initiated from"],
     "created_at": ["created", "created date", "opened", "opened date", "date created"],
     "status": ["state", "status", "work order state"],
@@ -200,6 +200,14 @@ def normalize_value(value):
     return re.sub(r"\s+", " ", str(value).strip())
 
 
+def normalize_identifier(value):
+    text = normalize_value(value)
+    text = re.sub(r"[\r\n]+", "", text).strip()
+    if text.lower() in {"", "nan", "none", "<na>", "nat"}:
+        return ""
+    return text
+
+
 def comparable_value(value):
     if value is None or pd.isna(value):
         return ""
@@ -220,10 +228,13 @@ def detect_column_mapping(columns):
             exact = normalized_columns.get(normalize_header(alias))
             if exact and exact not in matches:
                 matches.append(exact)
-        if len(matches) == 1:
+        if matches:
             mapping[field] = matches[0]
-        elif len(matches) > 1:
-            ambiguous[field] = matches
+            if len(matches) > 1:
+                ambiguous[field] = {
+                    "recommended": matches[0],
+                    "other_candidates": matches[1:],
+                }
     return mapping, ambiguous
 
 
@@ -299,6 +310,7 @@ def parse_duration_minutes(value):
 
 def normalize_records(df, mapping):
     out = pd.DataFrame()
+    out["source_row_number"] = df.index + 2
     for field in NORMALIZED_FIELDS:
         source = mapping.get(field)
         out[field] = df[source] if source in df.columns else ""
@@ -307,7 +319,9 @@ def normalize_records(df, mapping):
             out[field] = out[field].map(normalize_value)
     for field in ["created_at", "actual_travel_start", "actual_work_start", "actual_work_end"]:
         out[field] = parse_datetime_series(out[field])
-    out["work_order_id"] = out["work_order_id"].map(normalize_value)
+    out["work_order_id"] = out["work_order_id"].map(normalize_identifier)
+    out["record_number"] = out["record_number"].map(normalize_identifier)
+    out["store_number"] = out["store_number"].map(normalize_identifier)
     out["normalized_status"] = out["status"].map(normalize_status)
     out["actual_travel_duration_minutes"] = out["actual_travel_duration"].map(parse_duration_minutes)
     out["actual_work_duration_minutes"] = out["actual_work_duration"].map(parse_duration_minutes)
@@ -327,8 +341,18 @@ def row_hash(row):
 
 def validate_normalized(df, mapping, ambiguous):
     missing_required = [field for field in REQUIRED_FIELDS if not mapping.get(field)]
-    duplicate_ids = int(df["work_order_id"].duplicated().sum()) if "work_order_id" in df else 0
-    missing_ids = int(df["work_order_id"].eq("").sum()) if "work_order_id" in df else 0
+    mapping_errors = []
+    work_order_source = mapping.get("work_order_id")
+    store_source = mapping.get("store_number")
+    store_alias_headers = {normalize_header(alias) for alias in HEADER_ALIASES["store_number"]}
+    if work_order_source and store_source and work_order_source == store_source:
+        mapping_errors.append("Work Order Identifier and Store Number cannot use the same source column.")
+    if work_order_source and normalize_header(work_order_source) in store_alias_headers:
+        mapping_errors.append("Work Order Identifier cannot be mapped to a store/site number column.")
+    valid_ids = df["work_order_id"].replace("", pd.NA).dropna() if "work_order_id" in df else pd.Series(dtype="object")
+    duplicate_rows = int(valid_ids.duplicated(keep=False).sum())
+    duplicate_unique_ids = int(valid_ids[valid_ids.duplicated(keep=False)].nunique())
+    missing_ids = int(df["work_order_id"].replace("", pd.NA).isna().sum()) if "work_order_id" in df else 0
     invalid_created = int(df["created_at"].isna().sum()) if "created_at" in df else 0
     invalid_start = int(df["actual_work_start"].isna().sum()) if "actual_work_start" in df else 0
     invalid_end = int(df["actual_work_end"].isna().sum()) if "actual_work_end" in df else 0
@@ -336,17 +360,19 @@ def validate_normalized(df, mapping, ambiguous):
     unrecognized = sorted(df.loc[df["normalized_status"].eq("Other"), "status"].dropna().astype(str).unique().tolist())[:30]
     return {
         "missing_required": missing_required,
+        "mapping_errors": mapping_errors,
         "ambiguous": ambiguous,
         "rows": int(len(df)),
-        "unique_work_orders": int(df["work_order_id"].replace("", pd.NA).dropna().nunique()) if "work_order_id" in df else 0,
-        "duplicate_work_order_ids": duplicate_ids,
+        "unique_work_orders": int(valid_ids.nunique()),
+        "duplicate_work_order_ids": duplicate_rows,
+        "duplicate_unique_work_order_ids": duplicate_unique_ids,
         "missing_work_order_ids": missing_ids,
         "invalid_created_dates": invalid_created,
         "invalid_work_start_dates": invalid_start,
         "invalid_work_end_dates": invalid_end,
         "missing_or_invalid_durations": invalid_duration,
         "unrecognized_statuses": unrecognized,
-        "can_import": not missing_required and missing_ids == 0,
+        "can_import": not missing_required and not mapping_errors and missing_ids == 0 and int(valid_ids.nunique()) > 0,
     }
 
 
