@@ -15,6 +15,7 @@ from src.pm_work_order_analytics import (
     REQUIRED_FIELDS,
     apply_duration_rules,
     detect_column_mapping,
+    empty_validation_result,
     ensure_analytics_ready,
     import_and_compare,
     load_duration_rules,
@@ -79,6 +80,12 @@ def download_df(df, label, filename, key):
 
 def safe_key_part(value):
     return re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "")).strip("_")[:80]
+
+
+def stable_validation_result(validation):
+    result = empty_validation_result()
+    result.update(validation or {})
+    return result
 
 
 def filtered_snapshot(df):
@@ -148,20 +155,20 @@ with st.expander("Upload Current Work Order Report", expanded=True):
             )
         normalized = normalize_records(incoming, manual_mapping)
         normalized = apply_duration_rules(normalized)
-        validation = validate_normalized(normalized, manual_mapping, ambiguous)
+        validation = stable_validation_result(validate_normalized(normalized, manual_mapping, ambiguous))
         v1, v2, v3, v4, v5, v6 = st.columns(6)
-        v1.metric("Rows", f"{validation['rows']:,}")
-        v2.metric("Unique WOs", f"{validation['unique_work_orders']:,}")
-        v3.metric("Duplicate Rows", validation["duplicate_work_order_ids"])
-        v4.metric("Duplicate WO IDs", validation["duplicate_unique_work_order_ids"])
-        v5.metric("Missing WO IDs", validation["missing_work_order_ids"])
-        v6.metric("Invalid Durations", validation["missing_or_invalid_durations"])
-        if validation["missing_required"]:
+        v1.metric("Rows", f"{int(validation.get('rows') or 0):,}")
+        v2.metric("Unique WOs", f"{int(validation.get('unique_work_orders') or 0):,}")
+        v3.metric("Duplicate Rows", int(validation.get("duplicate_row_count") or validation.get("duplicate_work_order_ids") or 0))
+        v4.metric("Duplicate WO IDs", int(validation.get("duplicate_unique_work_order_ids") or 0))
+        v5.metric("Missing WO IDs", int(validation.get("missing_work_order_ids") or 0))
+        v6.metric("Invalid Durations", int(validation.get("missing_or_invalid_durations") or 0))
+        if validation.get("missing_required"):
             st.error("Missing required mappings: " + ", ".join(FIELD_LABELS[field] for field in validation["missing_required"]))
-        if validation["mapping_errors"]:
+        if validation.get("mapping_errors"):
             for error in validation["mapping_errors"]:
                 st.error(error)
-        if validation["unrecognized_statuses"]:
+        if validation.get("unrecognized_statuses"):
             st.warning("Unrecognized statuses will be grouped as Other: " + ", ".join(validation["unrecognized_statuses"]))
         if ambiguous:
             with st.expander("Column Mapping Recommendations", expanded=False):
@@ -190,7 +197,7 @@ with st.expander("Upload Current Work Order Report", expanded=True):
             "duration_status",
         ]
         display_df(normalized, preview_cols, max_rows=50)
-        if validation["duplicate_work_order_ids"]:
+        if int(validation.get("duplicate_row_count") or validation.get("duplicate_work_order_ids") or 0):
             duplicate_preview = normalized[
                 normalized["work_order_id"].replace("", pd.NA).notna()
                 & normalized["work_order_id"].duplicated(keep=False)

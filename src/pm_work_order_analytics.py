@@ -162,6 +162,28 @@ COMPLETED_STATUSES = {"Completed"}
 CANCELED_STATUSES = {"Canceled"}
 
 
+def empty_validation_result():
+    return {
+        "missing_required": [],
+        "mapping_errors": [],
+        "ambiguous": {},
+        "rows": 0,
+        "unique_work_orders": 0,
+        "duplicate_work_order_ids": 0,
+        "duplicate_unique_work_order_ids": 0,
+        "duplicate_row_count": 0,
+        "missing_work_order_ids": 0,
+        "invalid_created_dates": 0,
+        "invalid_work_start_dates": 0,
+        "invalid_work_end_dates": 0,
+        "missing_or_invalid_durations": 0,
+        "unrecognized_statuses": [],
+        "can_import": False,
+        "blocking_errors": [],
+        "warnings": [],
+    }
+
+
 def ensure_analytics_ready():
     ensure_fn = getattr(db, "ensure_pm_work_order_analytics_tables", None)
     if callable(ensure_fn):
@@ -340,6 +362,7 @@ def row_hash(row):
 
 
 def validate_normalized(df, mapping, ambiguous):
+    validation = empty_validation_result()
     missing_required = [field for field in REQUIRED_FIELDS if not mapping.get(field)]
     mapping_errors = []
     work_order_source = mapping.get("work_order_id")
@@ -350,7 +373,7 @@ def validate_normalized(df, mapping, ambiguous):
     if work_order_source and normalize_header(work_order_source) in store_alias_headers:
         mapping_errors.append("Work Order Identifier cannot be mapped to a store/site number column.")
     valid_ids = df["work_order_id"].replace("", pd.NA).dropna() if "work_order_id" in df else pd.Series(dtype="object")
-    duplicate_rows = int(valid_ids.duplicated(keep=False).sum())
+    duplicate_row_count = int(valid_ids.duplicated(keep="first").sum())
     duplicate_unique_ids = int(valid_ids[valid_ids.duplicated(keep=False)].nunique())
     missing_ids = int(df["work_order_id"].replace("", pd.NA).isna().sum()) if "work_order_id" in df else 0
     invalid_created = int(df["created_at"].isna().sum()) if "created_at" in df else 0
@@ -358,14 +381,15 @@ def validate_normalized(df, mapping, ambiguous):
     invalid_end = int(df["actual_work_end"].isna().sum()) if "actual_work_end" in df else 0
     invalid_duration = int(df["actual_work_duration_minutes"].isna().sum()) if "actual_work_duration_minutes" in df else 0
     unrecognized = sorted(df.loc[df["normalized_status"].eq("Other"), "status"].dropna().astype(str).unique().tolist())[:30]
-    return {
+    validation.update({
         "missing_required": missing_required,
         "mapping_errors": mapping_errors,
         "ambiguous": ambiguous,
         "rows": int(len(df)),
         "unique_work_orders": int(valid_ids.nunique()),
-        "duplicate_work_order_ids": duplicate_rows,
+        "duplicate_work_order_ids": duplicate_row_count,
         "duplicate_unique_work_order_ids": duplicate_unique_ids,
+        "duplicate_row_count": duplicate_row_count,
         "missing_work_order_ids": missing_ids,
         "invalid_created_dates": invalid_created,
         "invalid_work_start_dates": invalid_start,
@@ -373,7 +397,10 @@ def validate_normalized(df, mapping, ambiguous):
         "missing_or_invalid_durations": invalid_duration,
         "unrecognized_statuses": unrecognized,
         "can_import": not missing_required and not mapping_errors and missing_ids == 0 and int(valid_ids.nunique()) > 0,
-    }
+        "blocking_errors": missing_required + mapping_errors,
+        "warnings": unrecognized,
+    })
+    return validation
 
 
 def dedupe_work_orders(df):
