@@ -107,6 +107,7 @@ DETAIL_COLUMNS = [
     "closed_by",
     "created_at",
 ]
+REQUIRED_DETAIL_COLUMNS = ["work_order_id", "store_number", "status", "normalized_status"]
 
 
 def work_type_group(value):
@@ -125,6 +126,15 @@ def display_minutes(value):
     if minutes > 24 * 60:
         minutes = minutes / 60
     return round(minutes, 2)
+
+
+def safe_detail_df(df, required_columns=None):
+    required_columns = required_columns or REQUIRED_DETAIL_COLUMNS
+    missing_required = [col for col in required_columns if col not in df.columns]
+    if missing_required:
+        st.error("The filtered work-order data is missing required fields: " + ", ".join(missing_required))
+        return pd.DataFrame(columns=DETAIL_COLUMNS), missing_required
+    return df.reindex(columns=DETAIL_COLUMNS).copy(), []
 
 
 def format_duration(value):
@@ -190,6 +200,19 @@ def render_active_filters():
     parts = [f"{key}: {value}" for key, value in filters.items()]
     st.caption("Active filters: " + " | ".join(parts))
     st.button("Clear All Filters", on_click=reset_filters, key="pm_wo_clear_filters")
+
+
+def render_schema_diagnostic(df):
+    with st.expander("Snapshot Schema Diagnostic", expanded=False):
+        missing_required = [col for col in REQUIRED_DETAIL_COLUMNS if col not in df.columns]
+        missing_optional = [col for col in DETAIL_COLUMNS if col not in df.columns and col not in REQUIRED_DETAIL_COLUMNS]
+        duplicate_columns = df.columns[df.columns.duplicated()].tolist()
+        st.write("Rows:", len(df))
+        st.write("Available columns:", df.columns.tolist())
+        st.write("Missing required detail fields:", missing_required)
+        st.write("Missing optional detail fields:", missing_optional)
+        st.write("Duplicate column names:", duplicate_columns)
+        st.dataframe(pd.DataFrame({"column": df.columns, "dtype": [str(dtype) for dtype in df.dtypes]}), use_container_width=True, hide_index=True)
 
 
 def filtered_snapshot(df):
@@ -365,6 +388,7 @@ counts = {
 }
 
 render_active_filters()
+render_schema_diagnostic(snapshot)
 
 overview_tab, daily_tab, tech_tab, category_tab, duration_tab, cancel_tab, explorer_tab, history_tab, settings_tab = st.tabs(
     [
@@ -425,7 +449,9 @@ with overview_tab:
     st.plotly_chart(px.bar(cvp_counts, x="pm_technician", y="Count", color="work_type_group", title="Work Type by PM Technician"), use_container_width=True)
     with st.expander("Filtered Work Order Detail", expanded=bool(st.session_state.get("pm_wo_filters"))):
         display_df(filtered_snapshot_global, DETAIL_COLUMNS, max_rows=100)
-        download_df(filtered_snapshot_global[DETAIL_COLUMNS], "Export Filtered Work Orders", "pm_work_order_filtered_overview.xlsx", "pm_wo_overview_filtered_export")
+        overview_export, overview_missing = safe_detail_df(filtered_snapshot_global)
+        if not overview_missing:
+            download_df(overview_export, "Export Filtered Work Orders", "pm_work_order_filtered_overview.xlsx", "pm_wo_overview_filtered_export")
     with st.expander("Status Diagnostics", expanded=False):
         diagnostics = snapshot.groupby(["status", "normalized_status"], dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False)
         display_df(diagnostics, max_rows=100)
@@ -519,7 +545,9 @@ with category_tab:
         ).reset_index().sort_values("total", ascending=False)
         display_df(summary, max_rows=100)
         display_df(los_source, DETAIL_COLUMNS, max_rows=100)
-        download_df(category_records, "Export Category Detail", "pm_work_order_category_detail.xlsx", "pm_wo_category_export")
+        category_export, category_missing = safe_detail_df(category_records)
+        if not category_missing:
+            download_df(category_export, "Export Category Detail", "pm_work_order_category_detail.xlsx", "pm_wo_category_export")
 
 with duration_tab:
     section_header("Duration Review", "Flags are review indicators, not automatic proof of poor work.", "orange")
@@ -551,7 +579,9 @@ with duration_tab:
         ],
         max_rows=150,
     )
-    download_df(flagged, "Export Duration Exceptions", "pm_work_order_duration_exceptions.xlsx", "pm_wo_duration_export")
+    duration_export, duration_missing = safe_detail_df(flagged)
+    if not duration_missing:
+        download_df(duration_export, "Export Duration Exceptions", "pm_work_order_duration_exceptions.xlsx", "pm_wo_duration_export")
 
 with cancel_tab:
     section_header("Cancellations", "Review canceled work orders and stores with repeated cancellations.", "red")
@@ -590,7 +620,9 @@ with cancel_tab:
     ).reset_index().sort_values("canceled_count", ascending=False)
     display_df(cancel_summary, max_rows=100)
     display_df(canceled, DETAIL_COLUMNS, max_rows=150)
-    download_df(canceled, "Export Canceled Work Orders", "pm_work_order_canceled.xlsx", "pm_wo_cancel_export")
+    canceled_export, canceled_missing = safe_detail_df(canceled)
+    if not canceled_missing:
+        download_df(canceled_export, "Export Canceled Work Orders", "pm_work_order_canceled.xlsx", "pm_wo_cancel_export")
     download_df(repeat_stores, "Export Repeat Cancellation Stores", "pm_work_order_repeat_cancellations.xlsx", "pm_wo_repeat_cancel_export")
 
 with explorer_tab:
@@ -608,7 +640,9 @@ with explorer_tab:
         record = filtered[filtered["work_order_id"].astype(str).eq(selected_wo)].head(1).T.reset_index()
         record.columns = ["Field", "Value"]
         st.dataframe(record, use_container_width=True, hide_index=True)
-    download_df(filtered, "Export Filtered Detail", "pm_work_order_filtered_detail.xlsx", "pm_wo_filtered_export")
+    filtered_export, filtered_missing = safe_detail_df(filtered)
+    if not filtered_missing:
+        download_df(filtered_export, "Export Filtered Detail", "pm_work_order_filtered_detail.xlsx", "pm_wo_filtered_export")
 
 with history_tab:
     section_header("Upload History", "Upload run summaries are stored; full workbooks are not retained.", "blue")
