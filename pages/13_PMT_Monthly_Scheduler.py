@@ -284,18 +284,37 @@ def normalize_pmt_assignment_columns(df):
 
 
 def upload_sheet_names(uploaded_file):
-    if uploaded_file.name.lower().endswith(".csv"):
+    return cached_upload_sheet_names(uploaded_file.name, uploaded_file.getvalue())
+
+
+@st.cache_data(show_spinner=False)
+def cached_upload_sheet_names(file_name, file_bytes):
+    if file_name.lower().endswith(".csv"):
         return ["CSV file"]
-    uploaded_file.seek(0)
-    workbook = pd.ExcelFile(uploaded_file)
+    workbook = pd.ExcelFile(io.BytesIO(file_bytes))
     return workbook.sheet_names
 
 
 def read_upload_sheet(uploaded_file, sheet_name):
-    uploaded_file.seek(0)
-    if uploaded_file.name.lower().endswith(".csv"):
-        return pd.read_csv(uploaded_file, dtype=str).fillna("")
-    return pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str).fillna("")
+    return cached_read_upload_sheet(uploaded_file.name, uploaded_file.getvalue(), sheet_name)
+
+
+@st.cache_data(show_spinner=False)
+def cached_read_upload_sheet(file_name, file_bytes, sheet_name):
+    if file_name.lower().endswith(".csv"):
+        return pd.read_csv(io.BytesIO(file_bytes), dtype=str).fillna("")
+    return pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name, dtype=str).fillna("")
+
+
+def scan_uploaded_workbook(uploaded_file, import_type):
+    return cached_scan_uploaded_workbook(uploaded_file.name, uploaded_file.getvalue(), import_type)
+
+
+@st.cache_data(show_spinner=False)
+def cached_scan_uploaded_workbook(file_name, file_bytes, import_type):
+    workbook = io.BytesIO(file_bytes)
+    workbook.name = file_name
+    return scan_workbook(workbook, import_type)
 
 
 def column_key(column):
@@ -2288,7 +2307,7 @@ with tab_build:
         upload = st.file_uploader("Upload PMT assignment file", type=["xlsx", "xls", "xlsm", "csv"], key="pmt_assignment_upload")
         if upload:
             st.warning("Uploaded files are not saved yet. After the file validates, use Step 3A to save these PMT assignments into the app.")
-            assignment_scans = scan_workbook(upload, "assignments")
+            assignment_scans = scan_uploaded_workbook(upload, "assignments")
             scan_issues = scan_issue_rows(assignment_scans)
             if not scan_issues.empty:
                 with st.expander("Upload scan warnings", expanded=False):

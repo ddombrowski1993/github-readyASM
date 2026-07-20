@@ -619,7 +619,7 @@ def _database_cache_key(url):
     return hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()
 
 
-@st.cache_data(show_spinner=False, ttl=45)
+@st.cache_data(show_spinner=False, ttl=180)
 def _cached_read_sql(url_key, schema, sql, params_json):
     engine = get_engine(get_database_url(), schema=schema)
     params = json.loads(params_json or "{}")
