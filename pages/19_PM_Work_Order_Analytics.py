@@ -194,6 +194,14 @@ def apply_saved_filters(df):
     if not filters:
         return filtered
     for col, value in filters.items():
+        if col == "created_start":
+            if "created_at" in filtered.columns:
+                filtered = filtered[pd.to_datetime(filtered["created_at"], errors="coerce").dt.date >= value]
+            continue
+        if col == "created_end":
+            if "created_at" in filtered.columns:
+                filtered = filtered[pd.to_datetime(filtered["created_at"], errors="coerce").dt.date <= value]
+            continue
         if col not in filtered.columns:
             continue
         if isinstance(value, list):
@@ -210,7 +218,17 @@ def render_active_filters():
     if not filters:
         st.caption("Active filters: none")
         return
-    parts = [f"{key}: {value}" for key, value in filters.items()]
+    labels = {
+        "created_start": "Created from",
+        "created_end": "Created to",
+        "normalized_status": "Status",
+        "pm_technician": "Technician",
+        "work_type_group": "Work Type",
+        "store_number": "Store",
+        "work_order_id": "Work Order",
+        "short_description": "Description",
+    }
+    parts = [f"{labels.get(key, key)}: {value}" for key, value in filters.items()]
     st.caption("Active filters: " + " | ".join(parts))
     st.button("Clear All Filters", on_click=reset_filters, key="pm_wo_clear_filters")
 
@@ -244,6 +262,9 @@ def filtered_snapshot(df):
         wo_search = c6.text_input("Work-order search")
         category_search = c7.text_input("Category search")
         text_search = c8.text_input("Description / notes search")
+        c9, c10 = st.columns(2)
+        created_start = c9.date_input("Created from", value=None, key="pm_wo_created_from")
+        created_end = c10.date_input("Created to", value=None, key="pm_wo_created_to")
         apply_clicked = st.form_submit_button("Apply Filters")
     if apply_clicked:
         reset_filters()
@@ -263,6 +284,10 @@ def filtered_snapshot(df):
             set_filter(category=category_search)
         if text_search:
             set_filter(short_description=text_search)
+        if created_start:
+            set_filter(created_start=created_start)
+        if created_end:
+            set_filter(created_end=created_end)
     return apply_saved_filters(filtered)
 
 
