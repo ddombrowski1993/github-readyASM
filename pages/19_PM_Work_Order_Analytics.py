@@ -20,12 +20,12 @@ from src.pm_work_order_analytics import (
     import_and_compare,
     load_duration_rules,
     normalize_records,
+    normalize_status,
     query_events_df,
     query_snapshot_df,
     read_upload_dataframe,
     read_workbook_sheets,
     save_duration_rule,
-    summary_counts,
     upload_runs_df,
     validate_normalized,
     workspace_key,
@@ -88,44 +88,145 @@ def stable_validation_result(validation):
     return result
 
 
+DETAIL_COLUMNS = [
+    "work_order_id",
+    "record_number",
+    "store_number",
+    "pm_technician",
+    "status",
+    "normalized_status",
+    "priority",
+    "work_type",
+    "work_type_group",
+    "category",
+    "subcategory",
+    "line_of_service",
+    "short_description",
+    "duration_display",
+    "duration_status",
+    "closed_by",
+    "created_at",
+]
+
+
+def work_type_group(value):
+    text = str(value or "").strip().lower()
+    if "corrective" in text:
+        return "Corrective"
+    if "planned" in text or "maintenance" in text or text == "pm":
+        return "Planned Maintenance"
+    return "Other"
+
+
+def display_minutes(value):
+    if value is None or pd.isna(value):
+        return None
+    minutes = float(value)
+    if minutes > 24 * 60:
+        minutes = minutes / 60
+    return round(minutes, 2)
+
+
+def format_duration(value):
+    minutes = display_minutes(value)
+    if minutes is None:
+        return ""
+    total = int(round(minutes))
+    hours, mins = divmod(total, 60)
+    if hours:
+        return f"{hours} hr {mins} min"
+    return f"{mins} min"
+
+
+def prepare_snapshot(df):
+    prepared = df.copy()
+    for col in ["store_number", "work_order_id", "record_number", "pm_technician", "work_type", "category", "subcategory", "line_of_service", "priority", "status"]:
+        if col in prepared.columns:
+            prepared[col] = prepared[col].fillna("").astype(str).str.strip()
+    prepared["normalized_status"] = prepared["status"].map(normalize_status)
+    prepared["store_number"] = prepared["store_number"].astype(str).str.replace(r"\.0$", "", regex=True)
+    prepared["work_type_group"] = prepared["work_type"].map(work_type_group)
+    prepared["duration_minutes_display"] = prepared["actual_work_duration_minutes"].map(display_minutes)
+    prepared["duration_display"] = prepared["duration_minutes_display"].map(format_duration)
+    return prepared
+
+
+def set_filter(**updates):
+    filters = st.session_state.get("pm_wo_filters", {}).copy()
+    for key, value in updates.items():
+        if value in (None, "", [], "All"):
+            filters.pop(key, None)
+        else:
+            filters[key] = value
+    st.session_state["pm_wo_filters"] = filters
+
+
+def reset_filters():
+    st.session_state["pm_wo_filters"] = {}
+
+
+def apply_saved_filters(df):
+    filtered = df.copy()
+    filters = st.session_state.get("pm_wo_filters", {})
+    if not filters:
+        return filtered
+    for col, value in filters.items():
+        if col not in filtered.columns:
+            continue
+        if col in {"store_number", "work_order_id", "pm_technician", "short_description", "category", "subcategory", "line_of_service"}:
+            filtered = filtered[filtered[col].fillna("").astype(str).str.contains(str(value), case=False, na=False)]
+        elif isinstance(value, list):
+            filtered = filtered[filtered[col].isin(value)]
+        else:
+            filtered = filtered[filtered[col].eq(value)]
+    return filtered
+
+
+def render_active_filters():
+    filters = st.session_state.get("pm_wo_filters", {})
+    if not filters:
+        st.caption("Active filters: none")
+        return
+    parts = [f"{key}: {value}" for key, value in filters.items()]
+    st.caption("Active filters: " + " | ".join(parts))
+    st.button("Clear All Filters", on_click=reset_filters, key="pm_wo_clear_filters")
+
+
 def filtered_snapshot(df):
     filtered = df.copy()
     if filtered.empty:
         return filtered
-    c1, c2, c3, c4 = st.columns(4)
-    status = c1.multiselect("Normalized Status", sorted(filtered["normalized_status"].dropna().unique().tolist()))
-    technician = c2.multiselect("PM Technician", sorted(filtered["pm_technician"].fillna("").replace("", "Unassigned").unique().tolist()))
-    work_type = c3.multiselect("Work Type", sorted(filtered["work_type"].fillna("").replace("", "Blank").unique().tolist()))
-    duration = c4.multiselect("Duration Status", sorted(filtered["duration_status"].fillna("").replace("", "Blank").unique().tolist()))
-    c5, c6, c7 = st.columns(3)
-    store_search = c5.text_input("Store search")
-    wo_search = c6.text_input("Work-order search")
-    text_search = c7.text_input("Description / notes search")
-    if status:
-        filtered = filtered[filtered["normalized_status"].isin(status)]
-    if technician:
-        compare = filtered["pm_technician"].fillna("").replace("", "Unassigned")
-        filtered = filtered[compare.isin(technician)]
-    if work_type:
-        compare = filtered["work_type"].fillna("").replace("", "Blank")
-        filtered = filtered[compare.isin(work_type)]
-    if duration:
-        compare = filtered["duration_status"].fillna("").replace("", "Blank")
-        filtered = filtered[compare.isin(duration)]
-    if store_search:
-        filtered = filtered[filtered["store_number"].fillna("").astype(str).str.contains(store_search, case=False, na=False)]
-    if wo_search:
-        filtered = filtered[filtered["work_order_id"].fillna("").astype(str).str.contains(wo_search, case=False, na=False)]
-    if text_search:
-        haystack = (
-            filtered["short_description"].fillna("").astype(str)
-            + " "
-            + filtered["work_notes"].fillna("").astype(str)
-            + " "
-            + filtered["additional_comments"].fillna("").astype(str)
-        )
-        filtered = filtered[haystack.str.contains(text_search, case=False, na=False)]
-    return filtered
+    with st.form("pm_wo_explorer_filters"):
+        c1, c2, c3, c4 = st.columns(4)
+        status = c1.multiselect("Normalized Status", sorted(filtered["normalized_status"].dropna().unique().tolist()))
+        technician = c2.text_input("Technician search")
+        work_type = c3.multiselect("Work Type", sorted(filtered["work_type_group"].dropna().unique().tolist()))
+        priority = c4.multiselect("Priority", sorted(filtered["priority"].fillna("").replace("", "Blank").unique().tolist()))
+        c5, c6, c7, c8 = st.columns(4)
+        store_search = c5.text_input("Store search")
+        wo_search = c6.text_input("Work-order search")
+        category_search = c7.text_input("Category search")
+        text_search = c8.text_input("Description / notes search")
+        apply_clicked = st.form_submit_button("Apply Filters")
+    if apply_clicked:
+        reset_filters()
+        if status:
+            set_filter(normalized_status=status)
+        if technician:
+            set_filter(pm_technician=technician)
+        if work_type:
+            set_filter(work_type_group=work_type)
+        if priority:
+            set_filter(priority=priority)
+        if store_search:
+            set_filter(store_number=store_search)
+        if wo_search:
+            set_filter(work_order_id=wo_search)
+        if category_search:
+            set_filter(category=category_search)
+        if text_search:
+            set_filter(short_description=text_search)
+    return apply_saved_filters(filtered)
 
 
 with st.expander("Upload Current Work Order Report", expanded=True):
@@ -245,11 +346,25 @@ def cached_events(key):
 snapshot = cached_snapshot(workspace_key())
 events = cached_events(workspace_key())
 runs = upload_runs_df()
-counts = summary_counts()
 
 if snapshot.empty:
     st.warning("No PM work-order baseline has been uploaded for this workspace yet.")
     st.stop()
+
+snapshot = prepare_snapshot(snapshot)
+filtered_snapshot_global = apply_saved_filters(snapshot)
+status_counts_all = snapshot["normalized_status"].value_counts(dropna=False).to_dict()
+counts = {
+    "Total": int(len(snapshot)),
+    "Open": int(status_counts_all.get("Open", 0)),
+    "In Progress": int(status_counts_all.get("In Progress", 0)),
+    "Completed": int(status_counts_all.get("Completed", 0)),
+    "Canceled": int(status_counts_all.get("Canceled", 0)),
+    "Other": int(status_counts_all.get("Other", 0)),
+    "Duration Flags": int(snapshot["duration_status"].isin(["Below Expected Range", "Above Expected Range"]).sum()),
+}
+
+render_active_filters()
 
 overview_tab, daily_tab, tech_tab, category_tab, duration_tab, cancel_tab, explorer_tab, history_tab, settings_tab = st.tabs(
     [
@@ -269,23 +384,52 @@ with overview_tab:
     section_header("Overview", "Current work-order snapshot and changes first observed during the latest uploads.", "blue")
     latest_run_id = int(runs.iloc[0]["id"]) if not runs.empty else None
     latest_events = events[events["upload_run_id"] == latest_run_id] if latest_run_id and not events.empty else pd.DataFrame()
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
     k1.metric("Total Work Orders", f"{counts.get('Total', 0):,}")
     k2.metric("Open", f"{counts.get('Open', 0):,}")
-    k3.metric("Completed", f"{counts.get('Completed', 0):,}")
-    k4.metric("Canceled", f"{counts.get('Canceled', 0):,}")
-    k5.metric("Closed Since Last Upload", int((latest_events["event_type"] == "NEWLY_COMPLETED").sum()) if not latest_events.empty else 0)
-    with k6:
-        metric_help_card("Duration Flags", counts.get("Duration Flags", 0), "Work orders with missing, invalid, below-range, or above-range work duration.")
+    k3.metric("In Progress", f"{counts.get('In Progress', 0):,}")
+    k4.metric("Completed", f"{counts.get('Completed', 0):,}")
+    k5.metric("Canceled", f"{counts.get('Canceled', 0):,}")
+    k6.metric("Closed Since Last Upload", int((latest_events["event_type"] == "NEWLY_COMPLETED").sum()) if not latest_events.empty else 0)
+    with k7:
+        metric_help_card("Duration Flags", counts.get("Duration Flags", 0), "Work orders below or above a configured expected duration range.")
+    status_total = counts.get("Open", 0) + counts.get("In Progress", 0) + counts.get("Completed", 0) + counts.get("Canceled", 0) + counts.get("Other", 0)
+    if status_total != counts.get("Total", 0):
+        st.warning(f"Status reconciliation mismatch: status groups total {status_total:,}, but total work orders is {counts.get('Total', 0):,}.")
+    b1, b2, b3, b4, b5, b6 = st.columns(6)
+    if b1.button("View Open Work Orders", key="view_open"):
+        set_filter(normalized_status="Open")
+        st.rerun()
+    if b2.button("View In Progress", key="view_progress"):
+        set_filter(normalized_status="In Progress")
+        st.rerun()
+    if b3.button("View Completed", key="view_completed"):
+        set_filter(normalized_status="Completed")
+        st.rerun()
+    if b4.button("View Canceled", key="view_canceled"):
+        set_filter(normalized_status="Canceled")
+        st.rerun()
+    if b5.button("View Corrective", key="view_corrective"):
+        set_filter(work_type_group="Corrective")
+        st.rerun()
+    if b6.button("View Planned PM", key="view_planned"):
+        set_filter(work_type_group="Planned Maintenance")
+        st.rerun()
     c1, c2 = st.columns(2)
-    status_counts = snapshot.groupby("normalized_status", dropna=False).size().reset_index(name="Count")
+    status_counts = filtered_snapshot_global.groupby("normalized_status", dropna=False).size().reset_index(name="Count")
     c1.plotly_chart(px.pie(status_counts, values="Count", names="normalized_status", title="Status Overview"), use_container_width=True)
-    work_type_counts = snapshot.groupby("work_type", dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False).head(12)
-    c2.plotly_chart(px.bar(work_type_counts, x="work_type", y="Count", title="Work Type Breakdown"), use_container_width=True)
+    work_type_counts = filtered_snapshot_global.groupby("work_type_group", dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False)
+    c2.plotly_chart(px.bar(work_type_counts, x="work_type_group", y="Count", title="Work Type Breakdown"), use_container_width=True)
     st.subheader("Corrective vs Planned Maintenance")
-    cvp = snapshot.assign(work_type_group=snapshot["work_type"].fillna("").str.title())
-    cvp_counts = cvp.groupby(["pm_technician", "work_type_group"], dropna=False).size().reset_index(name="Count")
+    cvp_counts = filtered_snapshot_global.groupby(["pm_technician", "work_type_group"], dropna=False).size().reset_index(name="Count")
     st.plotly_chart(px.bar(cvp_counts, x="pm_technician", y="Count", color="work_type_group", title="Work Type by PM Technician"), use_container_width=True)
+    with st.expander("Filtered Work Order Detail", expanded=bool(st.session_state.get("pm_wo_filters"))):
+        display_df(filtered_snapshot_global, DETAIL_COLUMNS, max_rows=100)
+        download_df(filtered_snapshot_global[DETAIL_COLUMNS], "Export Filtered Work Orders", "pm_work_order_filtered_overview.xlsx", "pm_wo_overview_filtered_export")
+    with st.expander("Status Diagnostics", expanded=False):
+        diagnostics = snapshot.groupby(["status", "normalized_status"], dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False)
+        display_df(diagnostics, max_rows=100)
+        download_df(diagnostics, "Export Status Diagnostics", "pm_work_order_status_diagnostics.xlsx", "pm_wo_status_diag_export")
 
 with daily_tab:
     section_header("Daily Changes", "Status transitions are based on comparison between uploads.", "green")
@@ -307,44 +451,88 @@ with daily_tab:
 
 with tech_tab:
     section_header("Technician Performance", "Technician-level workload, outcomes, work type mix, and duration flags.", "blue")
-    tech = snapshot.copy()
+    technician_options = ["All Technicians"] + sorted(snapshot["pm_technician"].fillna("").replace("", "Unassigned").unique().tolist())
+    selected_technician = st.selectbox("Technician", technician_options, key="pm_wo_tech_select")
+    tech = filtered_snapshot_global.copy()
     tech["pm_technician"] = tech["pm_technician"].fillna("").replace("", "Unassigned")
+    if selected_technician != "All Technicians":
+        tech = tech[tech["pm_technician"].eq(selected_technician)]
     tech_summary = tech.groupby("pm_technician").agg(
         total=("work_order_id", "count"),
         open=("normalized_status", lambda s: int((s == "Open").sum())),
+        in_progress=("normalized_status", lambda s: int((s == "In Progress").sum())),
         completed=("normalized_status", lambda s: int((s == "Completed").sum())),
         canceled=("normalized_status", lambda s: int((s == "Canceled").sum())),
-        corrective=("work_type", lambda s: int(s.fillna("").str.contains("corrective", case=False).sum())),
-        planned=("work_type", lambda s: int(s.fillna("").str.contains("planned|maintenance|pm", case=False, regex=True).sum())),
-        avg_duration=("actual_work_duration_minutes", "mean"),
-        duration_flags=("duration_status", lambda s: int(s.isin(["Below Expected Range", "Above Expected Range", "Missing Duration", "Invalid Duration"]).sum())),
+        corrective=("work_type_group", lambda s: int((s == "Corrective").sum())),
+        planned=("work_type_group", lambda s: int((s == "Planned Maintenance").sum())),
+        avg_duration=("duration_minutes_display", "mean"),
+        median_duration=("duration_minutes_display", "median"),
+        duration_flags=("duration_status", lambda s: int(s.isin(["Below Expected Range", "Above Expected Range"]).sum())),
     ).reset_index()
-    display_df(tech_summary.sort_values("total", ascending=False), max_rows=200)
-    st.plotly_chart(px.bar(tech_summary, x="pm_technician", y=["corrective", "planned"], title="Corrective vs Planned by Technician", barmode="group"), use_container_width=True)
+    if not tech_summary.empty:
+        tech_summary["completion_rate"] = (tech_summary["completed"] / tech_summary["total"]).fillna(0).map(lambda v: f"{v:.1%}")
+        tech_summary["cancellation_rate"] = (tech_summary["canceled"] / tech_summary["total"]).fillna(0).map(lambda v: f"{v:.1%}")
+        tech_summary["average_duration"] = tech_summary["avg_duration"].map(format_duration)
+        tech_summary["median_duration_display"] = tech_summary["median_duration"].map(format_duration)
+    display_cols = ["pm_technician", "total", "open", "in_progress", "completed", "canceled", "corrective", "planned", "completion_rate", "cancellation_rate", "average_duration", "median_duration_display", "duration_flags"]
+    display_df(tech_summary.sort_values("total", ascending=False), display_cols, max_rows=200)
+    left, right = st.columns(2)
+    left.plotly_chart(px.bar(tech_summary, x="pm_technician", y=["corrective", "planned"], title="Corrective vs Planned by Technician", barmode="group"), use_container_width=True)
+    status_tech = tech.groupby(["pm_technician", "normalized_status"], dropna=False).size().reset_index(name="Count")
+    right.plotly_chart(px.bar(status_tech, x="pm_technician", y="Count", color="normalized_status", title="Completed vs Canceled by Technician", barmode="stack"), use_container_width=True)
+    st.subheader("Technician Work Orders")
+    display_df(tech, DETAIL_COLUMNS, max_rows=100)
     download_df(tech_summary, "Export Technician Summary", "pm_work_order_technician_summary.xlsx", "pm_wo_tech_export")
 
 with category_tab:
     section_header("Work Categories", "Break down work by category, subcategory, line of service, priority, and work type.", "green")
-    left, right = st.columns(2)
-    for col_name, holder, title in [
-        ("category", left, "Category"),
-        ("subcategory", right, "Subcategory"),
-    ]:
-        data = snapshot.groupby([col_name, "normalized_status"], dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False).head(40)
-        holder.plotly_chart(px.bar(data, x=col_name, y="Count", color="normalized_status", title=title), use_container_width=True)
-    los = snapshot.groupby(["line_of_service", "normalized_status"], dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False).head(40)
-    st.plotly_chart(px.bar(los, x="line_of_service", y="Count", color="normalized_status", title="Line of Service"), use_container_width=True)
-    category_choice = st.selectbox("Drill into Category", [""] + sorted(snapshot["category"].fillna("").replace("", "Blank").unique().tolist()))
+    mode = st.radio("Work Type Scope", ["Planned Maintenance Only", "Corrective Only", "All Work"], horizontal=True, key="pm_wo_category_mode")
+    top_n = st.selectbox("Show", [10, 20, 50, "All"], index=1, key="pm_wo_category_top")
+    category_df = filtered_snapshot_global.copy()
+    if mode == "Planned Maintenance Only":
+        category_df = category_df[category_df["work_type_group"].eq("Planned Maintenance")]
+    elif mode == "Corrective Only":
+        category_df = category_df[category_df["work_type_group"].eq("Corrective")]
+    category_df["category"] = category_df["category"].replace("", "Blank")
+    category_df["subcategory"] = category_df["subcategory"].replace("", "Blank")
+    category_df["line_of_service"] = category_df["line_of_service"].replace("", "Blank")
+    category_totals = category_df.groupby("category", dropna=False).size().reset_index(name="Total").sort_values("Total", ascending=False)
+    selected_categories = category_totals["category"].tolist() if top_n == "All" else category_totals["category"].head(int(top_n)).tolist()
+    category_chart = category_df[category_df["category"].isin(selected_categories)].groupby(["category", "normalized_status"], dropna=False).size().reset_index(name="Count")
+    st.plotly_chart(px.bar(category_chart, y="category", x="Count", color="normalized_status", title="Category Overview", orientation="h"), use_container_width=True)
+    category_choice = st.selectbox("Drill into Category", [""] + category_totals["category"].tolist())
     if category_choice:
-        category_records = snapshot[snapshot["category"].fillna("").replace("", "Blank").eq(category_choice)]
-        display_df(category_records, max_rows=100)
+        category_records = category_df[category_df["category"].eq(category_choice)]
+        sub = category_records.groupby(["subcategory", "normalized_status"], dropna=False).size().reset_index(name="Count")
+        st.plotly_chart(px.bar(sub, y="subcategory", x="Count", color="normalized_status", title=f"Subcategories for {category_choice}", orientation="h"), use_container_width=True)
+        subcategory_choice = st.selectbox("Optional Subcategory Drill-Down", [""] + sorted(category_records["subcategory"].unique().tolist()))
+        los_source = category_records if not subcategory_choice else category_records[category_records["subcategory"].eq(subcategory_choice)]
+        los = los_source.groupby(["line_of_service", "normalized_status"], dropna=False).size().reset_index(name="Count")
+        st.plotly_chart(px.bar(los, y="line_of_service", x="Count", color="normalized_status", title="Line of Service", orientation="h"), use_container_width=True)
+        summary = category_df.groupby(["category", "subcategory", "line_of_service", "work_type_group"], dropna=False).agg(
+            total=("work_order_id", "count"),
+            completed=("normalized_status", lambda s: int((s == "Completed").sum())),
+            canceled=("normalized_status", lambda s: int((s == "Canceled").sum())),
+            open=("normalized_status", lambda s: int((s == "Open").sum())),
+            in_progress=("normalized_status", lambda s: int((s == "In Progress").sum())),
+            technician_count=("pm_technician", "nunique"),
+        ).reset_index().sort_values("total", ascending=False)
+        display_df(summary, max_rows=100)
+        display_df(los_source, DETAIL_COLUMNS, max_rows=100)
         download_df(category_records, "Export Category Detail", "pm_work_order_category_detail.xlsx", "pm_wo_category_export")
 
 with duration_tab:
     section_header("Duration Review", "Flags are review indicators, not automatic proof of poor work.", "orange")
-    dur_counts = snapshot.groupby("duration_status", dropna=False).size().reset_index(name="Count")
-    st.plotly_chart(px.bar(dur_counts, x="duration_status", y="Count", title="Duration Status"), use_container_width=True)
-    flagged = snapshot[snapshot["duration_status"].isin(["Below Expected Range", "Above Expected Range", "Missing Duration", "Invalid Duration"])]
+    dur_source = filtered_snapshot_global.copy()
+    dur_counts = dur_source.groupby("duration_status", dropna=False).size().reset_index(name="Count")
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("Below Expected", int((dur_source["duration_status"] == "Below Expected Range").sum()))
+    d2.metric("Within Expected", int((dur_source["duration_status"] == "Within Expected Range").sum()))
+    d3.metric("Above Expected", int((dur_source["duration_status"] == "Above Expected Range").sum()))
+    d4.metric("Missing Duration", int((dur_source["duration_status"] == "Missing Duration").sum()))
+    d5.metric("No Rule", int((dur_source["duration_status"] == "No Rule Configured").sum()))
+    st.plotly_chart(px.bar(dur_counts, y="duration_status", x="Count", title="Duration Status", orientation="h"), use_container_width=True)
+    flagged = dur_source[dur_source["duration_status"].isin(["Below Expected Range", "Above Expected Range"])]
     display_df(
         flagged,
         [
@@ -355,7 +543,7 @@ with duration_tab:
             "subcategory",
             "line_of_service",
             "work_type",
-            "actual_work_duration_minutes",
+            "duration_display",
             "expected_min_minutes",
             "expected_max_minutes",
             "duration_status",
@@ -367,16 +555,41 @@ with duration_tab:
 
 with cancel_tab:
     section_header("Cancellations", "Review canceled work orders and stores with repeated cancellations.", "red")
-    canceled = snapshot[snapshot["normalized_status"].eq("Canceled")]
-    threshold = st.number_input("Repeat cancellation threshold", min_value=1, max_value=20, value=3, step=1)
+    canceled = filtered_snapshot_global[filtered_snapshot_global["normalized_status"].eq("Canceled")].copy()
+    with st.form("pm_wo_cancel_filters"):
+        c1, c2, c3, c4 = st.columns(4)
+        cancel_store = c1.text_input("Store Number")
+        cancel_tech = c2.text_input("Technician")
+        cancel_wo = c3.text_input("Work Order")
+        cancel_text = c4.text_input("Search notes / description")
+        threshold = st.number_input("Repeat cancellation threshold", min_value=1, max_value=20, value=3, step=1)
+        apply_cancel_filters = st.form_submit_button("Apply Cancellation Filters")
+    if apply_cancel_filters:
+        if cancel_store:
+            set_filter(store_number=cancel_store)
+        if cancel_tech:
+            set_filter(pm_technician=cancel_tech)
+        if cancel_wo:
+            set_filter(work_order_id=cancel_wo)
+        if cancel_text:
+            set_filter(short_description=cancel_text)
+        st.rerun()
     repeat_stores = canceled.groupby("store_number", dropna=False).size().reset_index(name="Canceled Count").sort_values("Canceled Count", ascending=False)
     repeat_stores = repeat_stores[repeat_stores["Canceled Count"] >= threshold]
     c1, c2 = st.columns(2)
     c1.metric("Canceled Work Orders", len(canceled))
     c2.metric("Repeat Cancellation Stores", len(repeat_stores))
     if not repeat_stores.empty:
-        st.plotly_chart(px.bar(repeat_stores.head(30), x="store_number", y="Canceled Count", title="Stores with Repeat Cancellations"), use_container_width=True)
-    display_df(canceled, max_rows=150)
+        st.plotly_chart(px.bar(repeat_stores.head(30), y="store_number", x="Canceled Count", title="Stores with Repeat Cancellations", orientation="h"), use_container_width=True)
+    cancel_summary = canceled.groupby("store_number", dropna=False).agg(
+        canceled_count=("work_order_id", "count"),
+        technicians_involved=("pm_technician", lambda s: ", ".join(sorted(set(v for v in s if v))[:5])),
+        oldest_created=("created_at", "min"),
+        newest_created=("created_at", "max"),
+        work_orders=("work_order_id", lambda s: ", ".join(s.astype(str).head(10))),
+    ).reset_index().sort_values("canceled_count", ascending=False)
+    display_df(cancel_summary, max_rows=100)
+    display_df(canceled, DETAIL_COLUMNS, max_rows=150)
     download_df(canceled, "Export Canceled Work Orders", "pm_work_order_canceled.xlsx", "pm_wo_cancel_export")
     download_df(repeat_stores, "Export Repeat Cancellation Stores", "pm_work_order_repeat_cancellations.xlsx", "pm_wo_repeat_cancel_export")
 
@@ -389,7 +602,7 @@ with explorer_tab:
     start = (page - 1) * page_size
     end = start + page_size
     st.caption(f"{len(filtered):,} records after filters. Page {page} of {total_pages}.")
-    display_df(filtered.iloc[start:end], max_rows=page_size)
+    display_df(filtered.iloc[start:end], DETAIL_COLUMNS, max_rows=page_size)
     selected_wo = st.selectbox("Open detail for work order", [""] + filtered["work_order_id"].astype(str).head(1000).tolist())
     if selected_wo:
         record = filtered[filtered["work_order_id"].astype(str).eq(selected_wo)].head(1).T.reset_index()

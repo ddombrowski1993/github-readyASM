@@ -279,9 +279,9 @@ def normalize_status(value):
         return "Canceled"
     if any(term in lowered for term in ["closed", "complete", "completed"]):
         return "Completed"
-    if any(term in lowered for term in ["progress", "accepted", "assigned", "pending", "dispatch"]):
+    if any(term in lowered for term in ["progress", "working", "on site", "in route"]):
         return "In Progress"
-    if any(term in lowered for term in ["open", "new"]):
+    if any(term in lowered for term in ["open", "new", "accepted", "assigned", "pending", "dispatch", "ready"]):
         return "Open"
     return "Other"
 
@@ -352,6 +352,8 @@ def normalize_records(df, mapping):
     end = out["actual_work_end"]
     derived = (end - start).dt.total_seconds() / 60
     out.loc[missing_duration & derived.notna() & (derived >= 0), "actual_work_duration_minutes"] = derived[missing_duration & derived.notna() & (derived >= 0)].round(2)
+    seconds_mask = out["actual_work_duration_minutes"].notna() & (out["actual_work_duration_minutes"] > 24 * 60)
+    out.loc[seconds_mask, "actual_work_duration_minutes"] = (out.loc[seconds_mask, "actual_work_duration_minutes"] / 60).round(2)
     out["source_hash"] = out.apply(lambda row: row_hash(row), axis=1)
     return out
 
@@ -760,6 +762,7 @@ def query_snapshot_df(limit=None):
 def snapshot_to_dict(row):
     return {
         "work_order_id": row.work_order_id,
+        "record_number": row.record_number,
         "store_number": row.store_number,
         "location": row.location,
         "created_at": row.created_at_source,
