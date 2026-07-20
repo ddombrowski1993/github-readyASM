@@ -240,6 +240,7 @@ def _init_db_for_schema(url, schema):
     Base.metadata.create_all(engine)
     ensure_undo_table(engine)
     ensure_pmt_assignment_changes_table(engine)
+    ensure_pm_work_order_analytics_tables(engine)
     ensure_performance_indexes(engine)
     ensure_schema_updates(engine)
     seed_core_data()
@@ -315,6 +316,42 @@ def _ensure_pmt_assignment_changes_table_for_engine(engine):
         conn.execute(text("create index if not exists ix_pmt_assignment_changes_store on pmt_assignment_changes (store_id, changed_at)"))
         conn.execute(text("create index if not exists ix_pmt_assignment_changes_store_number on pmt_assignment_changes (store_number)"))
         conn.execute(text("create index if not exists ix_pmt_assignment_changes_batch_id on pmt_assignment_changes (batch_id)"))
+
+
+def ensure_pm_work_order_analytics_tables(engine=None):
+    if engine is not None:
+        _ensure_pm_work_order_analytics_tables_for_engine(engine)
+        return True
+    schema = current_account_schema() or ""
+    _ensure_pm_work_order_analytics_tables_for_schema(get_database_url(), schema)
+    return True
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_pm_work_order_analytics_tables_for_schema(url, schema):
+    engine = get_engine(url, schema=schema or None)
+    _ensure_pm_work_order_analytics_tables_for_engine(engine)
+    return True
+
+
+def _ensure_pm_work_order_analytics_tables_for_engine(engine):
+    Base.metadata.create_all(engine)
+    index_statements = [
+        "create index if not exists ix_pm_wo_runs_workspace_uploaded on pm_work_order_upload_runs (workspace_key, uploaded_at)",
+        "create index if not exists ix_pm_wo_snapshot_workspace_status on pm_work_order_snapshots (workspace_key, normalized_status)",
+        "create index if not exists ix_pm_wo_snapshot_workspace_store on pm_work_order_snapshots (workspace_key, store_number)",
+        "create index if not exists ix_pm_wo_snapshot_workspace_tech on pm_work_order_snapshots (workspace_key, pm_technician)",
+        "create index if not exists ix_pm_wo_snapshot_workspace_category on pm_work_order_snapshots (workspace_key, category)",
+        "create index if not exists ix_pm_wo_snapshot_workspace_work_type on pm_work_order_snapshots (workspace_key, work_type)",
+        "create index if not exists ix_pm_wo_events_workspace_detected on pm_work_order_change_events (workspace_key, detected_at)",
+        "create index if not exists ix_pm_wo_events_workspace_type on pm_work_order_change_events (workspace_key, event_type)",
+        "create index if not exists ix_pm_wo_events_workspace_wo on pm_work_order_change_events (workspace_key, work_order_id)",
+        "create index if not exists ix_pm_wo_rules_workspace_active on pm_work_order_duration_rules (workspace_key, active)",
+    ]
+    with engine.begin() as conn:
+        _apply_workspace_search_path(conn)
+        for statement in index_statements:
+            conn.execute(text(statement))
 
 
 def ensure_performance_indexes(engine):

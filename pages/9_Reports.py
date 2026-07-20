@@ -889,6 +889,11 @@ def report_filename(report, ext):
 page_header("Reports", "Analysis reports for performance, workload, problems, follow-ups, schedules, and manager updates.")
 st.info("Other pages export records. The Reports page explains what the records mean and creates shareable PDF/Excel reports.")
 
+with st.container(border=True):
+    st.subheader("PM Work Order Analytics")
+    st.caption("Upload daily work-order exports, compare changes between uploads, and review PM technician activity, cancellations, categories, and duration flags.")
+    st.page_link("pages/19_PM_Work_Order_Analytics.py", label="Open PM Work Order Analytics")
+
 with st.expander("Upload Weekly PM Report", expanded=False):
     st.caption("This keeps the existing PM completion import flow. Imported rows feed the PM Completion report.")
     week_end = st.date_input("Week ending", value=date.today(), key="pm_report_week")

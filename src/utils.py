@@ -1094,6 +1094,7 @@ def sidebar_nav():
         st.sidebar.page_link("pages/8_Deferred_Work_Orders.py", label="Deferred Work Orders Roll-Up")
         st.sidebar.page_link("pages/11_Site_Visits.py", label="Site Visits Roll-Up")
         st.sidebar.page_link("pages/9_Reports.py", label="Reports")
+        st.sidebar.page_link("pages/19_PM_Work_Order_Analytics.py", label="PM Work Order Analytics")
         st.sidebar.page_link("pages/16_Weather.py", label="Weather")
         st.sidebar.page_link("pages/18_My_Profile.py", label="My Profile")
         st.sidebar.page_link("pages/15_Help_How_It_Works.py", label="Help / How To")
@@ -1115,6 +1116,7 @@ def sidebar_nav():
         st.sidebar.page_link("pages/6_Call_Off_PTO.py", label="Call Off / PTO")
         st.sidebar.page_link("pages/7_Follow_Ups.py", label="Follow-Ups")
         st.sidebar.page_link("pages/9_Reports.py", label="Reports")
+        st.sidebar.page_link("pages/19_PM_Work_Order_Analytics.py", label="PM Work Order Analytics")
         st.sidebar.page_link("pages/18_My_Profile.py", label="My Profile")
         if account_role == "Admin":
             st.sidebar.page_link("pages/10_Settings.py", label="Settings")

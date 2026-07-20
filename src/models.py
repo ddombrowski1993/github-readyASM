@@ -332,6 +332,99 @@ class PMTAssignmentChange(Base):
     batch_id = Column(String(80))
 
 
+class PMWorkOrderUploadRun(Base, TimestampMixin):
+    __tablename__ = "pm_work_order_upload_runs"
+    id = Column(Integer, primary_key=True)
+    workspace_key = Column(String(120), nullable=False)
+    uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    uploaded_by = Column(String(220))
+    original_filename = Column(String(255))
+    file_hash = Column(String(128))
+    worksheet_name = Column(String(180))
+    row_count = Column(Integer, default=0)
+    work_order_count = Column(Integer, default=0)
+    new_count = Column(Integer, default=0)
+    changed_count = Column(Integer, default=0)
+    newly_closed_count = Column(Integer, default=0)
+    newly_canceled_count = Column(Integer, default=0)
+    validation_status = Column(String(80), default="Baseline")
+    notes = Column(Text)
+
+
+class PMWorkOrderSnapshot(Base, TimestampMixin):
+    __tablename__ = "pm_work_order_snapshots"
+    __table_args__ = (UniqueConstraint("workspace_key", "work_order_id", name="uq_pm_work_order_snapshot_workspace_wo"),)
+    id = Column(Integer, primary_key=True)
+    workspace_key = Column(String(120), nullable=False)
+    work_order_id = Column(String(160), nullable=False)
+    record_number = Column(String(160))
+    store_number = Column(String(80))
+    location = Column(String(255))
+    created_at_source = Column(DateTime)
+    original_status = Column(String(160))
+    normalized_status = Column(String(80))
+    priority = Column(String(80))
+    assigned_to = Column(String(220))
+    category = Column(String(180))
+    subcategory = Column(String(180))
+    line_of_service = Column(String(180))
+    short_description = Column(Text)
+    work_type = Column(String(120))
+    pm_technician = Column(String(220))
+    ms_technician = Column(String(220))
+    hr_technician = Column(String(220))
+    trade = Column(String(160))
+    state_province = Column(String(80))
+    additional_comments = Column(Text)
+    close_notes = Column(Text)
+    closed_by = Column(String(220))
+    work_notes = Column(Text)
+    actual_travel_duration_minutes = Column(Float)
+    actual_travel_start = Column(DateTime)
+    actual_work_duration_minutes = Column(Float)
+    actual_work_start = Column(DateTime)
+    actual_work_end = Column(DateTime)
+    duration_status = Column(String(80))
+    expected_min_minutes = Column(Float)
+    expected_max_minutes = Column(Float)
+    first_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_upload_run_id = Column(Integer, ForeignKey("pm_work_order_upload_runs.id"))
+    present_in_latest_upload = Column(Boolean, default=True, nullable=False)
+    source_hash = Column(String(128))
+
+
+class PMWorkOrderChangeEvent(Base, TimestampMixin):
+    __tablename__ = "pm_work_order_change_events"
+    id = Column(Integer, primary_key=True)
+    workspace_key = Column(String(120), nullable=False)
+    upload_run_id = Column(Integer, ForeignKey("pm_work_order_upload_runs.id"))
+    work_order_id = Column(String(160), nullable=False)
+    store_number = Column(String(80))
+    pm_technician = Column(String(220))
+    event_type = Column(String(80), nullable=False)
+    field_name = Column(String(120))
+    previous_value = Column(Text)
+    new_value = Column(Text)
+    detected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PMWorkOrderDurationRule(Base, TimestampMixin):
+    __tablename__ = "pm_work_order_duration_rules"
+    id = Column(Integer, primary_key=True)
+    workspace_key = Column(String(120), nullable=False)
+    rule_name = Column(String(180), nullable=False)
+    category = Column(String(180))
+    subcategory = Column(String(180))
+    line_of_service = Column(String(180))
+    work_type = Column(String(120))
+    short_description_pattern = Column(String(255))
+    min_minutes = Column(Float)
+    max_minutes = Column(Float)
+    active = Column(Boolean, default=True, nullable=False)
+    notes = Column(Text)
+
+
 class UploadedFile(Base):
     __tablename__ = "uploaded_files"
     id = Column(Integer, primary_key=True)
