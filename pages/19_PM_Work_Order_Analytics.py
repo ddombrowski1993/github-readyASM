@@ -123,9 +123,22 @@ def display_minutes(value):
     if value is None or pd.isna(value):
         return None
     minutes = float(value)
-    if minutes > 24 * 60:
+    if minutes > 12 * 60:
         minutes = minutes / 60
     return round(minutes, 2)
+
+
+def inferred_duration_minutes(row):
+    raw_minutes = display_minutes(row.get("actual_work_duration_minutes"))
+    start = pd.to_datetime(row.get("actual_work_start"), errors="coerce")
+    end = pd.to_datetime(row.get("actual_work_end"), errors="coerce")
+    if pd.notna(start) and pd.notna(end):
+        derived = (end - start).total_seconds() / 60
+        if 0 <= derived <= 24 * 60:
+            if raw_minutes is None:
+                return round(derived, 2)
+            return round(derived, 2) if abs(derived - raw_minutes) > max(10, derived * 0.25) else raw_minutes
+    return raw_minutes
 
 
 def safe_detail_df(df, required_columns=None):
@@ -156,7 +169,7 @@ def prepare_snapshot(df):
     prepared["normalized_status"] = prepared["status"].map(normalize_status)
     prepared["store_number"] = prepared["store_number"].astype(str).str.replace(r"\.0$", "", regex=True)
     prepared["work_type_group"] = prepared["work_type"].map(work_type_group)
-    prepared["duration_minutes_display"] = prepared["actual_work_duration_minutes"].map(display_minutes)
+    prepared["duration_minutes_display"] = prepared.apply(inferred_duration_minutes, axis=1)
     prepared["duration_display"] = prepared["duration_minutes_display"].map(format_duration)
     return prepared
 
@@ -183,10 +196,10 @@ def apply_saved_filters(df):
     for col, value in filters.items():
         if col not in filtered.columns:
             continue
-        if col in {"store_number", "work_order_id", "pm_technician", "short_description", "category", "subcategory", "line_of_service"}:
-            filtered = filtered[filtered[col].fillna("").astype(str).str.contains(str(value), case=False, na=False)]
-        elif isinstance(value, list):
+        if isinstance(value, list):
             filtered = filtered[filtered[col].isin(value)]
+        elif col in {"store_number", "work_order_id", "pm_technician", "short_description", "category", "subcategory", "line_of_service"}:
+            filtered = filtered[filtered[col].fillna("").astype(str).str.contains(str(value), case=False, na=False)]
         else:
             filtered = filtered[filtered[col].eq(value)]
     return filtered
@@ -222,7 +235,8 @@ def filtered_snapshot(df):
     with st.form("pm_wo_explorer_filters"):
         c1, c2, c3, c4 = st.columns(4)
         status = c1.multiselect("Normalized Status", sorted(filtered["normalized_status"].dropna().unique().tolist()))
-        technician = c2.text_input("Technician search")
+        technician_options = sorted(filtered["pm_technician"].fillna("").replace("", "Unassigned").unique().tolist())
+        technician = c2.multiselect("PM Technician", technician_options)
         work_type = c3.multiselect("Work Type", sorted(filtered["work_type_group"].dropna().unique().tolist()))
         priority = c4.multiselect("Priority", sorted(filtered["priority"].fillna("").replace("", "Blank").unique().tolist()))
         c5, c6, c7, c8 = st.columns(4)
@@ -389,6 +403,14 @@ counts = {
 
 render_active_filters()
 render_schema_diagnostic(snapshot)
+if st.session_state.get("pm_wo_filters"):
+    with st.container(border=True):
+        st.subheader("Active Filter Drill-Down")
+        st.caption("These records match the current filters. This stays visible after filtering even though Streamlit resets tabs to Overview.")
+        display_df(filtered_snapshot_global, DETAIL_COLUMNS, max_rows=150)
+        active_export, active_missing = safe_detail_df(filtered_snapshot_global)
+        if not active_missing:
+            download_df(active_export, "Export Active Filter Detail", "pm_work_order_active_filter_detail.xlsx", "pm_wo_active_filter_export")
 
 overview_tab, daily_tab, tech_tab, category_tab, duration_tab, cancel_tab, explorer_tab, history_tab, settings_tab = st.tabs(
     [
@@ -420,7 +442,8 @@ with overview_tab:
     status_total = counts.get("Open", 0) + counts.get("In Progress", 0) + counts.get("Completed", 0) + counts.get("Canceled", 0) + counts.get("Other", 0)
     if status_total != counts.get("Total", 0):
         st.warning(f"Status reconciliation mismatch: status groups total {status_total:,}, but total work orders is {counts.get('Total', 0):,}.")
-    b1, b2, b3, b4, b5, b6 = st.columns(6)
+    b0, b1, b2, b3, b4, b5, b6 = st.columns(7)
+    b0.caption("")
     if b1.button("View Open Work Orders", key="view_open"):
         set_filter(normalized_status="Open")
         st.rerun()
@@ -433,17 +456,20 @@ with overview_tab:
     if b4.button("View Canceled", key="view_canceled"):
         set_filter(normalized_status="Canceled")
         st.rerun()
-    if b5.button("View Corrective", key="view_corrective"):
-        set_filter(work_type_group="Corrective")
-        st.rerun()
-    if b6.button("View Planned PM", key="view_planned"):
-        set_filter(work_type_group="Planned Maintenance")
-        st.rerun()
+    b5.caption("")
+    b6.caption("")
     c1, c2 = st.columns(2)
     status_counts = filtered_snapshot_global.groupby("normalized_status", dropna=False).size().reset_index(name="Count")
     c1.plotly_chart(px.pie(status_counts, values="Count", names="normalized_status", title="Status Overview"), use_container_width=True)
     work_type_counts = filtered_snapshot_global.groupby("work_type_group", dropna=False).size().reset_index(name="Count").sort_values("Count", ascending=False)
     c2.plotly_chart(px.bar(work_type_counts, x="work_type_group", y="Count", title="Work Type Breakdown"), use_container_width=True)
+    wt1, wt2 = st.columns(2)
+    if wt1.button("View Corrective Work Orders", key="view_corrective"):
+        set_filter(work_type_group="Corrective")
+        st.rerun()
+    if wt2.button("View Planned Maintenance Work Orders", key="view_planned"):
+        set_filter(work_type_group="Planned Maintenance")
+        st.rerun()
     st.subheader("Corrective vs Planned Maintenance")
     cvp_counts = filtered_snapshot_global.groupby(["pm_technician", "work_type_group"], dropna=False).size().reset_index(name="Count")
     st.plotly_chart(px.bar(cvp_counts, x="pm_technician", y="Count", color="work_type_group", title="Work Type by PM Technician"), use_container_width=True)
