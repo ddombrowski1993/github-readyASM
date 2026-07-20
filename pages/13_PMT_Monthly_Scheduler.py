@@ -3858,9 +3858,34 @@ with tab_manage:
                 count_cols = st.columns(3)
                 count_cols[0].metric("Assigned to PMT", total_assigned)
                 count_cols[1].metric("Available to add", available_to_add)
-                count_cols[2].metric("Showing", min(int(add_limit), len(candidate_stores)))
-                candidate_view = candidate_stores.head(int(add_limit)).copy()
-                candidate_view["Add"] = False
+                bulk_store_options = candidate_stores["store_number"].astype(str).tolist()
+                bulk_cols = st.columns([0.45, 0.55])
+                bulk_selected_stores = bulk_cols[0].multiselect(
+                    "Select assigned stores",
+                    bulk_store_options,
+                    key=f"pmt_bulk_select_stores_{selected_run}_{add_employee}",
+                )
+                pasted_store_text = bulk_cols[1].text_area(
+                    "Paste store numbers",
+                    placeholder="Paste store numbers separated by spaces, commas, or new lines",
+                    height=96,
+                    key=f"pmt_bulk_paste_stores_{selected_run}_{add_employee}",
+                )
+                pasted_store_keys = {
+                    key(value)
+                    for value in re.split(r"[\s,;|]+", clean(pasted_store_text))
+                    if clean(value)
+                }
+                selected_store_keys = {key(value) for value in bulk_selected_stores}
+                precheck_keys = selected_store_keys | pasted_store_keys
+                matched_precheck = candidate_stores[candidate_stores["store_number"].astype(str).apply(lambda value: key(value) in precheck_keys)].copy()
+                missing_pasted = sorted(pasted_store_keys - set(candidate_stores["store_number"].astype(str).apply(key))) if pasted_store_keys else []
+                if missing_pasted:
+                    st.warning("These pasted store numbers are not assigned to this PMT or are hidden by the current review filter: " + ", ".join(missing_pasted[:20]))
+                base_view = candidate_stores.head(int(add_limit)).copy()
+                candidate_view = pd.concat([matched_precheck, base_view], ignore_index=True).drop_duplicates("store_id", keep="first")
+                candidate_view["Add"] = candidate_view["store_number"].astype(str).apply(lambda value: key(value) in precheck_keys)
+                count_cols[2].metric("Showing", len(candidate_view))
                 manual_add_columns = ["Add", "already_scheduled", "scheduled_employee_id", "scheduled_technician", "scheduled_date", "store_id", "store_number", "city", "state", "distance_from_home", "address"]
                 edited_candidates = st.data_editor(
                     candidate_view[manual_add_columns],
