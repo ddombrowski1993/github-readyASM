@@ -7,8 +7,8 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import func, select
 
+from src import database as db
 from src.auth import effective_account_slug, get_effective_account_context
-from src.database import ensure_pm_work_order_analytics_tables, session_scope
 from src.models import (
     PMWorkOrderChangeEvent,
     PMWorkOrderDurationRule,
@@ -160,6 +160,23 @@ COMPARE_FIELDS = [
 
 COMPLETED_STATUSES = {"Completed"}
 CANCELED_STATUSES = {"Canceled"}
+
+
+def ensure_analytics_ready():
+    ensure_fn = getattr(db, "ensure_pm_work_order_analytics_tables", None)
+    if callable(ensure_fn):
+        return ensure_fn()
+    init_fn = getattr(db, "init_db", None)
+    if callable(init_fn):
+        return init_fn()
+    raise RuntimeError("PM Work Order Analytics database setup is unavailable. The app database utilities did not load correctly.")
+
+
+def analytics_session(action_label="PM Work Order Analytics"):
+    session_fn = getattr(db, "session_scope", None)
+    if not callable(session_fn):
+        raise RuntimeError("Database session manager is unavailable. The PM Work Order Analytics page cannot safely read or write data.")
+    return session_fn(action_label=action_label)
 
 
 def workspace_key():
@@ -345,9 +362,9 @@ def dedupe_work_orders(df):
 
 
 def load_duration_rules():
-    ensure_pm_work_order_analytics_tables()
+    ensure_analytics_ready()
     key = workspace_key()
-    with session_scope() as session:
+    with analytics_session("PM work order duration rules") as session:
         rows = session.execute(
             select(PMWorkOrderDurationRule).where(
                 PMWorkOrderDurationRule.workspace_key == key,
@@ -550,12 +567,12 @@ def event_from_row(row, event_type, field_name=None, previous_value=None, new_va
 
 
 def import_and_compare(df, filename, file_bytes, worksheet_name):
-    ensure_pm_work_order_analytics_tables()
+    ensure_analytics_ready()
     key = workspace_key()
     now = datetime.utcnow()
     current = apply_duration_rules(dedupe_work_orders(df[df["work_order_id"].ne("")].copy()))
     file_hash = hashlib.sha256(file_bytes).hexdigest()
-    with session_scope() as session:
+    with analytics_session("PM work order upload") as session:
         previous_upload = latest_upload_run(session, key)
         previous_df = snapshot_dataframe(session, key)
         baseline = previous_upload is None or previous_df.empty
@@ -677,9 +694,9 @@ def nullable_float(value):
 
 
 def query_snapshot_df(limit=None):
-    ensure_pm_work_order_analytics_tables()
+    ensure_analytics_ready()
     key = workspace_key()
-    with session_scope() as session:
+    with analytics_session("PM work order snapshot read") as session:
         query = select(PMWorkOrderSnapshot).where(PMWorkOrderSnapshot.workspace_key == key)
         if limit:
             query = query.limit(int(limit))
@@ -719,9 +736,9 @@ def snapshot_to_dict(row):
 
 
 def query_events_df(days=None, upload_run_id=None):
-    ensure_pm_work_order_analytics_tables()
+    ensure_analytics_ready()
     key = workspace_key()
-    with session_scope() as session:
+    with analytics_session("PM work order events read") as session:
         query = select(PMWorkOrderChangeEvent).where(PMWorkOrderChangeEvent.workspace_key == key)
         if upload_run_id:
             query = query.where(PMWorkOrderChangeEvent.upload_run_id == int(upload_run_id))
@@ -748,9 +765,9 @@ def query_events_df(days=None, upload_run_id=None):
 
 
 def upload_runs_df():
-    ensure_pm_work_order_analytics_tables()
+    ensure_analytics_ready()
     key = workspace_key()
-    with session_scope() as session:
+    with analytics_session("PM work order upload history read") as session:
         rows = session.execute(
             select(PMWorkOrderUploadRun)
             .where(PMWorkOrderUploadRun.workspace_key == key)
@@ -777,9 +794,9 @@ def upload_runs_df():
 
 
 def save_duration_rule(rule):
-    ensure_pm_work_order_analytics_tables()
+    ensure_analytics_ready()
     key = workspace_key()
-    with session_scope() as session:
+    with analytics_session("PM work order duration rule") as session:
         session.add(
             PMWorkOrderDurationRule(
                 workspace_key=key,
@@ -797,9 +814,9 @@ def save_duration_rule(rule):
 
 
 def summary_counts():
-    ensure_pm_work_order_analytics_tables()
+    ensure_analytics_ready()
     key = workspace_key()
-    with session_scope() as session:
+    with analytics_session("PM work order summary read") as session:
         total = session.execute(select(func.count()).select_from(PMWorkOrderSnapshot).where(PMWorkOrderSnapshot.workspace_key == key)).scalar() or 0
         statuses = session.execute(
             select(PMWorkOrderSnapshot.normalized_status, func.count())

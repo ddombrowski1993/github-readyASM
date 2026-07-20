@@ -13,6 +13,7 @@ from src.pm_work_order_analytics import (
     REQUIRED_FIELDS,
     apply_duration_rules,
     detect_column_mapping,
+    ensure_analytics_ready,
     import_and_compare,
     load_duration_rules,
     normalize_records,
@@ -32,6 +33,14 @@ from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, pa
 apply_theme()
 sidebar_nav()
 ensure_database_or_stop()
+try:
+    ensure_analytics_ready()
+except Exception as exc:
+    page_header("PM Work Order Analytics", "Database setup required")
+    st.error("PM Work Order Analytics database tables have not been initialized for this workspace.")
+    st.info("Open the app after the latest deployment finishes, or have an administrator run the normal database initialization.")
+    st.code(str(exc))
+    st.stop()
 
 page_header(
     "PM Work Order Analytics",
