@@ -330,6 +330,17 @@ ASSIGNMENT_COLUMN_CANDIDATES = {
 }
 
 
+SCHEDULE_COLUMN_CANDIDATES = {
+    "technician_name": ["PMT", "Technician", "Technician Name", "Tech", "Employee", "Employee Name", "Assigned PMT"],
+    "store_number": ["Site Number", "Store Number", "Store #", "Store", "Location Number", "Location", "Site", "STR", "STR #"],
+    "schedule_date": ["Schedule Date", "Scheduled Date", "Date", "Visit Date", "PMT Date", "Planned Date"],
+    "schedule_month": ["Month", "Schedule Month", "PMT Month", "Cycle Month"],
+    "sequence_number": ["Stop", "Stop Number", "Sequence", "Sequence Number", "Route Order", "Order"],
+    "status": ["Status", "Schedule Status", "State"],
+    "notes": ["Notes", "Comments", "Reason", "Schedule Notes"],
+}
+
+
 ADDRESS_COLUMN_CANDIDATES = {
     "technician_name": ["Name", "Full Name", "Employee Name", "Technician", "Technician Name", "Tech", "Tech Name", "PMT", "PMT Name"],
     "home_address": ["Address", "Home Address", "Street Address", "Technician Address", "Employee Address", "Starting Address"],
@@ -342,7 +353,12 @@ ADDRESS_COLUMN_CANDIDATES = {
 
 
 def best_column(original_columns, target, context):
-    candidates = ADDRESS_COLUMN_CANDIDATES if context == "address" else ASSIGNMENT_COLUMN_CANDIDATES
+    if context == "address":
+        candidates = ADDRESS_COLUMN_CANDIDATES
+    elif context == "schedule":
+        candidates = SCHEDULE_COLUMN_CANDIDATES
+    else:
+        candidates = ASSIGNMENT_COLUMN_CANDIDATES
     return default_from_candidates(original_columns, candidates.get(target, [])) or default_column(original_columns, target)
 
 
@@ -1582,6 +1598,276 @@ def apply_pmt_reflow_preview(run_id, preview_df, reason):
                 item.completion_notes = " | ".join([part for part in note_parts if part])
             updated += 1
     log_action("pmt schedule manager adjustment", "pmt_schedule_runs", int(run_id), f"{updated} PMT items updated. Reason: {reason}")
+    return updated
+
+
+def normalize_existing_pmt_schedule_upload(raw_df, mapping):
+    if raw_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    employees, employee_match = employee_lookup()
+    stores = safe_query(
+        """
+        select id as store_id, store_number, address, city, state, zip, latitude, longitude, active
+        from stores
+        """
+    )
+    store_lookup = {}
+    if not stores.empty:
+        for store_row in stores.to_dict("records"):
+            for store_key in store_number_keys(store_row["store_number"]):
+                store_lookup.setdefault(store_key, store_row)
+    rows = []
+    problems = []
+    for index, source_row in raw_df.fillna("").iterrows():
+        tech_name = clean(source_row.get(mapping.get("technician_name", ""), ""))
+        store_number = clean(source_row.get(mapping.get("store_number", ""), ""))
+        if not tech_name and not store_number:
+            continue
+        employee = match_employee_name(tech_name, employee_match)
+        store = None
+        for store_key in store_number_keys(store_number):
+            store = store_lookup.get(store_key)
+            if store is not None:
+                break
+        schedule_date = scalar_date(source_row.get(mapping.get("schedule_date", ""), ""))
+        schedule_month = scalar_date(source_row.get(mapping.get("schedule_month", ""), ""))
+        if schedule_date is None and schedule_month is not None:
+            schedule_date = first_workday(month_start(schedule_month), employee_id=int(employee["id"])) if employee else month_start(schedule_month)
+        sequence_number = scalar_int(source_row.get(mapping.get("sequence_number", ""), ""), 0)
+        if employee is None:
+            problems.append({"Row": index + 2, "Problem": "Technician not matched to an active employee", "Value": tech_name})
+        if store is None:
+            problems.append({"Row": index + 2, "Problem": "Store not found in the master store list", "Value": store_number})
+        elif not bool(store.get("active", True)):
+            problems.append({"Row": index + 2, "Problem": "Store exists but is inactive", "Value": store.get("store_number", store_number)})
+        if schedule_date is None:
+            problems.append({"Row": index + 2, "Problem": "Schedule date or month could not be read", "Value": clean(source_row.get(mapping.get("schedule_date", ""), "")) or clean(source_row.get(mapping.get("schedule_month", ""), ""))})
+        if employee is None or store is None or schedule_date is None:
+            continue
+        rows.append(
+            {
+                "employee_id": int(employee["id"]),
+                "technician": employee["full_name"],
+                "store_id": int(store["store_id"]),
+                "store_number": clean(store["store_number"]),
+                "address": clean(store.get("address", "")),
+                "city": clean(store.get("city", "")),
+                "state": clean(store.get("state", "")),
+                "zip": clean(store.get("zip", "")),
+                "latitude": store.get("latitude"),
+                "longitude": store.get("longitude"),
+                "schedule_date": schedule_date,
+                "month_start": month_start(schedule_date),
+                "month": month_label(month_start(schedule_date)),
+                "sequence_number": sequence_number,
+                "status": clean(source_row.get(mapping.get("status", ""), "")) or "Scheduled",
+                "notes": clean(source_row.get(mapping.get("notes", ""), "")),
+            }
+        )
+    normalized = pd.DataFrame(rows)
+    if not normalized.empty:
+        normalized = normalized.sort_values(["employee_id", "schedule_date", "sequence_number", "store_number"]).reset_index(drop=True)
+        normalized["sequence_number"] = normalized.groupby(["employee_id", "month_start"]).cumcount() + 1
+        duplicate_mask = normalized.duplicated(["employee_id", "store_id", "month_start"], keep=False)
+        if duplicate_mask.any():
+            for _, row in normalized.loc[duplicate_mask].drop_duplicates(["employee_id", "store_id", "month_start"]).iterrows():
+                problems.append(
+                    {
+                        "Row": "",
+                        "Problem": "Duplicate technician/store/month in uploaded schedule; first row will be used",
+                        "Value": f"{row['technician']} - Store {row['store_number']} - {row['month']}",
+                    }
+                )
+            normalized = normalized.drop_duplicates(["employee_id", "store_id", "month_start"], keep="first")
+    return normalized, pd.DataFrame(problems)
+
+
+def import_existing_pmt_schedule(normalized, run_name):
+    if normalized.empty:
+        return None
+    start_date = normalized["schedule_date"].min()
+    end_date = normalized["schedule_date"].max()
+    months = (end_date.year - start_date.year) * 12 + end_date.month - start_date.month + 1
+    cycle_label = f"{month_label(month_start(start_date))} - {month_label(month_start(end_date))}"
+    with session_scope() as session:
+        run = PMTScheduleRun(
+            run_name=run_name,
+            cycle_start=month_start(start_date),
+            cycle_end=end_date,
+            months=months,
+            default_monthly_target=0,
+            direction="Imported",
+            schedule_mode="Imported existing PMT schedule",
+            distance_method="Imported order",
+            technician_count=int(normalized["employee_id"].nunique()),
+            store_count=len(normalized),
+            unscheduled_count=0,
+            created_by=st.session_state.get("username", ""),
+            notes=f"Imported existing PMT schedule | {cycle_label}",
+        )
+        session.add(run)
+        session.flush()
+        schedule = Schedule(
+            schedule_name=run_name,
+            schedule_type="PMT Imported Schedule",
+            start_date=month_start(start_date),
+            end_date=end_date,
+            status="Published",
+            created_by=st.session_state.get("username", ""),
+            notes=f"Schedule Source: Imported Existing PMT Schedule | Run ID: {run.id} | Cycle: {cycle_label}",
+        )
+        session.add(schedule)
+        session.flush()
+        for _, row in normalized.iterrows():
+            session.add(
+                ScheduleItem(
+                    schedule_id=schedule.id,
+                    schedule_date=row["schedule_date"],
+                    sequence_number=int(row["sequence_number"]),
+                    store_id=int(row["store_id"]),
+                    employee_id=int(row["employee_id"]),
+                    work_type="PMT",
+                    status=clean(row.get("status", "")) or "Scheduled",
+                    schedule_source="Imported Existing PMT Schedule",
+                    pmt_schedule_run_id=run.id,
+                    cycle_label=cycle_label,
+                    completion_notes=clean(row.get("notes", "")),
+                )
+            )
+        run_id = run.id
+    log_action("pmt existing schedule imported", "pmt_schedule_runs", int(run_id), f"{len(normalized)} PMT schedule items imported")
+    return {"run_id": run_id, "created": len(normalized)}
+
+
+def assigned_pmt_store_candidates(employee_id, run_id=None):
+    params = {"employee_id": int(employee_id)}
+    run_filter = ""
+    if run_id is not None:
+        params["run_id"] = int(run_id)
+        run_filter = """
+          and not exists (
+              select 1 from schedule_items si
+              where si.pmt_schedule_run_id = :run_id
+                and si.store_id = s.id
+                and si.work_type = 'PMT'
+                and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+          )
+        """
+    df = safe_query(
+        f"""
+        select s.id as store_id, s.store_number, s.address, s.city, s.state, s.zip,
+               s.latitude, s.longitude, e.full_name as technician,
+               e.home_latitude, e.home_longitude
+        from stores s
+        join employees e on e.id = s.assigned_pmt_employee_id
+        where s.active = true
+          and s.assigned_pmt_employee_id = :employee_id
+          {run_filter}
+        order by s.store_number
+        """,
+        params,
+    )
+    if df.empty:
+        return df
+    df = df.copy()
+    df["distance_from_home"] = df.apply(
+        lambda row: round(haversine_miles(float(row["home_latitude"]), float(row["home_longitude"]), float(row["latitude"]), float(row["longitude"])), 1)
+        if pd.notna(row.get("home_latitude"))
+        and pd.notna(row.get("home_longitude"))
+        and pd.notna(row.get("latitude"))
+        and pd.notna(row.get("longitude"))
+        else None,
+        axis=1,
+    )
+    return df
+
+
+def add_assigned_stores_to_pmt_run(run_id, employee_id, store_ids, target_month, notes=""):
+    if not store_ids:
+        return 0
+    target_month = month_start(target_month)
+    schedule_date = first_workday(target_month, employee_id=int(employee_id))
+    added = 0
+    with session_scope() as session:
+        schedule_id = session.scalar(
+            select(ScheduleItem.schedule_id)
+            .where(ScheduleItem.pmt_schedule_run_id == int(run_id))
+            .order_by(ScheduleItem.schedule_id)
+        )
+        run = session.get(PMTScheduleRun, int(run_id))
+        if schedule_id is None:
+            return 0
+        max_sequence = session.scalar(
+            select(ScheduleItem.sequence_number)
+            .where(
+                ScheduleItem.pmt_schedule_run_id == int(run_id),
+                ScheduleItem.employee_id == int(employee_id),
+                ScheduleItem.work_type == "PMT",
+                ScheduleItem.schedule_date >= target_month,
+                ScheduleItem.schedule_date < add_months(target_month, 1),
+            )
+            .order_by(ScheduleItem.sequence_number.desc())
+        ) or 0
+        for store_id in store_ids:
+            duplicate = session.scalar(
+                select(ScheduleItem.id).where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.employee_id == int(employee_id),
+                    ScheduleItem.store_id == int(store_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.schedule_date >= target_month,
+                    ScheduleItem.schedule_date < add_months(target_month, 1),
+                )
+            )
+            if duplicate:
+                continue
+            max_sequence += 1
+            session.add(
+                ScheduleItem(
+                    schedule_id=int(schedule_id),
+                    schedule_date=schedule_date,
+                    sequence_number=int(max_sequence),
+                    store_id=int(store_id),
+                    employee_id=int(employee_id),
+                    work_type="PMT",
+                    status="Scheduled",
+                    schedule_source="PMT Manual Assigned Store Add",
+                    pmt_schedule_run_id=int(run_id),
+                    cycle_label=month_label(target_month),
+                    completion_notes=clean(notes),
+                )
+            )
+            added += 1
+        if run:
+            run.store_count = int(run.store_count or 0) + added
+            run.cycle_end = max(run.cycle_end or schedule_date, add_months(target_month, 1) - timedelta(days=1))
+    log_action("pmt assigned stores added to schedule", "pmt_schedule_runs", int(run_id), f"{added} assigned PMT stores added manually")
+    return added
+
+
+def save_manual_pmt_schedule_edits(edited_df):
+    if edited_df.empty:
+        return 0
+    updated = 0
+    with session_scope() as session:
+        for _, row in edited_df.iterrows():
+            item_id = scalar_int(row.get("schedule_item_id"), 0)
+            if not item_id:
+                continue
+            item = session.get(ScheduleItem, int(item_id))
+            if not item:
+                continue
+            new_date = scalar_date(row.get("schedule_date")) or item.schedule_date
+            new_sequence = max(1, scalar_int(row.get("sequence_number"), item.sequence_number or 1))
+            if item.original_schedule_date is None and item.schedule_date != new_date:
+                item.original_schedule_date = item.schedule_date
+            item.schedule_date = new_date
+            item.sequence_number = new_sequence
+            item.status = clean(row.get("status", "")) or item.status
+            item.cycle_label = month_label(month_start(new_date))
+            item.completion_notes = clean(row.get("notes", "")) or item.completion_notes
+            updated += 1
+    log_action("pmt manual schedule order updated", "schedule_items", description=f"{updated} PMT schedule items manually updated")
     return updated
 
 
@@ -3081,7 +3367,74 @@ with tab_carryover:
 
 
 with tab_manage:
-    section_header("Manage Step 1: Select Published PMT Schedule", "Choose the published PMT run you want to review or adjust.", "gray")
+    section_header("Manage Step 1: Import An Existing PMT Schedule", "Use this when the schedule already exists outside the app and you want to manage it here going forward.", "blue")
+    with st.expander("Upload current PMT schedule", expanded=False):
+        schedule_upload = st.file_uploader(
+            "Upload existing PMT schedule Excel/CSV",
+            type=["xlsx", "xls", "xlsm", "csv"],
+            key="pmt_existing_schedule_upload",
+        )
+        if schedule_upload:
+            schedule_sheets = upload_sheet_names(schedule_upload)
+            schedule_sheet = st.selectbox("Schedule sheet", schedule_sheets, key="pmt_existing_schedule_sheet")
+            schedule_raw = read_upload_sheet(schedule_upload, schedule_sheet)
+            original_columns = schedule_raw.columns.tolist()
+            mapping_options = [""] + original_columns
+            schedule_defaults = {
+                field: best_column(original_columns, field, "schedule")
+                for field in SCHEDULE_COLUMN_CANDIDATES
+            }
+            st.caption(f"Rows detected: {len(schedule_raw):,}. Map the columns below before importing.")
+            mc1, mc2, mc3 = st.columns(3)
+            import_tech_col = selectbox_with_default(mc1, "Technician", mapping_options, schedule_defaults["technician_name"], "pmt_existing_schedule_tech_col")
+            import_store_col = selectbox_with_default(mc2, "Store Number", mapping_options, schedule_defaults["store_number"], "pmt_existing_schedule_store_col")
+            import_date_col = selectbox_with_default(mc3, "Schedule Date", mapping_options, schedule_defaults["schedule_date"], "pmt_existing_schedule_date_col")
+            mc4, mc5, mc6, mc7 = st.columns(4)
+            import_month_col = selectbox_with_default(mc4, "Month if no date", mapping_options, schedule_defaults["schedule_month"], "pmt_existing_schedule_month_col")
+            import_sequence_col = selectbox_with_default(mc5, "Stop / Sequence", mapping_options, schedule_defaults["sequence_number"], "pmt_existing_schedule_sequence_col")
+            import_status_col = selectbox_with_default(mc6, "Status", mapping_options, schedule_defaults["status"], "pmt_existing_schedule_status_col")
+            import_notes_col = selectbox_with_default(mc7, "Notes", mapping_options, schedule_defaults["notes"], "pmt_existing_schedule_notes_col")
+            import_mapping = {
+                "technician_name": import_tech_col,
+                "store_number": import_store_col,
+                "schedule_date": import_date_col,
+                "schedule_month": import_month_col,
+                "sequence_number": import_sequence_col,
+                "status": import_status_col,
+                "notes": import_notes_col,
+            }
+            required_missing = [label for label, field in [("Technician", "technician_name"), ("Store Number", "store_number")] if not import_mapping.get(field)]
+            if not import_mapping.get("schedule_date") and not import_mapping.get("schedule_month"):
+                required_missing.append("Schedule Date or Month")
+            imported_preview, import_problems = normalize_existing_pmt_schedule_upload(schedule_raw, import_mapping) if not required_missing else (pd.DataFrame(), pd.DataFrame())
+            if required_missing:
+                st.error("Missing required schedule mapping: " + ", ".join(required_missing))
+            else:
+                pv1, pv2, pv3, pv4 = st.columns(4)
+                pv1.metric("Rows Ready", len(imported_preview))
+                pv2.metric("Technicians", imported_preview["employee_id"].nunique() if not imported_preview.empty else 0)
+                pv3.metric("Stores", imported_preview["store_id"].nunique() if not imported_preview.empty else 0)
+                pv4.metric("Warnings / Problems", len(import_problems))
+                if not import_problems.empty:
+                    with st.expander("Import warnings and skipped rows", expanded=True):
+                        st.dataframe(import_problems, use_container_width=True, hide_index=True)
+                if not imported_preview.empty:
+                    preview_columns = ["technician", "month", "schedule_date", "sequence_number", "store_number", "city", "state", "status", "notes"]
+                    st.dataframe(imported_preview[preview_columns].head(100), use_container_width=True, hide_index=True)
+                    imported_start = imported_preview["schedule_date"].min()
+                    imported_end = imported_preview["schedule_date"].max()
+                    import_run_name = st.text_input(
+                        "Imported schedule run name",
+                        value=f"Imported PMT Schedule {month_label(month_start(imported_start))} - {month_label(month_start(imported_end))}",
+                        key="pmt_existing_schedule_run_name",
+                    )
+                    confirm_import = st.checkbox("I reviewed this imported schedule and want to create a PMT schedule run.", key="pmt_confirm_existing_schedule_import")
+                    if st.button("Import Existing PMT Schedule", type="primary", disabled=not confirm_import, key="pmt_import_existing_schedule_button"):
+                        result = import_existing_pmt_schedule(imported_preview, import_run_name)
+                        st.success(f"Imported PMT schedule run #{result['run_id']} with {result['created']} schedule item(s).")
+                        st.rerun()
+
+    section_header("Manage Step 2: Select Published PMT Schedule", "Choose the published or imported PMT run you want to review or adjust.", "gray")
     runs = safe_query(
         """
         select r.id, r.run_name, r.created_at, r.cycle_start, r.cycle_end, r.months, r.technician_count,
@@ -3102,7 +3455,141 @@ with tab_manage:
         st.dataframe(run_item_view, use_container_width=True, hide_index=True)
         st.download_button("Export Selected PMT Run", data=excel_bytes(run_item_view), file_name=f"pmt_schedule_run_{selected_run}.xlsx", key=f"export_selected_pmt_run_{selected_run}")
 
-        section_header("Manage Step 2: Push Unfinished Work Or Add Urgent Store", "Use this when a PMT did not finish the month or a complaint store needs inserted without rebuilding the whole route.", "orange")
+        section_header("Manage Step 3: Add Assigned Stores Manually", "Pick stores from a PMT's saved assignments and add them to the selected run without rebuilding the schedule.", "blue")
+        pmt_people = active_pmt_employee_summary()
+        if pmt_people.empty:
+            st.info("No active PMT employees are available.")
+        else:
+            add_cols = st.columns(4)
+            add_employee = add_cols[0].selectbox(
+                "PMT",
+                pmt_people["employee_id"].astype(int).tolist(),
+                format_func=lambda value: pmt_people.set_index("employee_id").loc[value, "technician_name"],
+                key=f"pmt_manual_add_employee_{selected_run}",
+            )
+            add_month_options = [add_months(month_start(date.today()), offset) for offset in range(-3, 13)]
+            if not run_items.empty and "month_start" in run_items.columns:
+                add_month_options = sorted(set(add_month_options + [scalar_date(value) for value in run_items["month_start"].dropna().tolist() if scalar_date(value)]))
+            add_month = add_cols[1].selectbox(
+                "Month to add into",
+                add_month_options,
+                format_func=month_label,
+                key=f"pmt_manual_add_month_{selected_run}_{add_employee}",
+            )
+            sort_choice = add_cols[2].selectbox(
+                "Suggested order",
+                ["Closest to home first", "Farthest from home first", "Store number"],
+                key=f"pmt_manual_add_sort_{selected_run}_{add_employee}",
+            )
+            add_limit = add_cols[3].number_input(
+                "Show first",
+                min_value=1,
+                max_value=200,
+                value=25,
+                step=1,
+                key=f"pmt_manual_add_limit_{selected_run}_{add_employee}",
+            )
+            candidate_stores = assigned_pmt_store_candidates(add_employee, selected_run)
+            if candidate_stores.empty:
+                st.info("This PMT has no assigned stores available to add to this selected run.")
+            else:
+                candidate_stores = candidate_stores.copy()
+                if sort_choice == "Farthest from home first":
+                    candidate_stores = candidate_stores.sort_values(["distance_from_home", "store_number"], ascending=[False, True], na_position="last")
+                elif sort_choice == "Store number":
+                    candidate_stores = candidate_stores.sort_values("store_number")
+                else:
+                    candidate_stores = candidate_stores.sort_values(["distance_from_home", "store_number"], ascending=[True, True], na_position="last")
+                candidate_view = candidate_stores.head(int(add_limit)).copy()
+                candidate_view["Add"] = False
+                manual_add_columns = ["Add", "store_id", "store_number", "city", "state", "distance_from_home", "address"]
+                edited_candidates = st.data_editor(
+                    candidate_view[manual_add_columns],
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["store_id", "store_number", "city", "state", "distance_from_home", "address"],
+                    column_config={
+                        "Add": st.column_config.CheckboxColumn("Add"),
+                        "store_id": None,
+                        "distance_from_home": st.column_config.NumberColumn("Miles From Home", format="%.1f"),
+                    },
+                    key=f"pmt_manual_add_editor_{selected_run}_{add_employee}_{add_month}_{sort_choice}_{add_limit}",
+                )
+                selected_store_ids = edited_candidates.loc[edited_candidates["Add"].astype(bool), "store_id"].dropna().astype(int).tolist()
+                add_notes = st.text_input("Add note", value="Manually added from assigned PMT stores", key=f"pmt_manual_add_notes_{selected_run}_{add_employee}")
+                if st.button("Add Selected Assigned Stores To Schedule", type="primary", disabled=not selected_store_ids, key=f"pmt_manual_add_button_{selected_run}_{add_employee}"):
+                    added = add_assigned_stores_to_pmt_run(selected_run, add_employee, selected_store_ids, add_month, add_notes)
+                    st.success(f"Added {added} assigned store(s) to the selected PMT schedule run.")
+                    st.rerun()
+
+        section_header("Manage Step 4: Manual Month And Stop Order", "Move stores up, push stores to another month, or reorder a PMT's route after complaints or special circumstances.", "orange")
+        if run_items.empty:
+            st.info("This PMT run does not have schedule items to reorder.")
+        else:
+            order_cols = st.columns(3)
+            order_techs = (
+                run_items[["employee_id", "technician"]]
+                .dropna(subset=["employee_id"])
+                .drop_duplicates()
+                .sort_values("technician")
+            )
+            order_employee = order_cols[0].selectbox(
+                "PMT to reorder",
+                order_techs["employee_id"].astype(int).tolist(),
+                format_func=lambda value: order_techs.set_index("employee_id").loc[value, "technician"],
+                key=f"pmt_reorder_employee_{selected_run}",
+            )
+            order_items = run_items[run_items["employee_id"] == int(order_employee)].copy()
+            order_months = sorted(order_items["month_start"].dropna().unique().tolist())
+            order_month = order_cols[1].selectbox(
+                "Month",
+                order_months,
+                format_func=month_label,
+                key=f"pmt_reorder_month_{selected_run}_{order_employee}",
+            )
+            show_future_month = order_cols[2].checkbox("Include later months", value=False, key=f"pmt_reorder_future_{selected_run}_{order_employee}_{order_month}")
+            if show_future_month:
+                reorder_scope = order_items[order_items["month_start"] >= order_month].copy()
+            else:
+                reorder_scope = order_items[order_items["month_start"] == order_month].copy()
+            reorder_scope = reorder_scope.sort_values(["schedule_date", "sequence_number", "store_number"])
+            if reorder_scope.empty:
+                st.info("No schedule items found for that PMT/month.")
+            else:
+                reorder_view = reorder_scope[
+                    ["schedule_item_id", "schedule_date", "sequence_number", "store_number", "city", "state", "status", "notes"]
+                ].rename(
+                    columns={
+                        "schedule_date": "schedule_date",
+                        "sequence_number": "sequence_number",
+                        "store_number": "Store",
+                        "city": "City",
+                        "state": "State",
+                        "status": "status",
+                        "notes": "notes",
+                    }
+                )
+                edited_order = st.data_editor(
+                    reorder_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["schedule_item_id", "Store", "City", "State"],
+                    column_config={
+                        "schedule_item_id": None,
+                        "schedule_date": st.column_config.DateColumn("Schedule Date"),
+                        "sequence_number": st.column_config.NumberColumn("Stop", min_value=1, step=1),
+                        "status": st.column_config.SelectboxColumn("Status", options=["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed", "Completed", "Skipped", "Cancelled"]),
+                        "notes": st.column_config.TextColumn("Notes"),
+                    },
+                    key=f"pmt_manual_order_editor_{selected_run}_{order_employee}_{order_month}_{show_future_month}",
+                )
+                st.caption("To move a complaint store up, lower its stop number or date. To push another store out, change its schedule date into the next month.")
+                if st.button("Save Manual Schedule Order Changes", type="primary", key=f"pmt_save_manual_order_{selected_run}_{order_employee}_{order_month}"):
+                    updated = save_manual_pmt_schedule_edits(edited_order)
+                    st.success(f"Updated {updated} PMT schedule item(s).")
+                    st.rerun()
+
+        section_header("Manage Step 5: Push Unfinished Work Or Add Urgent Store", "Use this when a PMT did not finish the month or a complaint store needs inserted without rebuilding the whole route.", "orange")
         if run_items.empty:
             st.info("This PMT run does not have schedule items to adjust.")
         else:
@@ -3259,7 +3746,7 @@ with tab_manage:
                     st.success(f"Updated {updated} PMT schedule item(s).")
                     st.rerun()
 
-        section_header("Manage Step 3: Danger Zone", "Delete a PMT schedule run only if it was published by mistake. Confirmation is required.", "red")
+        section_header("Manage Step 6: Danger Zone", "Delete a PMT schedule run only if it was published by mistake. Confirmation is required.", "red")
         st.warning("Deleting a PMT schedule run removes the scheduled PMT store records created by that run.")
         confirm = st.text_input("Type DELETE to confirm schedule run deletion", key="delete_pmt_run_confirm")
         if st.button("Delete Schedule Run", disabled=confirm != "DELETE", type="secondary"):
