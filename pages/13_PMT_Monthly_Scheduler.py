@@ -3849,11 +3849,19 @@ with tab_manage:
             editor_scope = editor_scope.sort_values(["schedule_date", "sequence_number", "store_number"])
             assigned_total = int(active_pmt_employee_summary().set_index("employee_id").get("assigned_stores", pd.Series(dtype=int)).get(int(edit_employee), 0))
             scheduled_active_total = int(pmt_active_item_mask(edit_employee_items).sum()) if not edit_employee_items.empty else 0
+            inactive_total = max(0, len(edit_employee_items) - scheduled_active_total)
             tech_metric_cols = st.columns(4)
             tech_metric_cols[0].metric("Assigned Stores", assigned_total)
-            tech_metric_cols[1].metric("Scheduled In Run", len(edit_employee_items))
-            tech_metric_cols[2].metric("Active Scheduled", scheduled_active_total)
+            tech_metric_cols[1].metric("Currently Scheduled Stores", scheduled_active_total)
+            tech_metric_cols[2].metric("Completed / Inactive Rows", inactive_total)
             tech_metric_cols[3].metric("Visible Rows", len(editor_scope))
+            if inactive_total and scheduled_active_total == 0:
+                status_counts = edit_employee_items["status"].fillna("Blank").astype(str).value_counts().to_dict()
+                status_text = ", ".join(f"{status}: {count}" for status, count in status_counts.items())
+                st.info(
+                    "This PMT has no currently scheduled stores blocking new adds. "
+                    f"The remaining {inactive_total} row(s) are inactive/history rows in this run: {status_text}."
+                )
             if editor_scope.empty:
                 st.info("No schedule rows match the selected PMT/month/filter.")
             else:
