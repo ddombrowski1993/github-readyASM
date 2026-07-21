@@ -4195,38 +4195,100 @@ with tab_manage:
                         summary_cols[3].metric("Selected conflicts", len(selected_conflict_ids))
                         add_notes = st.text_input("Add note", value="Manually managed from PMT schedule workspace", key="pmt_manage_build_notes")
                         if selected_conflict_ids:
-                            confirm_conflict_move = st.checkbox("Move selected conflicting active rows to this PMT", value=False, key="pmt_manage_build_confirm_move")
-                            if st.button("Move Selected Conflicts", type="secondary", disabled=not confirm_conflict_move, key="pmt_manage_build_move_conflicts"):
-                                moved = move_scheduled_stores_to_pmt(selected_run, selected_employee, selected_conflict_ids, add_month, add_notes)
-                                st.success(f"Moved {moved} active schedule item(s) to {selected_tech_name}.")
-                                st.rerun()
-                        if st.button("Preview Schedule Changes", type="primary", disabled=not fill_store_ids, key="pmt_manage_build_preview_button"):
+                            st.warning(
+                                f"{len(selected_conflict_ids)} selected store(s) are currently active under another PMT. "
+                                "The preview will show those stores moving to this PMT and the other PMT's remaining schedule."
+                            )
+                        if st.button("Preview Schedule Changes", type="primary", disabled=not fill_store_ids and not selected_conflict_ids, key="pmt_manage_build_preview_button"):
                             preview_source = available_sorted[available_sorted["store_id"].astype(int).isin(fill_store_ids)].copy()
+                            conflict_preview = candidate_stores[candidate_stores["store_id"].astype(int).isin(selected_conflict_ids)].copy()
+                            if not conflict_preview.empty:
+                                conflict_preview["Manual or Auto-Filled"] = conflict_preview["scheduled_technician"].apply(lambda value: f"Move from {value or 'another PMT'}")
+                                conflict_preview["move_from_employee_id"] = conflict_preview["scheduled_employee_id"]
+                                conflict_preview["move_from_technician"] = conflict_preview["scheduled_technician"]
+                                preview_source = pd.concat([conflict_preview, preview_source], ignore_index=True)
                             order_lookup = {int(store_id): index for index, store_id in enumerate(fill_store_ids)}
+                            conflict_order = {int(store_id): index - len(selected_conflict_ids) for index, store_id in enumerate(selected_conflict_ids)}
+                            order_lookup = {**conflict_order, **order_lookup}
                             preview_source["_proposed_order"] = preview_source["store_id"].astype(int).map(order_lookup)
                             preview_source = preview_source.sort_values("_proposed_order").drop(columns=["_proposed_order"], errors="ignore")
-                            preview_source["Manual or Auto-Filled"] = preview_source["store_id"].astype(int).apply(lambda value: "Manual" if value in selected_set else "Auto-filled")
+                            preview_source["Manual or Auto-Filled"] = preview_source.apply(
+                                lambda row: row.get("Manual or Auto-Filled")
+                                if clean(row.get("Manual or Auto-Filled"))
+                                else ("Manual" if int(row["store_id"]) in selected_set else "Auto-filled"),
+                                axis=1,
+                            )
                             preview_source["Proposed Month"] = month_label(add_month)
                             preview_source["Proposed Date"] = first_workday(add_month, employee_id=int(selected_employee))
                             preview_source["Proposed Stop"] = range(1, len(preview_source) + 1)
+                            preview_source["technician"] = selected_tech_name
+                            preview_source["schedule_date"] = preview_source["Proposed Date"]
+                            preview_source["sequence_number"] = preview_source["Proposed Stop"]
+                            preview_source["status"] = preview_source["Manual or Auto-Filled"]
                             st.session_state["pmt_manage_build_preview"] = preview_source.to_dict("records")
                             st.session_state["pmt_manage_build_preview_ids"] = fill_store_ids
+                            st.session_state["pmt_manage_build_preview_conflict_ids"] = selected_conflict_ids
                             st.session_state["pmt_manage_build_preview_method"] = selected_method
                         preview_df = dataframe_from_session_records("pmt_manage_build_preview")
                         if not preview_df.empty:
                             preview_cols = ["technician", "store_number", "city", "state", "Proposed Month", "Proposed Date", "Proposed Stop", "Manual or Auto-Filled", "distance_from_home", "scheduled_technician"]
                             st.dataframe(preview_df[[col for col in preview_cols if col in preview_df.columns]], use_container_width=True, hide_index=True)
+                            st.markdown("**Proposed route map**")
+                            map_preview = preview_df.copy()
+                            if {"latitude", "longitude"}.issubset(map_preview.columns):
+                                render_store_map(
+                                    map_preview,
+                                    color_by="Manual or Auto-Filled",
+                                    show_route_path=True,
+                                    max_route_points=200,
+                                    static_preview=True,
+                                    height=560,
+                                )
+                            move_conflict_ids = st.session_state.get("pmt_manage_build_preview_conflict_ids", [])
+                            if move_conflict_ids:
+                                st.markdown("**Impact on other PMT schedules**")
+                                moved_rows = preview_df[pd.to_numeric(preview_df.get("store_id"), errors="coerce").fillna(-1).astype(int).isin(move_conflict_ids)].copy()
+                                if not moved_rows.empty:
+                                    impact_cols = ["store_number", "city", "state", "move_from_technician", "scheduled_date", "Proposed Date", "Proposed Stop"]
+                                    st.warning("These stores will be moved off the PMT currently shown in `move_from_technician` and into the proposed route above.")
+                                    st.dataframe(moved_rows[[col for col in impact_cols if col in moved_rows.columns]], use_container_width=True, hide_index=True)
+                                    for moved_employee_id in pd.to_numeric(moved_rows.get("move_from_employee_id"), errors="coerce").dropna().astype(int).unique().tolist():
+                                        remaining_schedule = filter_manage_scope(run_items, moved_employee_id, selected_month, "Active")
+                                        remaining_schedule = remaining_schedule[
+                                            ~pd.to_numeric(remaining_schedule["store_id"], errors="coerce").fillna(-1).astype(int).isin(move_conflict_ids)
+                                        ].copy()
+                                        moved_name = moved_rows.loc[pd.to_numeric(moved_rows.get("move_from_employee_id"), errors="coerce").fillna(-1).astype(int) == moved_employee_id, "move_from_technician"].dropna()
+                                        moved_name = moved_name.iloc[0] if not moved_name.empty else f"PMT #{moved_employee_id}"
+                                        with st.expander(f"Updated active schedule for {moved_name} after move", expanded=False):
+                                            if remaining_schedule.empty:
+                                                st.info("No active stores remain for this PMT in the selected month/status context.")
+                                            else:
+                                                remaining_cols = ["schedule_date", "sequence_number", "store_number", "city", "state", "status"]
+                                                st.dataframe(remaining_schedule[remaining_cols], use_container_width=True, hide_index=True)
+                                                render_store_map(
+                                                    remaining_schedule.sort_values(["schedule_date", "sequence_number", "store_number"]),
+                                                    color_by="status",
+                                                    show_route_path=True,
+                                                    max_route_points=200,
+                                                    static_preview=True,
+                                                    height=420,
+                                                )
                             confirm_apply = st.checkbox("I reviewed this preview and want to apply these schedule changes.", key="pmt_manage_build_confirm_apply")
                             if st.button("Apply Schedule Changes", type="primary", disabled=not confirm_apply, key="pmt_manage_build_apply"):
                                 preview_ids = st.session_state.get("pmt_manage_build_preview_ids", [])
+                                preview_conflict_ids = st.session_state.get("pmt_manage_build_preview_conflict_ids", [])
+                                moved = 0
+                                if preview_conflict_ids:
+                                    moved = move_scheduled_stores_to_pmt(selected_run, selected_employee, preview_conflict_ids, add_month, add_notes)
                                 if st.session_state.get("pmt_manage_build_preview_method") == "Manual First + Auto-Fill Remaining":
                                     result = add_assigned_stores_auto_fill_to_pmt_run(selected_run, selected_employee, preview_ids, add_month, fill_end_month, fill_capacity, add_notes)
-                                    st.success(f"Added {result['added']} store(s). Skipped {result['skipped']} duplicate or out-of-range store(s).")
+                                    st.success(f"Moved {moved} conflicting store(s). Added {result['added']} store(s). Skipped {result['skipped']} duplicate or out-of-range store(s).")
                                 else:
                                     added = add_assigned_stores_to_pmt_run(selected_run, selected_employee, preview_ids, add_month, add_notes)
-                                    st.success(f"Added {added} store(s).")
+                                    st.success(f"Moved {moved} conflicting store(s). Added {added} store(s).")
                                 st.session_state.pop("pmt_manage_build_preview", None)
                                 st.session_state.pop("pmt_manage_build_preview_ids", None)
+                                st.session_state.pop("pmt_manage_build_preview_conflict_ids", None)
                                 st.session_state.pop("pmt_manage_build_preview_method", None)
                                 st.rerun()
 
