@@ -2065,6 +2065,73 @@ def save_manual_pmt_schedule_edits(edited_df):
     return updated
 
 
+def delete_pmt_schedule_items(item_ids, reason=""):
+    item_ids = [int(item_id) for item_id in item_ids if scalar_int(item_id, 0)]
+    if not item_ids:
+        return 0
+    deleted = 0
+    deleted_by_run = {}
+    schedule_ids = set()
+    with session_scope() as session:
+        items = session.scalars(select(ScheduleItem).where(ScheduleItem.id.in_(item_ids))).all()
+        for item in items:
+            if item.work_type != "PMT":
+                continue
+            if item.pmt_schedule_run_id:
+                run_id = int(item.pmt_schedule_run_id)
+                deleted_by_run[run_id] = deleted_by_run.get(run_id, 0) + 1
+            if item.schedule_id:
+                schedule_ids.add(int(item.schedule_id))
+            session.delete(item)
+            deleted += 1
+        for run_id, run_deleted in deleted_by_run.items():
+            run = session.get(PMTScheduleRun, int(run_id))
+            if run:
+                run.store_count = max(0, int(run.store_count or 0) - int(run_deleted))
+        for schedule_id in schedule_ids:
+            remaining = session.scalar(select(ScheduleItem.id).where(ScheduleItem.schedule_id == int(schedule_id)))
+            if remaining is None:
+                schedule = session.get(Schedule, int(schedule_id))
+                if schedule:
+                    session.delete(schedule)
+    log_action("pmt schedule items deleted", "schedule_items", description=f"{deleted} PMT schedule item(s) deleted. Reason: {clean(reason)}")
+    return deleted
+
+
+def delete_pmt_technician_schedule(run_id, employee_id, month_start_value=None, active_only=True, reason=""):
+    run_items = pmt_manage_run_items(run_id)
+    if run_items.empty:
+        return 0
+    scope = run_items[run_items["employee_id"].astype("Int64") == int(employee_id)].copy()
+    if month_start_value is not None:
+        scope = scope[scope["month_start"] == month_start(month_start_value)].copy()
+    if active_only:
+        scope = scope[pmt_active_item_mask(scope)].copy()
+    item_ids = scope["schedule_item_id"].dropna().astype(int).tolist()
+    return delete_pmt_schedule_items(item_ids, reason)
+
+
+def delete_pmt_schedule_run(run_id):
+    with session_scope() as session:
+        items = session.scalars(select(ScheduleItem).where(ScheduleItem.pmt_schedule_run_id == int(run_id))).all()
+        schedule_ids = {item.schedule_id for item in items}
+        for item in items:
+            session.delete(item)
+        run = session.get(PMTScheduleRun, int(run_id))
+        if run:
+            run.status = "Deleted"
+            run.store_count = 0
+        for schedule_id in schedule_ids:
+            remaining = session.scalar(select(ScheduleItem.id).where(ScheduleItem.schedule_id == schedule_id))
+            if remaining is None:
+                schedule = session.get(Schedule, int(schedule_id))
+                if schedule:
+                    session.delete(schedule)
+        deleted = len(items)
+    log_action("pmt schedule run deleted", "pmt_schedule_runs", int(run_id), f"{deleted} PMT schedule items deleted")
+    return deleted
+
+
 PMT_EXCEPTION_STATUSES = ["Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed", "Carryover", "Overdue", "Skipped", "Cancelled"]
 PMT_BACKLOG_OPEN_STATUSES = ["Not Scheduled", "Not Completed", "Carryover", "Overdue", "Skipped"]
 
@@ -3741,6 +3808,153 @@ with tab_manage:
         st.dataframe(run_item_view, use_container_width=True, hide_index=True)
         st.download_button("Export Selected PMT Run", data=excel_bytes(run_item_view), file_name=f"pmt_schedule_run_{selected_run}.xlsx", key=f"export_selected_pmt_run_{selected_run}")
         if not run_items.empty:
+            st.markdown("**Tech Schedule Editor**")
+            st.caption("Use this to see exactly what is already scheduled for one PMT in this run, then delete stores or edit dates, stops, statuses, and notes.")
+            tech_editor_cols = st.columns(4)
+            tech_editor_options = (
+                run_items[["employee_id", "technician"]]
+                .dropna(subset=["employee_id"])
+                .drop_duplicates()
+                .sort_values("technician")
+            )
+            edit_employee = tech_editor_cols[0].selectbox(
+                "PMT schedule to inspect",
+                tech_editor_options["employee_id"].astype(int).tolist(),
+                format_func=lambda value: tech_editor_options.set_index("employee_id").loc[value, "technician"],
+                key=f"pmt_quick_edit_employee_{selected_run}",
+            )
+            edit_employee_items = run_items[run_items["employee_id"].astype("Int64") == int(edit_employee)].copy()
+            edit_month_options = ["All months"] + sorted(edit_employee_items["month_start"].dropna().unique().tolist())
+            edit_month = tech_editor_cols[1].selectbox(
+                "Month",
+                edit_month_options,
+                format_func=lambda value: value if value == "All months" else month_label(value),
+                key=f"pmt_quick_edit_month_{selected_run}_{edit_employee}",
+            )
+            show_active_only = tech_editor_cols[2].checkbox(
+                "Active only",
+                value=True,
+                key=f"pmt_quick_edit_active_only_{selected_run}_{edit_employee}",
+            )
+            show_map_preview = tech_editor_cols[3].checkbox(
+                "Show map",
+                value=True,
+                key=f"pmt_quick_edit_show_map_{selected_run}_{edit_employee}",
+            )
+            editor_scope = edit_employee_items.copy()
+            if edit_month != "All months":
+                editor_scope = editor_scope[editor_scope["month_start"] == edit_month].copy()
+            if show_active_only:
+                editor_scope = editor_scope[pmt_active_item_mask(editor_scope)].copy()
+            editor_scope = editor_scope.sort_values(["schedule_date", "sequence_number", "store_number"])
+            assigned_total = int(active_pmt_employee_summary().set_index("employee_id").get("assigned_stores", pd.Series(dtype=int)).get(int(edit_employee), 0))
+            scheduled_active_total = int(pmt_active_item_mask(edit_employee_items).sum()) if not edit_employee_items.empty else 0
+            tech_metric_cols = st.columns(4)
+            tech_metric_cols[0].metric("Assigned Stores", assigned_total)
+            tech_metric_cols[1].metric("Scheduled In Run", len(edit_employee_items))
+            tech_metric_cols[2].metric("Active Scheduled", scheduled_active_total)
+            tech_metric_cols[3].metric("Visible Rows", len(editor_scope))
+            if editor_scope.empty:
+                st.info("No schedule rows match the selected PMT/month/filter.")
+            else:
+                quick_editor_view = editor_scope[
+                    ["schedule_item_id", "schedule_date", "sequence_number", "store_number", "city", "state", "status", "notes"]
+                ].rename(
+                    columns={
+                        "schedule_date": "schedule_date",
+                        "sequence_number": "sequence_number",
+                        "store_number": "Store",
+                        "city": "City",
+                        "state": "State",
+                        "status": "status",
+                        "notes": "notes",
+                    }
+                )
+                quick_editor_view.insert(0, "Delete", False)
+                edited_quick_schedule = st.data_editor(
+                    quick_editor_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["schedule_item_id", "Store", "City", "State"],
+                    column_config={
+                        "Delete": st.column_config.CheckboxColumn("Delete"),
+                        "schedule_item_id": None,
+                        "schedule_date": st.column_config.DateColumn("Schedule Date"),
+                        "sequence_number": st.column_config.NumberColumn("Stop", min_value=1, step=1),
+                        "status": st.column_config.SelectboxColumn("Status", options=["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed", "Completed", "Skipped", "Cancelled"]),
+                        "notes": st.column_config.TextColumn("Notes"),
+                    },
+                    key=f"pmt_quick_schedule_editor_{selected_run}_{edit_employee}_{edit_month}_{show_active_only}",
+                )
+                selected_delete_ids = edited_quick_schedule.loc[
+                    edited_quick_schedule["Delete"].astype(bool), "schedule_item_id"
+                ].dropna().astype(int).tolist()
+                action_cols = st.columns(3)
+                if action_cols[0].button("Save Edits", type="primary", key=f"pmt_quick_save_edits_{selected_run}_{edit_employee}_{edit_month}"):
+                    updated = save_manual_pmt_schedule_edits(edited_quick_schedule.drop(columns=["Delete"], errors="ignore"))
+                    st.success(f"Updated {updated} PMT schedule item(s).")
+                    st.rerun()
+                confirm_selected_delete = action_cols[1].checkbox(
+                    "Confirm selected delete",
+                    value=False,
+                    key=f"pmt_quick_confirm_selected_delete_{selected_run}_{edit_employee}_{edit_month}",
+                )
+                if action_cols[1].button(
+                    "Delete Selected Stores",
+                    type="secondary",
+                    disabled=not selected_delete_ids or not confirm_selected_delete,
+                    key=f"pmt_quick_delete_selected_{selected_run}_{edit_employee}_{edit_month}",
+                ):
+                    deleted = delete_pmt_schedule_items(selected_delete_ids, "Deleted from Tech Schedule Editor")
+                    st.success(f"Deleted {deleted} PMT schedule item(s).")
+                    st.rerun()
+                confirm_scope_delete = action_cols[2].checkbox(
+                    "Confirm PMT schedule delete",
+                    value=False,
+                    key=f"pmt_quick_confirm_scope_delete_{selected_run}_{edit_employee}_{edit_month}",
+                )
+                delete_scope_label = "Delete This PMT Month" if edit_month != "All months" else "Delete This PMT Schedule"
+                if action_cols[2].button(
+                    delete_scope_label,
+                    type="secondary",
+                    disabled=not confirm_scope_delete,
+                    key=f"pmt_quick_delete_scope_{selected_run}_{edit_employee}_{edit_month}",
+                ):
+                    deleted = delete_pmt_technician_schedule(
+                        selected_run,
+                        edit_employee,
+                        None if edit_month == "All months" else edit_month,
+                        active_only=show_active_only,
+                        reason="Deleted from Tech Schedule Editor",
+                    )
+                    st.success(f"Deleted {deleted} PMT schedule item(s).")
+                    st.rerun()
+                st.caption("To add replacement stores after deleting, use Step 3 below. To change order, edit the Stop values and save.")
+                if show_map_preview:
+                    render_store_map(
+                        editor_scope,
+                        color_by="month" if edit_month == "All months" else "status",
+                        show_route_path=True,
+                        max_route_points=200,
+                        static_preview=True,
+                        height=520,
+                    )
+            with st.expander("Delete the entire selected PMT schedule run", expanded=False):
+                st.warning("This deletes every PMT schedule item in the selected run and marks the run as Deleted.")
+                confirm_run_delete = st.text_input(
+                    "Type DELETE to confirm this entire run deletion",
+                    key=f"pmt_quick_delete_run_confirm_{selected_run}",
+                )
+                if st.button(
+                    "Delete Entire Selected PMT Run",
+                    type="secondary",
+                    disabled=confirm_run_delete != "DELETE",
+                    key=f"pmt_quick_delete_run_{selected_run}",
+                ):
+                    deleted = delete_pmt_schedule_run(selected_run)
+                    st.success(f"Deleted {deleted} PMT schedule item(s) from run #{selected_run}.")
+                    st.rerun()
+
             with st.expander("View selected PMT run route map", expanded=True):
                 map_cols = st.columns(3)
                 map_tech_options = (
@@ -4264,22 +4478,7 @@ with tab_manage:
         st.warning("Deleting a PMT schedule run removes the scheduled PMT store records created by that run.")
         confirm = st.text_input("Type DELETE to confirm schedule run deletion", key="delete_pmt_run_confirm")
         if st.button("Delete Schedule Run", disabled=confirm != "DELETE", type="secondary"):
-            with session_scope() as session:
-                items = session.scalars(select(ScheduleItem).where(ScheduleItem.pmt_schedule_run_id == int(selected_run))).all()
-                schedule_ids = {item.schedule_id for item in items}
-                for item in items:
-                    session.delete(item)
-                run = session.get(PMTScheduleRun, int(selected_run))
-                if run:
-                    run.status = "Deleted"
-                for schedule_id in schedule_ids:
-                    remaining = session.scalar(select(ScheduleItem.id).where(ScheduleItem.schedule_id == schedule_id))
-                    if remaining is None:
-                        schedule = session.get(Schedule, int(schedule_id))
-                        if schedule:
-                            session.delete(schedule)
-                deleted = len(items)
-            log_action("pmt schedule run deleted", "pmt_schedule_runs", int(selected_run), f"{deleted} PMT schedule items deleted")
+            deleted = delete_pmt_schedule_run(selected_run)
             st.success(f"Deleted {deleted} PMT schedule items from run #{selected_run}.")
             st.rerun()
 
