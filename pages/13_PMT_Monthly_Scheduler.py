@@ -4200,7 +4200,7 @@ with tab_manage:
                                 moved = move_scheduled_stores_to_pmt(selected_run, selected_employee, selected_conflict_ids, add_month, add_notes)
                                 st.success(f"Moved {moved} active schedule item(s) to {selected_tech_name}.")
                                 st.rerun()
-                        if st.button("Preview Schedule Changes", type="primary", disabled=not fill_store_ids, key="pmt_manage_build_preview"):
+                        if st.button("Preview Schedule Changes", type="primary", disabled=not fill_store_ids, key="pmt_manage_build_preview_button"):
                             preview_source = available_sorted[available_sorted["store_id"].astype(int).isin(fill_store_ids)].copy()
                             order_lookup = {int(store_id): index for index, store_id in enumerate(fill_store_ids)}
                             preview_source["_proposed_order"] = preview_source["store_id"].astype(int).map(order_lookup)
