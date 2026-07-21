@@ -1124,10 +1124,13 @@ def published_pmt_run_export_draft(run_id):
                s.id as store_id, s.store_number, s.address, s.city, s.state, s.zip,
                s.latitude, s.longitude
         from schedule_items si
+        left join pmt_schedule_runs r on r.id = si.pmt_schedule_run_id
         left join employees e on e.id = si.employee_id
         left join stores s on s.id = si.store_id
         where si.pmt_schedule_run_id = :run_id
           and si.work_type = 'PMT'
+          and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
+          and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
         order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
         """,
         {"run_id": int(run_id)},
