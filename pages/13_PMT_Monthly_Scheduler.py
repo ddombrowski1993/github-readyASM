@@ -3778,7 +3778,34 @@ with tab_manage:
                         height=560,
                     )
 
-        section_header("Manage Step 3: Add Assigned Stores Manually", "Pick stores from a PMT's saved assignments and add them to the selected run without rebuilding the schedule.", "blue")
+        section_header(
+            "Manage Step 3: Select Scheduling Method",
+            "Choose how you want to build your PMT schedule. Only the selected scheduling workflow will be displayed below.",
+            "blue",
+        )
+        scheduling_method_options = [
+            "Assisted Schedule Builder (Manual + Auto)",
+            "Manual Schedule Builder",
+        ]
+        saved_scheduling_method = st.session_state.get("pmt_manage_scheduling_method", scheduling_method_options[0])
+        if saved_scheduling_method not in scheduling_method_options:
+            saved_scheduling_method = scheduling_method_options[0]
+        selected_scheduling_method = st.radio(
+            "Scheduling Method",
+            scheduling_method_options,
+            index=scheduling_method_options.index(saved_scheduling_method),
+            horizontal=True,
+            key="pmt_manage_scheduling_method",
+        )
+        if selected_scheduling_method == "Assisted Schedule Builder (Manual + Auto)":
+            st.caption(
+                "Generate a recommended schedule from PMT assignments, then review and manually adjust it before publishing."
+            )
+        else:
+            st.caption(
+                "Build and manage the schedule entirely by hand. Stores, dates, routes, and technicians are manually controlled."
+            )
+
         pmt_people = active_pmt_employee_summary()
         if pmt_people.empty:
             st.info("No active PMT employees are available.")
@@ -3946,56 +3973,68 @@ with tab_manage:
                     moved = move_scheduled_stores_to_pmt(selected_run, add_employee, selected_conflict_store_ids, add_month, add_notes)
                     st.success(f"Moved {moved} existing schedule item(s) to the selected PMT. Store assignments were not changed.")
                     st.rerun()
-                st.markdown("**Schedule selected stores**")
-                schedule_mode_choice = st.radio(
-                    "Scheduling mode",
-                    ["Only schedule the stores I selected", "Schedule selected stores first, then auto-fill the rest"],
-                    horizontal=True,
-                    key=f"pmt_manual_schedule_mode_{selected_run}_{add_employee}",
-                )
-                fill_cols = st.columns(3)
-                fill_capacity = fill_cols[0].number_input(
-                    "Stores per month",
-                    min_value=1,
-                    max_value=100,
-                    value=10,
-                    step=1,
-                    key=f"pmt_manual_auto_capacity_{selected_run}_{add_employee}",
-                )
-                fill_end_options = [add_months(add_month, offset) for offset in range(0, 13)]
-                fill_end_month = fill_cols[1].selectbox(
-                    "Fill through",
-                    fill_end_options,
-                    index=min(5, len(fill_end_options) - 1),
-                    format_func=month_label,
-                    key=f"pmt_manual_auto_end_{selected_run}_{add_employee}_{add_month}",
-                )
-                preview_remainder = fill_cols[2].checkbox("Preview remaining count", value=True, key=f"pmt_manual_auto_preview_{selected_run}_{add_employee}")
-                available_sorted = candidate_stores[~candidate_stores["already_scheduled"]].copy()
-                selected_set = set(selected_store_ids)
-                remaining_ids = available_sorted.loc[~available_sorted["store_id"].astype(int).isin(selected_set), "store_id"].dropna().astype(int).tolist()
-                include_remaining = schedule_mode_choice == "Schedule selected stores first, then auto-fill the rest"
-                fill_store_ids = selected_store_ids + (remaining_ids if include_remaining else [])
                 selected_store_numbers = selected_rows.loc[~selected_rows["already_scheduled"].astype(bool), "store_number"].astype(str).tolist()
-                summary_cols = st.columns(3)
-                summary_cols[0].metric("Manual stores selected", len(selected_store_ids))
-                summary_cols[1].metric("Auto-fill stores", len(remaining_ids) if include_remaining else 0)
-                summary_cols[2].metric("Total to schedule", len(fill_store_ids))
-                if preview_remainder:
-                    st.caption("Manual stores that will be scheduled first: " + (", ".join(selected_store_numbers[:20]) if selected_store_numbers else "None selected yet"))
-                    st.caption(f"After those, auto-fill will use the remaining available stores in the current `{sort_choice}` order." if include_remaining else "Auto-fill is off for this action.")
-                if st.button("Schedule Stores", type="primary", disabled=not fill_store_ids, key=f"pmt_manual_auto_fill_button_{selected_run}_{add_employee}"):
-                    result = add_assigned_stores_auto_fill_to_pmt_run(
-                        selected_run,
-                        add_employee,
-                        fill_store_ids,
-                        add_month,
-                        fill_end_month,
-                        fill_capacity,
-                        add_notes,
+                if selected_scheduling_method == "Assisted Schedule Builder (Manual + Auto)":
+                    st.markdown("**Assisted Schedule Builder (Manual + Auto)**")
+                    st.caption("Selected stores are scheduled first, then the app can auto-fill the remaining assigned stores in the suggested order.")
+                    fill_cols = st.columns(3)
+                    fill_capacity = fill_cols[0].number_input(
+                        "Stores per month",
+                        min_value=1,
+                        max_value=100,
+                        value=10,
+                        step=1,
+                        key=f"pmt_manual_auto_capacity_{selected_run}_{add_employee}",
                     )
-                    st.success(f"Added {result['added']} store(s). Skipped {result['skipped']} store(s).")
-                    st.rerun()
+                    fill_end_options = [add_months(add_month, offset) for offset in range(0, 13)]
+                    fill_end_month = fill_cols[1].selectbox(
+                        "Fill through",
+                        fill_end_options,
+                        index=min(5, len(fill_end_options) - 1),
+                        format_func=month_label,
+                        key=f"pmt_manual_auto_end_{selected_run}_{add_employee}_{add_month}",
+                    )
+                    preview_remainder = fill_cols[2].checkbox("Preview remaining count", value=True, key=f"pmt_manual_auto_preview_{selected_run}_{add_employee}")
+                    available_sorted = candidate_stores[~candidate_stores["already_scheduled"]].copy()
+                    selected_set = set(selected_store_ids)
+                    remaining_ids = available_sorted.loc[~available_sorted["store_id"].astype(int).isin(selected_set), "store_id"].dropna().astype(int).tolist()
+                    fill_store_ids = selected_store_ids + remaining_ids
+                    summary_cols = st.columns(3)
+                    summary_cols[0].metric("Manual stores selected", len(selected_store_ids))
+                    summary_cols[1].metric("Auto-fill stores", len(remaining_ids))
+                    summary_cols[2].metric("Total to schedule", len(fill_store_ids))
+                    if preview_remainder:
+                        st.caption("Manual stores that will be scheduled first: " + (", ".join(selected_store_numbers[:20]) if selected_store_numbers else "None selected yet"))
+                        st.caption(f"After those, auto-fill will use the remaining available stores in the current `{sort_choice}` order.")
+                    if st.button("Schedule Stores", type="primary", disabled=not fill_store_ids, key=f"pmt_manual_auto_fill_button_{selected_run}_{add_employee}"):
+                        result = add_assigned_stores_auto_fill_to_pmt_run(
+                            selected_run,
+                            add_employee,
+                            fill_store_ids,
+                            add_month,
+                            fill_end_month,
+                            fill_capacity,
+                            add_notes,
+                        )
+                        st.success(f"Added {result['added']} store(s). Skipped {result['skipped']} store(s).")
+                        st.rerun()
+                else:
+                    st.markdown("**Manual Schedule Builder**")
+                    st.caption("Only the stores you selected will be added. No auto-fill scheduling is used.")
+                    summary_cols = st.columns(2)
+                    summary_cols[0].metric("Manual stores selected", len(selected_store_ids))
+                    summary_cols[1].metric("Total to schedule", len(selected_store_ids))
+                    st.caption("Selected stores: " + (", ".join(selected_store_numbers[:20]) if selected_store_numbers else "None selected yet"))
+                    if st.button("Add Selected Stores Manually", type="primary", disabled=not selected_store_ids, key=f"pmt_manual_add_button_{selected_run}_{add_employee}"):
+                        added = add_assigned_stores_to_pmt_run(
+                            selected_run,
+                            add_employee,
+                            selected_store_ids,
+                            add_month,
+                            add_notes,
+                        )
+                        st.success(f"Added {added} store(s).")
+                        st.rerun()
 
         section_header("Manage Step 4: Manual Month And Stop Order", "Move stores up, push stores to another month, or reorder a PMT's route after complaints or special circumstances.", "orange")
         if run_items.empty:
