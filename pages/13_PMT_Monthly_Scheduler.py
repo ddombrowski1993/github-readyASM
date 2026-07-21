@@ -4129,7 +4129,7 @@ with tab_manage:
                     key="pmt_manage_build_method",
                 )
                 if selected_method == "Manual First + Auto-Fill Remaining":
-                    st.caption("Manually choose the first stores and order. The app then fills remaining eligible stores using this PMT's assigned stores and route order.")
+                    st.caption("Manually choose the first stores. The app then fills the remaining eligible stores from this PMT's home outward by miles from home.")
                 else:
                     st.caption("Manually select every store to add. No remaining stores will be added automatically.")
                 if selected_month == "All months":
@@ -4214,7 +4214,7 @@ with tab_manage:
                         fill_end_month = st.selectbox("Fill through", fill_end_options, index=min(5, len(fill_end_options) - 1), format_func=month_label, key="pmt_manage_build_fill_end")
                         available_sorted = candidate_stores[~candidate_stores["already_scheduled"]].copy()
                         selected_set = set(selected_store_ids)
-                        remaining_ids = available_sorted.loc[~available_sorted["store_id"].astype(int).isin(selected_set), "store_id"].dropna().astype(int).tolist()
+                        remaining_ids = pmt_order_remaining_by_home_distance(candidate_stores, selected_store_ids)
                         fill_store_ids = selected_store_ids + (remaining_ids if selected_method == "Manual First + Auto-Fill Remaining" else [])
                         summary_cols = st.columns(4)
                         summary_cols[0].metric("Manual selected", len(selected_store_ids))
@@ -4253,13 +4253,14 @@ with tab_manage:
                             preview_source["schedule_date"] = preview_source["Proposed Date"]
                             preview_source["sequence_number"] = preview_source["Proposed Stop"]
                             preview_source["status"] = preview_source["Manual or Auto-Filled"]
+                            preview_source = add_preview_leg_distances(preview_source)
                             st.session_state["pmt_manage_build_preview"] = preview_source.to_dict("records")
                             st.session_state["pmt_manage_build_preview_ids"] = fill_store_ids
                             st.session_state["pmt_manage_build_preview_conflict_ids"] = selected_conflict_ids
                             st.session_state["pmt_manage_build_preview_method"] = selected_method
                         preview_df = dataframe_from_session_records("pmt_manage_build_preview")
                         if not preview_df.empty:
-                            preview_cols = ["technician", "store_number", "city", "state", "Proposed Month", "Proposed Date", "Proposed Stop", "Manual or Auto-Filled", "distance_from_home", "scheduled_technician"]
+                            preview_cols = ["technician", "store_number", "city", "state", "Proposed Month", "Proposed Date", "Proposed Stop", "Manual or Auto-Filled", "distance_from_home", "Distance From Previous Stop", "scheduled_technician"]
                             st.dataframe(preview_df[[col for col in preview_cols if col in preview_df.columns]], use_container_width=True, hide_index=True)
                             st.markdown("**Proposed route map**")
                             map_preview = preview_df.copy()
