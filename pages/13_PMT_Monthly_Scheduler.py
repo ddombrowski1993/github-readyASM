@@ -3853,15 +3853,33 @@ with tab_manage:
             tech_metric_cols = st.columns(4)
             tech_metric_cols[0].metric("Assigned Stores", assigned_total)
             tech_metric_cols[1].metric("Currently Scheduled Stores", scheduled_active_total)
-            tech_metric_cols[2].metric("Completed / Inactive Rows", inactive_total)
+            tech_metric_cols[2].metric("Other Saved Rows", inactive_total)
             tech_metric_cols[3].metric("Visible Rows", len(editor_scope))
-            if inactive_total and scheduled_active_total == 0:
+            if inactive_total:
                 status_counts = edit_employee_items["status"].fillna("Blank").astype(str).value_counts().to_dict()
                 status_text = ", ".join(f"{status}: {count}" for status, count in status_counts.items())
                 st.info(
-                    "This PMT has no currently scheduled stores blocking new adds. "
-                    f"The remaining {inactive_total} row(s) are inactive/history rows in this run: {status_text}."
+                    "Other saved rows are schedule records for this PMT that are not currently blocking new adds. "
+                    f"Turn off Active only to inspect them. Status breakdown: {status_text}."
                 )
+            assigned_schedule_rows = assigned_pmt_store_candidates(edit_employee, selected_run, include_scheduled=True)
+            assigned_conflicts = pd.DataFrame()
+            if not assigned_schedule_rows.empty:
+                assigned_schedule_rows = assigned_schedule_rows.copy()
+                assigned_schedule_rows["scheduled_count"] = pd.to_numeric(assigned_schedule_rows.get("scheduled_count", 0), errors="coerce").fillna(0).astype(int)
+                assigned_schedule_rows["scheduled_employee_id"] = pd.to_numeric(assigned_schedule_rows.get("scheduled_employee_id"), errors="coerce")
+                assigned_conflicts = assigned_schedule_rows[
+                    (assigned_schedule_rows["scheduled_count"] > 0)
+                    & (assigned_schedule_rows["scheduled_employee_id"].fillna(0).astype(int) != int(edit_employee))
+                ].copy()
+            if not assigned_conflicts.empty:
+                st.warning(
+                    f"{len(assigned_conflicts)} store(s) assigned to this PMT are currently scheduled under another PMT in this selected schedule. "
+                    "This is what you would see when stores moved from one PMT to another but the schedule still has the old PMT."
+                )
+                with st.expander("View stores assigned here but scheduled under another PMT", expanded=True):
+                    conflict_view_cols = ["store_number", "city", "state", "scheduled_technician", "scheduled_date", "distance_from_home"]
+                    st.dataframe(assigned_conflicts[conflict_view_cols], use_container_width=True, hide_index=True)
             if editor_scope.empty:
                 st.info("No schedule rows match the selected PMT/month/filter.")
             else:
