@@ -1419,6 +1419,7 @@ def pmt_manage_run_items(run_id):
                si.store_id, s.store_number, s.address, s.city, s.state, s.zip,
                s.assigned_pmt_employee_id, owner.full_name as assigned_technician,
                s.latitude, s.longitude, si.work_type, si.status, si.cycle_label,
+               si.schedule_source,
                si.completion_notes as notes
         from schedule_items si
         left join employees e on e.id = si.employee_id
@@ -1555,6 +1556,18 @@ def run_status_counts(run_items):
         "completed_rows": int(pmt_completed_item_mask(run_items).sum()),
         "canceled_rows": int(pmt_canceled_item_mask(run_items).sum()),
     }
+
+
+def split_run_items_by_period(run_items, cycle_start, cycle_end):
+    if run_items.empty or (cycle_start is None and cycle_end is None):
+        return run_items.copy(), pd.DataFrame()
+    dated = pd.to_datetime(run_items["schedule_date"], errors="coerce").dt.date
+    in_period = pd.Series(True, index=run_items.index)
+    if cycle_start is not None:
+        in_period &= dated >= cycle_start
+    if cycle_end is not None:
+        in_period &= dated <= cycle_end
+    return run_items[in_period].copy(), run_items[~in_period].copy()
 
 
 def dataframe_from_session_records(state_key):
@@ -3929,7 +3942,10 @@ with tab_manage:
             key="pmt_manage_selected_run",
         )
         run_row = runs.set_index("id").loc[selected_run]
-        run_items = pmt_manage_run_items(selected_run)
+        raw_run_items = pmt_manage_run_items(selected_run)
+        run_cycle_start = scalar_date(run_row.get("cycle_start"))
+        run_cycle_end = scalar_date(run_row.get("cycle_end"))
+        run_items, out_of_period_items = split_run_items_by_period(raw_run_items, run_cycle_start, run_cycle_end)
         run_counts = run_status_counts(run_items)
         run_cols = st.columns(6)
         run_cols[0].metric("Status", clean(run_row.get("status", "")) or "Published")
@@ -3948,9 +3964,19 @@ with tab_manage:
             ] if not run_items.empty else pd.DataFrame()
             st.dataframe(run_item_view, use_container_width=True, hide_index=True)
             st.download_button("Export Full Schedule", data=excel_bytes(run_item_view), file_name=f"pmt_schedule_plan_{selected_run}.xlsx", key=f"export_selected_pmt_run_{selected_run}")
+        if not out_of_period_items.empty:
+            st.warning(
+                f"{len(out_of_period_items)} schedule row(s) are linked to this schedule plan but fall outside the plan dates. "
+                "They are excluded from the Manage Schedule counts below."
+            )
+            with st.expander("Review rows outside this schedule plan's date range", expanded=True):
+                outside_view = out_of_period_items[
+                    ["schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source", "notes"]
+                ]
+                st.dataframe(outside_view, use_container_width=True, hide_index=True)
 
         if run_items.empty:
-            st.info("This selected schedule plan has no PMT schedule rows.")
+            st.info("This selected schedule plan has no PMT schedule rows inside its selected date range.")
         else:
             section_header("Step 2: Select Technician and Month", "One shared selection controls the summary, table, map, add-store tools, and reorder tools below.", "blue")
             context_cols = st.columns([0.32, 0.24, 0.22, 0.12, 0.1])
@@ -4011,6 +4037,24 @@ with tab_manage:
                 if rec["scheduled_no_longer_assigned_count"]:
                     explanation += f" {rec['scheduled_no_longer_assigned_count']} store(s) remain scheduled under {selected_tech_name} but are no longer assigned to this PMT."
                 st.info(explanation)
+                if rec["completed_count"]:
+                    completed_rows = rec["tech_completed"].copy()
+                    completed_dates = pd.to_datetime(completed_rows.get("schedule_date"), errors="coerce")
+                    completed_start = completed_dates.min()
+                    completed_end = completed_dates.max()
+                    completed_sources = []
+                    if "schedule_source" in completed_rows.columns:
+                        completed_sources = completed_rows["schedule_source"].fillna("Blank source").astype(str).value_counts().head(3).to_dict()
+                    date_text = ""
+                    if pd.notna(completed_start) and pd.notna(completed_end):
+                        date_text = f" Dates: {completed_start.date()} through {completed_end.date()}."
+                    source_text = ""
+                    if completed_sources:
+                        source_text = " Sources: " + ", ".join(f"{source}: {count}" for source, count in completed_sources.items()) + "."
+                    st.warning(
+                        f"{rec['completed_count']} completed store(s) are counted because this selected schedule plan contains rows for {selected_tech_name} with status `Completed`."
+                        f"{date_text}{source_text} These are history records, not active scheduled work, and they do not block adding new active stores."
+                    )
                 detail_options = {
                     "Visible schedule rows": selected_scope,
                     "Assigned not scheduled": rec["assigned_not_scheduled"],
@@ -4026,7 +4070,7 @@ with tab_manage:
                 else:
                     display_cols = [
                         col for col in [
-                            "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "address", "city", "state", "status", "scheduled_technician", "scheduled_date", "distance_from_home", "notes"
+                            "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "address", "city", "state", "status", "schedule_source", "scheduled_technician", "scheduled_date", "distance_from_home", "notes"
                         ] if col in detail_df.columns
                     ]
                     st.dataframe(detail_df[display_cols], use_container_width=True, hide_index=True)
