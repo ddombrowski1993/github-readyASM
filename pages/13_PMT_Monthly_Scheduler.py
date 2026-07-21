@@ -2029,15 +2029,17 @@ def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, n
             )
             .order_by(ScheduleItem.sequence_number.desc())
         ) or 0
-        items = session.scalars(
-            select(ScheduleItem).where(
-                ScheduleItem.pmt_schedule_run_id == int(run_id),
-                ScheduleItem.store_id.in_([int(store_id) for store_id in store_ids]),
-                ScheduleItem.work_type == "PMT",
-                ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
+        for store_id in [int(value) for value in store_ids]:
+            item = session.scalar(
+                select(ScheduleItem).where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.store_id == int(store_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
+                )
             )
-        ).all()
-        for item in items:
+            if not item:
+                continue
             if item.employee_id == int(employee_id):
                 continue
             max_sequence += 1
@@ -4165,6 +4167,13 @@ with tab_manage:
                         with st.expander("Stores assigned here but active under another PMT", expanded=True):
                             conflict_cols = ["store_number", "city", "state", "scheduled_technician", "scheduled_date", "distance_from_home"]
                             st.dataframe(conflicts[conflict_cols], use_container_width=True, hide_index=True)
+                    move_assigned_conflicts = False
+                    if not conflicts.empty:
+                        move_assigned_conflicts = st.checkbox(
+                            "Move all active scheduled stores that are assigned to this PMT off the other PMT",
+                            value=selected_method == "Manual First + Auto-Fill Remaining",
+                            key="pmt_manage_build_move_all_conflicts",
+                        )
                     if candidate_stores.empty:
                         st.info("No stores match the current add-store filters.")
                     else:
@@ -4218,6 +4227,16 @@ with tab_manage:
                         available_sorted = candidate_stores[~candidate_stores["already_scheduled"]].copy()
                         selected_set = set(selected_store_ids)
                         remaining_ids = pmt_order_remaining_by_home_distance(candidate_stores, selected_store_ids)
+                        auto_move_conflict_ids = []
+                        if move_assigned_conflicts and not conflicts.empty:
+                            conflicts["_home_distance_sort"] = pd.to_numeric(conflicts.get("distance_from_home"), errors="coerce")
+                            auto_move_conflict_ids = (
+                                conflicts.sort_values(["_home_distance_sort", "store_number"], ascending=[True, True], na_position="last")["store_id"]
+                                .dropna()
+                                .astype(int)
+                                .tolist()
+                            )
+                        selected_conflict_ids = list(dict.fromkeys(selected_conflict_ids + auto_move_conflict_ids))
                         fill_store_ids = selected_store_ids + (remaining_ids if selected_method == "Manual First + Auto-Fill Remaining" else [])
                         summary_cols = st.columns(4)
                         summary_cols[0].metric("Manual selected", len(selected_store_ids))
