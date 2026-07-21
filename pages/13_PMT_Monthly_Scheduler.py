@@ -1557,6 +1557,17 @@ def run_status_counts(run_items):
     }
 
 
+def dataframe_from_session_records(state_key):
+    value = st.session_state.get(state_key, [])
+    if isinstance(value, pd.DataFrame):
+        return value.copy()
+    if isinstance(value, list):
+        return pd.DataFrame(value)
+    if isinstance(value, dict):
+        return pd.DataFrame([value])
+    st.session_state.pop(state_key, None)
+    return pd.DataFrame()
+
 
 def pmt_month_capacity(run_items, employee_id, default_value=10):
     tech_items = run_items[run_items["employee_id"] == int(employee_id)].copy()
@@ -4157,7 +4168,7 @@ with tab_manage:
                             st.session_state["pmt_manage_build_preview"] = preview_source.to_dict("records")
                             st.session_state["pmt_manage_build_preview_ids"] = fill_store_ids
                             st.session_state["pmt_manage_build_preview_method"] = selected_method
-                        preview_df = pd.DataFrame(st.session_state.get("pmt_manage_build_preview", []))
+                        preview_df = dataframe_from_session_records("pmt_manage_build_preview")
                         if not preview_df.empty:
                             preview_cols = ["technician", "store_number", "city", "state", "Proposed Month", "Proposed Date", "Proposed Stop", "Manual or Auto-Filled", "distance_from_home", "scheduled_technician"]
                             st.dataframe(preview_df[[col for col in preview_cols if col in preview_df.columns]], use_container_width=True, hide_index=True)
