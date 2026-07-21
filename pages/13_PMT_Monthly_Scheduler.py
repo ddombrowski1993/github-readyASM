@@ -1558,6 +1558,34 @@ def run_status_counts(run_items):
     }
 
 
+def pmt_order_remaining_by_home_distance(candidate_stores, selected_store_ids):
+    if candidate_stores.empty:
+        return []
+    remaining = candidate_stores[~candidate_stores["already_scheduled"]].copy()
+    selected_set = {int(store_id) for store_id in selected_store_ids}
+    remaining = remaining.loc[~remaining["store_id"].astype(int).isin(selected_set)].copy()
+    if remaining.empty:
+        return []
+    remaining["_home_distance_sort"] = pd.to_numeric(remaining.get("distance_from_home"), errors="coerce")
+    remaining = remaining.sort_values(["_home_distance_sort", "store_number"], ascending=[True, True], na_position="last")
+    return remaining["store_id"].dropna().astype(int).tolist()
+
+
+def add_preview_leg_distances(preview_df):
+    if preview_df.empty:
+        return preview_df
+    preview_df = preview_df.copy()
+    preview_df["Distance From Previous Stop"] = None
+    previous_lat = previous_lon = None
+    for index, row in preview_df.iterrows():
+        lat = to_float(row.get("latitude"))
+        lon = to_float(row.get("longitude"))
+        if previous_lat is not None and previous_lon is not None and lat is not None and lon is not None:
+            preview_df.at[index, "Distance From Previous Stop"] = round(haversine_miles(previous_lat, previous_lon, lat, lon), 1)
+        previous_lat, previous_lon = lat, lon
+    return preview_df
+
+
 def split_run_items_by_period(run_items, cycle_start, cycle_end):
     if run_items.empty or (cycle_start is None and cycle_end is None):
         return run_items.copy(), pd.DataFrame()
