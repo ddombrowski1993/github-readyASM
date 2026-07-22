@@ -4348,21 +4348,33 @@ with tab_manage:
                 if reorder_scope.empty:
                     st.info("No active schedule rows match the selected PMT and month.")
                 else:
-                    st.caption("To reorder, change the Stop # values below, or use Move one store to stop. Lower Stop # appears earlier in the route.")
+                    st.caption("To reorder, change the Stop # values below, or use Move one store. Choose the route position by store; the app will renumber the stops.")
                     move_cols = st.columns(3)
                     move_options = reorder_scope["schedule_item_id"].dropna().astype(int).tolist()
+                    reorder_lookup = reorder_scope.set_index("schedule_item_id")
                     move_item_id = move_cols[0].selectbox(
                         "Move store",
                         move_options,
-                        format_func=lambda value: f"Stop {int(reorder_scope.set_index('schedule_item_id').loc[value, 'sequence_number'])} - Store {reorder_scope.set_index('schedule_item_id').loc[value, 'store_number']}",
+                        format_func=lambda value: f"Stop {int(reorder_lookup.loc[value, 'sequence_number'])} - Store {reorder_lookup.loc[value, 'store_number']}",
                         key=f"pmt_manage_move_store_{selected_run}_{selected_employee}_{selected_month}",
                     )
-                    move_target_stop = move_cols[1].number_input(
-                        "New stop #",
-                        min_value=1,
-                        max_value=max(1, len(reorder_scope)),
-                        value=1,
-                        step=1,
+                    target_position_options = ["First stop"]
+                    target_position_lookup = {"First stop": None}
+                    target_position_options.extend(
+                        [
+                            f"After Stop {int(row['sequence_number'])} - Store {row['store_number']}"
+                            for _, row in reorder_scope.iterrows()
+                            if int(row["schedule_item_id"]) != int(move_item_id)
+                        ]
+                    )
+                    for _, row in reorder_scope.iterrows():
+                        if int(row["schedule_item_id"]) == int(move_item_id):
+                            continue
+                        target_position_lookup[f"After Stop {int(row['sequence_number'])} - Store {row['store_number']}"] = int(row["schedule_item_id"])
+                    move_target_position = move_cols[1].selectbox(
+                        "Move to",
+                        target_position_options,
+                        index=len(target_position_options) - 1,
                         key=f"pmt_manage_move_stop_{selected_run}_{selected_employee}_{selected_month}",
                     )
                     if move_cols[2].button("Preview Move", type="secondary", key=f"pmt_manage_preview_move_{selected_run}_{selected_employee}_{selected_month}"):
@@ -4371,7 +4383,12 @@ with tab_manage:
                         if current_index:
                             moved_row = moved_order.loc[current_index[0]].copy()
                             moved_order = moved_order.drop(index=current_index[0]).reset_index(drop=True)
-                            insert_at = max(0, min(int(move_target_stop) - 1, len(moved_order)))
+                            if move_target_position == "First stop":
+                                insert_at = 0
+                            else:
+                                target_item_id = target_position_lookup.get(move_target_position)
+                                target_matches = moved_order.index[moved_order["schedule_item_id"].astype(int) == int(target_item_id)].tolist() if target_item_id else []
+                                insert_at = target_matches[0] + 1 if target_matches else len(moved_order)
                             top = moved_order.iloc[:insert_at]
                             bottom = moved_order.iloc[insert_at:]
                             moved_order = pd.concat([top, pd.DataFrame([moved_row]), bottom], ignore_index=True)
