@@ -6,14 +6,14 @@ import streamlit as st
 st.set_page_config(page_title="Calibration Scheduler", layout="wide")
 
 
-from src.database import log_action, safe_query, session_scope
+from src.database import log_action, safe_query, session_scope, teams_for_work_group
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.exports import excel_bytes
 from src.geocoding import geocode_address
 from src.maps import map_html, render_plain_table, render_route_preview, render_store_map
 from src.pdf_reports import build_pdf_report, pdf_bytes
 from src.scheduler import build_schedule_preview, cascade_schedule_items, delete_schedule, haversine_miles, is_company_holiday, save_schedule, schedule_publish_conflicts
-from src.models import ScheduleItem
+from src.models import ScheduleItem, Team
 from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, page_header, section_header, sidebar_nav, step_flow
 
 
@@ -85,6 +85,47 @@ def add_months(value, months):
     year = value.year + month // 12
     month = month % 12 + 1
     return date(year, month, 1)
+
+
+def team_create_expander(team_type, key_prefix, expanded=False):
+    with st.expander(f"Create {team_type} Team", expanded=expanded):
+        st.caption("Create the team/area here, then assign stores in Areas and Maps or Stores. Calibration schedules are still built by technician.")
+        existing_teams = teams_for_work_group(team_type)
+        if not existing_teams.empty:
+            st.dataframe(existing_teams[["team_name", "city", "state", "active"]], use_container_width=True, hide_index=True)
+        with st.form(f"{key_prefix}_team_create_form"):
+            c1, c2, c3 = st.columns(3)
+            name = c1.text_input("Team name", key=f"{key_prefix}_team_name")
+            city = c2.text_input("City / market", key=f"{key_prefix}_team_city")
+            state = c3.text_input("State", max_chars=2, key=f"{key_prefix}_team_state")
+            notes = st.text_area("Notes", key=f"{key_prefix}_team_notes")
+            submitted = st.form_submit_button("Add Team")
+        if submitted:
+            clean_name = str(name or "").strip()
+            if not clean_name:
+                st.error("Enter a team name.")
+            else:
+                with session_scope() as session:
+                    existing = session.query(Team).filter(Team.team_name == clean_name).first()
+                    if existing:
+                        existing.team_type = team_type
+                        existing.city = str(city or "").strip() or existing.city
+                        existing.state = str(state or "").strip().upper() or existing.state
+                        existing.notes = str(notes or "").strip() or existing.notes
+                        existing.active = True
+                    else:
+                        session.add(
+                            Team(
+                                team_name=clean_name,
+                                team_type=team_type,
+                                city=str(city or "").strip(),
+                                state=str(state or "").strip().upper(),
+                                notes=str(notes or "").strip(),
+                                active=True,
+                            )
+                        )
+                st.success(f"{team_type} team saved.")
+                st.rerun()
 
 step_flow(
     ["Select technician", "Start point", "Settings", "Generate draft", "Review & edit", "Publish"],
@@ -191,6 +232,7 @@ tab_build, tab_manage, tab_export = st.tabs([
 
 with tab_build:
     section_header("Step 1: Select Calibration Technician", "Choose a Calibration technician and the assigned stores to schedule.", "blue", focus_key="calibration_focus_step", focus_value=1)
+    team_create_expander("Calibration", "cal_build", expanded=False)
     techs = calibration_technicians()
     if techs.empty:
         st.info("No active Calibration technicians found. Add Calibration employees first, then assign stores in Areas and Maps.")

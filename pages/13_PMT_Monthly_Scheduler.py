@@ -4315,29 +4315,89 @@ with tab_manage:
     if runs.empty:
         st.info("No PMT schedule plans have been published or imported yet.")
     else:
+        run_live_counts = safe_query(
+            """
+            select
+                r.id,
+                count(si.id) filter (
+                    where si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+                      and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
+                      and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
+                ) as live_active_rows,
+                count(distinct si.store_id) filter (
+                    where si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+                      and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
+                      and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
+                ) as live_active_stores,
+                count(distinct si.employee_id) filter (
+                    where si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+                      and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
+                      and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
+                ) as live_active_pmts
+            from pmt_schedule_runs r
+            left join schedule_items si
+              on si.pmt_schedule_run_id = r.id
+             and si.work_type = 'PMT'
+            where coalesce(r.status, '') <> 'Deleted'
+            group by r.id
+            """,
+            use_cache=False,
+        )
+        if not run_live_counts.empty:
+            runs = runs.merge(run_live_counts, on="id", how="left")
+        for column in ["live_active_rows", "live_active_stores", "live_active_pmts"]:
+            if column not in runs.columns:
+                runs[column] = 0
+            runs[column] = pd.to_numeric(runs[column], errors="coerce").fillna(0).astype(int)
+        run_lookup = runs.set_index("id")
+
+        def manage_run_label(value):
+            row = run_lookup.loc[value]
+            start_text = month_label(scalar_date(row.get("cycle_start"))) if scalar_date(row.get("cycle_start")) else "No start"
+            end_text = month_label(scalar_date(row.get("cycle_end"))) if scalar_date(row.get("cycle_end")) else "No end"
+            return (
+                f"#{value} - {row['run_name']} | {start_text} to {end_text} | "
+                f"{int(row.get('live_active_stores') or 0)} active stores, {int(row.get('live_active_pmts') or 0)} PMTs"
+            )
+
         selected_run = st.selectbox(
             "Schedule plan",
             runs["id"].tolist(),
-            format_func=lambda value: f"#{value} - {runs.set_index('id').loc[value, 'run_name']}",
+            format_func=manage_run_label,
             key="pmt_manage_selected_run",
         )
-        run_row = runs.set_index("id").loc[selected_run]
+        run_row = run_lookup.loc[selected_run]
         raw_run_items = pmt_manage_run_items(selected_run)
         run_cycle_start = scalar_date(run_row.get("cycle_start"))
         run_cycle_end = scalar_date(run_row.get("cycle_end"))
         run_items, out_of_period_items = split_run_items_by_period(raw_run_items, run_cycle_start, run_cycle_end)
         run_counts = run_status_counts(run_items)
+        current_pmt_summary = active_pmt_employee_summary()
+        current_assigned_store_count = (
+            int(pd.to_numeric(current_pmt_summary.get("assigned_stores"), errors="coerce").fillna(0).sum())
+            if not current_pmt_summary.empty
+            else 0
+        )
         run_cols = st.columns(6)
         run_cols[0].metric("Status", clean(run_row.get("status", "")) or "Published")
         run_cols[1].metric("Start", month_label(scalar_date(run_row.get("cycle_start"))) if scalar_date(run_row.get("cycle_start")) else "N/A")
         run_cols[2].metric("End", month_label(scalar_date(run_row.get("cycle_end"))) if scalar_date(run_row.get("cycle_end")) else "N/A")
-        run_cols[3].metric("Technicians", scalar_int(run_row.get("technician_count"), 0))
-        run_cols[4].metric("Unique Stores", run_counts["unique_stores"])
+        run_cols[3].metric("PMTs in Selected Plan", int(run_row.get("live_active_pmts") or 0))
+        run_cols[4].metric("Active Stores in Selected Plan", distinct_store_count(run_items[pmt_active_item_mask(run_items)]) if not run_items.empty else 0)
         run_cols[5].metric("Unscheduled", scalar_int(run_row.get("unscheduled_count"), 0))
         row_cols = st.columns(3)
-        row_cols[0].metric("Active Rows", run_counts["active_rows"])
+        row_cols[0].metric("Active Rows in Selected Plan", run_counts["active_rows"])
         row_cols[1].metric("Completed Rows", run_counts["completed_rows"])
         row_cols[2].metric("Canceled / Skipped Rows", run_counts["canceled_rows"])
+        st.caption(
+            f"This section is showing schedule run #{selected_run} only. Current active PMT assignments across all technicians: "
+            f"{current_assigned_store_count:,} stores."
+        )
+        if current_assigned_store_count and run_counts["active_rows"] < current_assigned_store_count * 0.5:
+            st.warning(
+                f"The selected schedule plan only has {run_counts['active_rows']:,} active row(s), but current PMT assignments contain "
+                f"{current_assigned_store_count:,} store(s). If you expected the full 400+ store schedule, select a full-team run or publish/import the full schedule run."
+            )
         with st.expander("View all schedule rows", expanded=False):
             run_item_view = run_items[
                 ["schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "address", "city", "state", "zip", "status", "cycle_label", "notes"]

@@ -11,7 +11,7 @@ from src.database import log_action, safe_query, session_scope, teams_for_work_g
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.exports import excel_bytes
 from src.maps import map_html, render_plain_table, render_route_preview, render_store_map
-from src.models import ScheduleItem, Store
+from src.models import ScheduleItem, Store, Team
 from src.pdf_reports import build_pdf_report, pdf_bytes
 from src.scheduler import (
     build_schedule_preview,
@@ -78,6 +78,44 @@ def status_badge(label, value, tone="green"):
         f'border-radius:999px;padding:0.25rem 0.65rem;font-weight:800;margin:0.12rem 0;">{label}: {value}</span>',
         unsafe_allow_html=True,
     )
+
+
+def team_create_expander(team_type, key_prefix, expanded=False):
+    with st.expander(f"Create {team_type} Team", expanded=expanded):
+        st.caption("Create the team/area here, then assign stores in Areas and Maps or Stores.")
+        with st.form(f"{key_prefix}_team_create_form"):
+            c1, c2, c3 = st.columns(3)
+            name = c1.text_input("Team name", key=f"{key_prefix}_team_name")
+            city = c2.text_input("City / market", key=f"{key_prefix}_team_city")
+            state = c3.text_input("State", max_chars=2, key=f"{key_prefix}_team_state")
+            notes = st.text_area("Notes", key=f"{key_prefix}_team_notes")
+            submitted = st.form_submit_button("Add Team")
+        if submitted:
+            clean_name = str(name or "").strip()
+            if not clean_name:
+                st.error("Enter a team name.")
+            else:
+                with session_scope() as session:
+                    existing = session.query(Team).filter(Team.team_name == clean_name).first()
+                    if existing:
+                        existing.team_type = team_type
+                        existing.city = str(city or "").strip() or existing.city
+                        existing.state = str(state or "").strip().upper() or existing.state
+                        existing.notes = str(notes or "").strip() or existing.notes
+                        existing.active = True
+                    else:
+                        session.add(
+                            Team(
+                                team_name=clean_name,
+                                team_type=team_type,
+                                city=str(city or "").strip(),
+                                state=str(state or "").strip().upper(),
+                                notes=str(notes or "").strip(),
+                                active=True,
+                            )
+                        )
+                st.success(f"{team_type} team saved.")
+                st.rerun()
 
 
 def workflow_break(title, body):
@@ -716,7 +754,8 @@ default_schedule_start = next_or_same_schedule_workday(today, ["Monday", "Tuesda
 if brand_team_df.empty:
     with st.container(border=True):
         step_header(1, "Select Work Area", "Create a Brand Enhancement team before building schedules.", "blue")
-        st.warning("No Brand Enhancement teams were found. Add a Brand Enhancement area in Areas and Maps or Employees > Teams.")
+        st.warning("No Brand Enhancement teams were found. Create a Brand Enhancement team below, then assign stores to it.")
+        team_create_expander("Brand Enhancement", "be_empty", expanded=True)
     st.stop()
 
 
@@ -729,6 +768,7 @@ tab_build, tab_manage, tab_export = st.tabs([
 with tab_build:
     with st.container(border=True):
         step_header(1, "Select What You Are Scheduling", "Choose the Brand Enhancement area, crew, and schedule period.", "blue")
+        team_create_expander("Brand Enhancement", "be_build", expanded=False)
         if st.session_state.get("be_schedule_month") and st.session_state.get("be_schedule_month") < today:
             st.session_state["be_schedule_month"] = default_schedule_start
             st.session_state["be_start"] = default_schedule_start
