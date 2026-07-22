@@ -103,23 +103,29 @@ def team_create_expander(team_type, key_prefix, expanded=False):
             submitted = st.form_submit_button("Add Team")
         if submitted:
             clean_name = str(name or "").strip()
+            clean_city = str(city or "").strip()
+            clean_state = str(state or "").strip().upper()
             if not clean_name:
                 st.error("Enter a team name.")
+            elif not clean_city:
+                st.error("Enter a city / market so this team has an anchor.")
+            elif len(clean_state) != 2:
+                st.error("Enter a 2-letter state so this team has an anchor.")
             else:
                 with session_scope() as session:
                     existing = session.query(Team).filter(Team.team_name == clean_name).first()
                     if existing:
                         existing.team_type = team_type
-                        existing.city = str(city or "").strip() or existing.city
-                        existing.state = str(state or "").strip().upper() or existing.state
+                        existing.city = clean_city
+                        existing.state = clean_state
                         existing.notes = str(notes or "").strip() or existing.notes
                         existing.active = True
                     else:
                         existing = Team(
                             team_name=clean_name,
                             team_type=team_type,
-                            city=str(city or "").strip(),
-                            state=str(state or "").strip().upper(),
+                            city=clean_city,
+                            state=clean_state,
                             notes=str(notes or "").strip(),
                             active=True,
                         )
@@ -130,7 +136,7 @@ def team_create_expander(team_type, key_prefix, expanded=False):
                         .filter(MapArea.team_id == int(existing.id), MapArea.area_type == team_type, MapArea.active == True)
                         .first()
                     )
-                    home_base = ", ".join([value for value in [str(city or "").strip(), str(state or "").strip().upper()] if value])
+                    home_base = f"{clean_city}, {clean_state}"
                     if area:
                         area.area_name = clean_name
                         area.home_base = home_base
