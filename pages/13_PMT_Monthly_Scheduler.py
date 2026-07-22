@@ -4348,9 +4348,48 @@ with tab_manage:
                 if reorder_scope.empty:
                     st.info("No active schedule rows match the selected PMT and month.")
                 else:
+                    st.caption("To reorder, change the Stop # values below, or use Move one store to stop. Lower Stop # appears earlier in the route.")
+                    move_cols = st.columns(3)
+                    move_options = reorder_scope["schedule_item_id"].dropna().astype(int).tolist()
+                    move_item_id = move_cols[0].selectbox(
+                        "Move store",
+                        move_options,
+                        format_func=lambda value: f"Stop {int(reorder_scope.set_index('schedule_item_id').loc[value, 'sequence_number'])} - Store {reorder_scope.set_index('schedule_item_id').loc[value, 'store_number']}",
+                        key=f"pmt_manage_move_store_{selected_run}_{selected_employee}_{selected_month}",
+                    )
+                    move_target_stop = move_cols[1].number_input(
+                        "New stop #",
+                        min_value=1,
+                        max_value=max(1, len(reorder_scope)),
+                        value=1,
+                        step=1,
+                        key=f"pmt_manage_move_stop_{selected_run}_{selected_employee}_{selected_month}",
+                    )
+                    if move_cols[2].button("Preview Move", type="secondary", key=f"pmt_manage_preview_move_{selected_run}_{selected_employee}_{selected_month}"):
+                        moved_order = reorder_scope.copy().reset_index(drop=True)
+                        current_index = moved_order.index[moved_order["schedule_item_id"].astype(int) == int(move_item_id)].tolist()
+                        if current_index:
+                            moved_row = moved_order.loc[current_index[0]].copy()
+                            moved_order = moved_order.drop(index=current_index[0]).reset_index(drop=True)
+                            insert_at = max(0, min(int(move_target_stop) - 1, len(moved_order)))
+                            top = moved_order.iloc[:insert_at]
+                            bottom = moved_order.iloc[insert_at:]
+                            moved_order = pd.concat([top, pd.DataFrame([moved_row]), bottom], ignore_index=True)
+                            moved_order["sequence_number"] = range(1, len(moved_order) + 1)
+                            st.session_state["pmt_manage_reorder_preview"] = moved_order.to_dict("records")
+                    preview_order = dataframe_from_session_records("pmt_manage_reorder_preview")
+                    if not preview_order.empty:
+                        st.markdown("**Move preview**")
+                        preview_cols = ["sequence_number", "store_number", "city", "state", "schedule_date", "status"]
+                        st.dataframe(preview_order[[col for col in preview_cols if col in preview_order.columns]], use_container_width=True, hide_index=True)
+                        if st.button("Apply Move Preview", type="primary", key=f"pmt_manage_apply_move_{selected_run}_{selected_employee}_{selected_month}"):
+                            updated = save_manual_pmt_schedule_edits(preview_order)
+                            st.session_state.pop("pmt_manage_reorder_preview", None)
+                            st.success(f"Updated {updated} PMT schedule item(s).")
+                            st.rerun()
                     reorder_view = reorder_scope[
                         ["schedule_item_id", "schedule_date", "sequence_number", "store_number", "city", "state", "status", "notes"]
-                    ].rename(columns={"store_number": "Store", "city": "City", "state": "State"})
+                    ].rename(columns={"sequence_number": "Stop #", "store_number": "Store", "city": "City", "state": "State"})
                     reorder_view.insert(0, "Remove", False)
                     edited_order = st.data_editor(
                         reorder_view,
@@ -4361,7 +4400,7 @@ with tab_manage:
                             "Remove": st.column_config.CheckboxColumn("Remove"),
                             "schedule_item_id": None,
                             "schedule_date": st.column_config.DateColumn("Schedule Date"),
-                            "sequence_number": st.column_config.NumberColumn("Stop", min_value=1, step=1),
+                            "Stop #": st.column_config.NumberColumn("Stop #", min_value=1, step=1),
                             "status": st.column_config.SelectboxColumn("Status", options=["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed", "Completed", "Skipped", "Cancelled"]),
                             "notes": st.column_config.TextColumn("Notes"),
                         },
@@ -4369,6 +4408,7 @@ with tab_manage:
                     )
                     remove_ids = edited_order.loc[edited_order["Remove"].astype(bool), "schedule_item_id"].dropna().astype(int).tolist()
                     edited_without_remove = edited_order.drop(columns=["Remove"], errors="ignore")
+                    edited_without_remove = edited_without_remove.rename(columns={"Stop #": "sequence_number"})
                     st.caption("Removing a store here removes it from this schedule only. It does not change PMT ownership assignment.")
                     action_cols = st.columns(3)
                     if action_cols[0].button("Save Date / Stop Changes", type="primary", key="pmt_manage_reorder_save"):
