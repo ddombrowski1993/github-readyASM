@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 from html import escape
+import json
 
 import pandas as pd
 import streamlit as st
@@ -10,8 +11,8 @@ st.set_page_config(page_title="Brand Enhancement Scheduler", layout="wide")
 from src.database import log_action, safe_query, session_scope, teams_for_work_group
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.exports import excel_bytes
-from src.maps import map_html, render_plain_table, render_route_preview, render_store_map
-from src.models import ScheduleItem, Store, Team
+from src.maps import map_html, render_plain_table, render_route_preview, render_store_map, stable_color
+from src.models import MapArea, ScheduleItem, Store, Team
 from src.pdf_reports import build_pdf_report, pdf_bytes
 from src.scheduler import (
     build_schedule_preview,
@@ -104,13 +105,38 @@ def team_create_expander(team_type, key_prefix, expanded=False):
                         existing.notes = str(notes or "").strip() or existing.notes
                         existing.active = True
                     else:
+                        existing = Team(
+                            team_name=clean_name,
+                            team_type=team_type,
+                            city=str(city or "").strip(),
+                            state=str(state or "").strip().upper(),
+                            notes=str(notes or "").strip(),
+                            active=True,
+                        )
+                        session.add(existing)
+                        session.flush()
+                    area = (
+                        session.query(MapArea)
+                        .filter(MapArea.team_id == int(existing.id), MapArea.area_type == team_type, MapArea.active == True)
+                        .first()
+                    )
+                    home_base = ", ".join([value for value in [str(city or "").strip(), str(state or "").strip().upper()] if value])
+                    if area:
+                        area.area_name = clean_name
+                        area.home_base = home_base
+                        area.assignment_type = "Brand Enhancement area"
+                    else:
                         session.add(
-                            Team(
-                                team_name=clean_name,
-                                team_type=team_type,
-                                city=str(city or "").strip(),
-                                state=str(state or "").strip().upper(),
-                                notes=str(notes or "").strip(),
+                            MapArea(
+                                area_name=clean_name,
+                                area_type=team_type,
+                                team_id=int(existing.id),
+                                assignment_type="Brand Enhancement area",
+                                team_members=json.dumps([]),
+                                home_base=home_base,
+                                geometry_json=json.dumps({"type": "Polygon", "coordinates": [[]]}),
+                                assigned_store_ids=json.dumps([]),
+                                color=stable_color(clean_name),
                                 active=True,
                             )
                         )
