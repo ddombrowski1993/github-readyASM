@@ -1129,6 +1129,7 @@ def published_pmt_run_export_draft(run_id):
         left join stores s on s.id = si.store_id
         where si.pmt_schedule_run_id = :run_id
           and si.work_type = 'PMT'
+          and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
           and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
           and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
         order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
@@ -1451,7 +1452,8 @@ def pmt_manage_run_items(run_id):
 
 PMT_ACTIVE_STATUSES = {"scheduled", "needs rescheduled", "rescheduled", "rain delay", "not completed"}
 PMT_COMPLETED_STATUSES = {"completed", "complete"}
-PMT_CANCELED_STATUSES = {"cancelled", "canceled", "skipped", "deleted"}
+PMT_CANCELED_STATUSES = {"cancelled", "canceled", "skipped", "deleted", "transferred", "superseded", "archived"}
+PMT_ACTIVE_STATUS_VALUES = ["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]
 
 
 def normalize_schedule_status(value):
@@ -1559,6 +1561,159 @@ def run_status_counts(run_items):
         "completed_rows": int(pmt_completed_item_mask(run_items).sum()),
         "canceled_rows": int(pmt_canceled_item_mask(run_items).sum()),
     }
+
+
+def pmt_schedule_conflicts(run_items):
+    if run_items.empty:
+        return pd.DataFrame()
+    active = run_items[pmt_active_item_mask(run_items)].copy()
+    if active.empty:
+        return pd.DataFrame()
+    for column in ["schedule_item_id", "store_id", "employee_id", "assigned_pmt_employee_id", "sequence_number"]:
+        if column in active.columns:
+            active[column] = pd.to_numeric(active[column], errors="coerce")
+    duplicate_store_ids = set(
+        active.groupby("store_id")["employee_id"]
+        .nunique()
+        .loc[lambda series: series > 1]
+        .index.dropna()
+        .astype(int)
+        .tolist()
+    )
+    row_count_duplicate_ids = set(
+        active.groupby("store_id")["schedule_item_id"]
+        .count()
+        .loc[lambda series: series > 1]
+        .index.dropna()
+        .astype(int)
+        .tolist()
+    )
+    owner_mismatch = (
+        active["assigned_pmt_employee_id"].notna()
+        & active["employee_id"].notna()
+        & (active["assigned_pmt_employee_id"].astype("Int64") != active["employee_id"].astype("Int64"))
+    )
+    conflict_store_ids = duplicate_store_ids | row_count_duplicate_ids | set(active.loc[owner_mismatch, "store_id"].dropna().astype(int).tolist())
+    if not conflict_store_ids:
+        return pd.DataFrame()
+    conflicts = active[active["store_id"].astype("Int64").isin(conflict_store_ids)].copy()
+
+    def conflict_type(row):
+        reasons = []
+        store_id = int(row["store_id"]) if pd.notna(row.get("store_id")) else None
+        if store_id in duplicate_store_ids:
+            reasons.append("Duplicate active schedule")
+        elif store_id in row_count_duplicate_ids:
+            reasons.append("Multiple active rows in same run")
+        assigned_id = row.get("assigned_pmt_employee_id")
+        employee_id = row.get("employee_id")
+        if pd.notna(assigned_id) and pd.notna(employee_id) and int(assigned_id) != int(employee_id):
+            reasons.append("Scheduled under previous technician")
+        return "; ".join(reasons) or "Schedule conflict"
+
+    conflicts["conflict_type"] = conflicts.apply(conflict_type, axis=1)
+    conflicts["other_active_technicians"] = conflicts.groupby("store_id")["technician"].transform(
+        lambda values: ", ".join(sorted({clean(value) for value in values if clean(value)}))
+    )
+    conflicts["recommended_technician"] = conflicts["assigned_technician"].fillna("")
+    return conflicts.sort_values(["store_number", "schedule_date", "technician", "sequence_number"])
+
+
+def resequence_pmt_month(session, run_id, employee_id, month_start_value):
+    if employee_id is None or month_start_value is None:
+        return 0
+    start_value = month_start(month_start_value)
+    items = session.scalars(
+        select(ScheduleItem)
+        .where(
+            ScheduleItem.pmt_schedule_run_id == int(run_id),
+            ScheduleItem.employee_id == int(employee_id),
+            ScheduleItem.work_type == "PMT",
+            ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+            ScheduleItem.schedule_date >= start_value,
+            ScheduleItem.schedule_date < add_months(start_value, 1),
+        )
+        .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.store_id, ScheduleItem.id)
+    ).all()
+    for index, item in enumerate(items, start=1):
+        item.sequence_number = index
+    return len(items)
+
+
+def resolve_pmt_conflicts_keep_assigned(run_id, store_ids, notes=""):
+    store_ids = [int(value) for value in store_ids if pd.notna(value)]
+    if not store_ids:
+        return {"stores": 0, "superseded": 0, "moved": 0, "resequenced_rows": 0}
+    superseded = 0
+    moved = 0
+    touched_months = set()
+    touched_store_ids = set()
+    with session_scope("Resolve PMT schedule conflicts") as session:
+        for store_id in sorted(set(store_ids)):
+            store = session.get(Store, int(store_id))
+            assigned_employee_id = int(store.assigned_pmt_employee_id) if store and store.assigned_pmt_employee_id else None
+            active_items = session.scalars(
+                select(ScheduleItem)
+                .where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.store_id == int(store_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                )
+                .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.id)
+            ).all()
+            if not active_items or assigned_employee_id is None:
+                continue
+            owner_items = [item for item in active_items if item.employee_id == assigned_employee_id]
+            if owner_items:
+                keep_item = owner_items[0]
+            else:
+                keep_item = active_items[0]
+                old_employee_id = keep_item.employee_id
+                if keep_item.original_schedule_date is None:
+                    keep_item.original_schedule_date = keep_item.schedule_date
+                keep_item.employee_id = assigned_employee_id
+                keep_item.schedule_source = "PMT Territory Transfer"
+                moved += 1
+                touched_months.add((old_employee_id, month_start(keep_item.schedule_date)))
+            touched_months.add((keep_item.employee_id, month_start(keep_item.schedule_date)))
+            for item in active_items:
+                if item.id == keep_item.id:
+                    continue
+                if item.original_schedule_date is None:
+                    item.original_schedule_date = item.schedule_date
+                item.status = "Transferred"
+                item.schedule_source = "PMT Territory Transfer Superseded"
+                note_parts = [
+                    clean(item.completion_notes),
+                    f"Superseded by active PMT schedule item #{keep_item.id} for current assigned technician.",
+                ]
+                if notes:
+                    note_parts.append(clean(notes))
+                item.completion_notes = " | ".join([part for part in note_parts if part])
+                superseded += 1
+                touched_months.add((item.employee_id, month_start(item.schedule_date)))
+            touched_store_ids.add(store_id)
+        resequenced_rows = 0
+        for employee_id, month_value in touched_months:
+            resequenced_rows += resequence_pmt_month(session, run_id, employee_id, month_value)
+        run = session.get(PMTScheduleRun, int(run_id))
+        if run:
+            active_store_count = session.scalar(
+                select(func.count(func.distinct(ScheduleItem.store_id))).where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                )
+            )
+            run.store_count = int(active_store_count or 0)
+    log_action(
+        "pmt schedule conflicts resolved",
+        "pmt_schedule_runs",
+        int(run_id),
+        f"Resolved {len(touched_store_ids)} store conflict(s); superseded {superseded}; moved {moved}; resequenced {resequenced_rows}.",
+    )
+    return {"stores": len(touched_store_ids), "superseded": superseded, "moved": moved, "resequenced_rows": resequenced_rows}
 
 
 def pmt_order_remaining_by_home_distance(candidate_stores, selected_store_ids):
@@ -1956,8 +2111,14 @@ def assigned_pmt_store_candidates(employee_id, run_id=None, include_scheduled=Fa
         params["run_id"] = int(run_id)
         schedule_columns = """
                min(si.id) as scheduled_item_id,
-               min(si.employee_id) as scheduled_employee_id,
-               max(se.full_name) as scheduled_technician,
+               coalesce(
+                   max(case when si.employee_id <> :employee_id then si.employee_id end),
+                   min(si.employee_id)
+               ) as scheduled_employee_id,
+               coalesce(
+                   max(case when si.employee_id <> :employee_id then se.full_name end),
+                   max(se.full_name)
+               ) as scheduled_technician,
                min(si.schedule_date) as scheduled_date,
                count(si.id) as scheduled_count
         """
@@ -2030,16 +2191,51 @@ def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, n
             .order_by(ScheduleItem.sequence_number.desc())
         ) or 0
         for store_id in [int(value) for value in store_ids]:
-            item = session.scalar(
+            active_items = session.scalars(
                 select(ScheduleItem).where(
                     ScheduleItem.pmt_schedule_run_id == int(run_id),
                     ScheduleItem.store_id == int(store_id),
                     ScheduleItem.work_type == "PMT",
-                    ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
                 )
-            )
+            ).all()
+            if not active_items:
+                continue
+            target_items = [item for item in active_items if item.employee_id == int(employee_id)]
+            other_items = [item for item in active_items if item.employee_id != int(employee_id)]
+            if target_items:
+                # The selected PMT already has this store; retire duplicate future rows without erasing history.
+                keep_item = target_items[0]
+                for duplicate_item in other_items:
+                    if duplicate_item.original_schedule_date is None:
+                        duplicate_item.original_schedule_date = duplicate_item.schedule_date
+                    duplicate_item.status = "Transferred"
+                    duplicate_item.schedule_source = "PMT Schedule Conflict Superseded"
+                    note_parts = [
+                        clean(duplicate_item.completion_notes),
+                        f"Superseded by active PMT schedule item #{keep_item.id} for selected PMT.",
+                    ]
+                    if notes:
+                        note_parts.append(clean(notes))
+                    duplicate_item.completion_notes = " | ".join([part for part in note_parts if part])
+                    moved += 1
+                continue
+            item = other_items[0] if other_items else None
             if not item:
                 continue
+            for duplicate_item in other_items[1:]:
+                if duplicate_item.original_schedule_date is None:
+                    duplicate_item.original_schedule_date = duplicate_item.schedule_date
+                duplicate_item.status = "Transferred"
+                duplicate_item.schedule_source = "PMT Schedule Conflict Superseded"
+                note_parts = [
+                    clean(duplicate_item.completion_notes),
+                    f"Superseded by transferred PMT schedule item #{item.id}.",
+                ]
+                if notes:
+                    note_parts.append(clean(notes))
+                duplicate_item.completion_notes = " | ".join([part for part in note_parts if part])
+                moved += 1
             if item.employee_id == int(employee_id):
                 continue
             max_sequence += 1
@@ -2058,6 +2254,115 @@ def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, n
             moved += 1
     log_action("pmt scheduled stores moved to assigned pmt", "pmt_schedule_runs", int(run_id), f"{moved} scheduled item(s) moved to employee_id={int(employee_id)}")
     return moved
+
+
+def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes=""):
+    preview_df = pd.DataFrame(preview_records or [])
+    if preview_df.empty:
+        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0}
+    preview_df = preview_df.copy()
+    preview_df["store_id"] = pd.to_numeric(preview_df.get("store_id"), errors="coerce")
+    preview_df["Proposed Stop"] = pd.to_numeric(preview_df.get("Proposed Stop"), errors="coerce")
+    preview_df = preview_df.dropna(subset=["store_id"]).sort_values(["Proposed Stop", "store_number"])
+    if preview_df.empty:
+        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0}
+    saved = 0
+    created = 0
+    updated = 0
+    superseded = 0
+    touched_months = set()
+    now = datetime.utcnow()
+    with session_scope("Apply PMT manage schedule preview") as session:
+        schedule_id = session.scalar(
+            select(ScheduleItem.schedule_id)
+            .where(ScheduleItem.pmt_schedule_run_id == int(run_id))
+            .order_by(ScheduleItem.schedule_id)
+        )
+        if schedule_id is None:
+            return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0}
+        for _, row in preview_df.iterrows():
+            store_id = int(row["store_id"])
+            proposed_date = pd.to_datetime(row.get("Proposed Date") or row.get("schedule_date"), errors="coerce")
+            schedule_date = proposed_date.date() if pd.notna(proposed_date) else first_workday(date.today(), employee_id=int(employee_id))
+            proposed_stop = scalar_int(row.get("Proposed Stop"), 0) or 1
+            active_items = session.scalars(
+                select(ScheduleItem)
+                .where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.store_id == int(store_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                )
+                .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.id)
+            ).all()
+            target_items = [item for item in active_items if item.employee_id == int(employee_id)]
+            if target_items:
+                keep_item = target_items[0]
+                updated += 1
+            else:
+                keep_item = ScheduleItem(
+                    schedule_id=int(schedule_id),
+                    schedule_date=schedule_date,
+                    sequence_number=int(proposed_stop),
+                    pmt_schedule_run_id=int(run_id),
+                    employee_id=int(employee_id),
+                    store_id=store_id,
+                    work_type="PMT",
+                    status="Scheduled",
+                    schedule_source="PMT Manage Schedule Preview",
+                    cycle_label=month_label(month_start(schedule_date)),
+                    completion_notes=clean(notes),
+                    created_at=now,
+                )
+                session.add(keep_item)
+                created += 1
+            if keep_item.original_schedule_date is None and keep_item.schedule_date and keep_item.schedule_date != schedule_date:
+                keep_item.original_schedule_date = keep_item.schedule_date
+            keep_item.schedule_date = schedule_date
+            keep_item.sequence_number = int(proposed_stop)
+            keep_item.status = "Scheduled"
+            keep_item.schedule_source = "PMT Manage Schedule Preview"
+            keep_item.cycle_label = month_label(month_start(schedule_date))
+            keep_item.completion_notes = clean(notes) or keep_item.completion_notes
+            session.flush()
+            touched_months.add((int(employee_id), month_start(schedule_date)))
+            for item in active_items:
+                if item.id == keep_item.id:
+                    continue
+                if item.original_schedule_date is None:
+                    item.original_schedule_date = item.schedule_date
+                item.status = "Transferred"
+                item.schedule_source = "PMT Manage Schedule Preview Superseded"
+                note_parts = [
+                    clean(item.completion_notes),
+                    f"Superseded by preview schedule item #{keep_item.id} for the selected PMT.",
+                ]
+                if notes:
+                    note_parts.append(clean(notes))
+                item.completion_notes = " | ".join([part for part in note_parts if part])
+                touched_months.add((item.employee_id, month_start(item.schedule_date)))
+                superseded += 1
+            saved += 1
+        resequenced_rows = 0
+        for touched_employee_id, touched_month in touched_months:
+            resequenced_rows += resequence_pmt_month(session, run_id, touched_employee_id, touched_month)
+        run = session.get(PMTScheduleRun, int(run_id))
+        if run:
+            active_store_count = session.scalar(
+                select(func.count(func.distinct(ScheduleItem.store_id))).where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                )
+            )
+            run.store_count = int(active_store_count or 0)
+    log_action(
+        "pmt manage schedule preview applied",
+        "pmt_schedule_runs",
+        int(run_id),
+        f"Saved {saved} preview store(s); created {created}; updated {updated}; superseded {superseded}.",
+    )
+    return {"saved": saved, "superseded": superseded, "created": created, "updated": updated, "resequenced_rows": resequenced_rows}
 
 
 def add_assigned_stores_auto_fill_to_pmt_run(run_id, employee_id, store_ids, target_month, fill_end_month, monthly_capacity, notes=""):
@@ -2105,7 +2410,7 @@ def add_assigned_stores_auto_fill_to_pmt_run(run_id, employee_id, store_ids, tar
                     ScheduleItem.pmt_schedule_run_id == int(run_id),
                     ScheduleItem.store_id == int(store_id),
                     ScheduleItem.work_type == "PMT",
-                    ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
                 )
             )
             if duplicate:
@@ -2176,7 +2481,7 @@ def add_assigned_stores_to_pmt_run(run_id, employee_id, store_ids, target_month,
                     ScheduleItem.pmt_schedule_run_id == int(run_id),
                     ScheduleItem.store_id == int(store_id),
                     ScheduleItem.work_type == "PMT",
-                    ScheduleItem.status.in_(["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]),
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
                 )
             )
             if duplicate:
@@ -2262,6 +2567,48 @@ def delete_pmt_schedule_items(item_ids, reason=""):
                     session.delete(schedule)
     log_action("pmt schedule items deleted", "schedule_items", description=f"{deleted} PMT schedule item(s) deleted. Reason: {clean(reason)}")
     return deleted
+
+
+def archive_out_of_period_pmt_schedule_items(run_id, item_ids, reason=""):
+    item_ids = [int(item_id) for item_id in item_ids if scalar_int(item_id, 0)]
+    if not item_ids:
+        return 0
+    archived = 0
+    with session_scope("Archive out-of-period PMT schedule rows") as session:
+        items = session.scalars(
+            select(ScheduleItem).where(
+                ScheduleItem.id.in_(item_ids),
+                ScheduleItem.pmt_schedule_run_id == int(run_id),
+                ScheduleItem.work_type == "PMT",
+            )
+        ).all()
+        for item in items:
+            if normalize_schedule_status(item.status) in PMT_COMPLETED_STATUSES:
+                continue
+            if item.original_schedule_date is None:
+                item.original_schedule_date = item.schedule_date
+            item.status = "Archived"
+            item.schedule_source = "PMT Out-of-Period Cleanup"
+            note_parts = [
+                clean(item.completion_notes),
+                "Archived because this row falls outside the selected PMT schedule run date range.",
+            ]
+            if reason:
+                note_parts.append(clean(reason))
+            item.completion_notes = " | ".join([part for part in note_parts if part])
+            archived += 1
+        run = session.get(PMTScheduleRun, int(run_id))
+        if run:
+            active_store_count = session.scalar(
+                select(func.count(func.distinct(ScheduleItem.store_id))).where(
+                    ScheduleItem.pmt_schedule_run_id == int(run_id),
+                    ScheduleItem.work_type == "PMT",
+                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                )
+            )
+            run.store_count = int(active_store_count or 0)
+    log_action("pmt out-of-period rows archived", "schedule_items", description=f"{archived} PMT schedule item(s) archived. Reason: {clean(reason)}")
+    return archived
 
 
 def delete_pmt_technician_schedule(run_id, employee_id, month_start_value=None, active_only=True, reason=""):
@@ -4004,9 +4351,134 @@ with tab_manage:
             )
             with st.expander("Review rows outside this schedule plan's date range", expanded=True):
                 outside_view = out_of_period_items[
-                    ["schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source", "notes"]
-                ]
+                    ["schedule_item_id", "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source", "notes"]
+                ].copy()
                 st.dataframe(outside_view, use_container_width=True, hide_index=True)
+                active_outside = out_of_period_items[pmt_active_item_mask(out_of_period_items)].copy()
+                if active_outside.empty:
+                    st.info("These rows are not active schedule work. They are shown only so the run history is transparent.")
+                else:
+                    st.warning(
+                        f"{len(active_outside)} active out-of-period row(s) can be archived. "
+                        "Archiving keeps the audit trail but removes them from active schedule logic."
+                    )
+                    cleanup_note = st.text_input(
+                        "Cleanup note",
+                        value="Out-of-period rows from this PMT schedule run were archived.",
+                        key=f"pmt_manage_outside_cleanup_note_{selected_run}",
+                    )
+                    confirm_outside_archive = st.checkbox(
+                        "Confirm archive active rows outside this schedule plan date range.",
+                        key=f"pmt_manage_outside_archive_confirm_{selected_run}",
+                    )
+                    if st.button(
+                        "Archive Active Out-of-Period Rows",
+                        type="secondary",
+                        disabled=not confirm_outside_archive,
+                        key=f"pmt_manage_outside_archive_button_{selected_run}",
+                    ):
+                        archived = archive_out_of_period_pmt_schedule_items(
+                            selected_run,
+                            active_outside["schedule_item_id"].dropna().astype(int).tolist(),
+                            cleanup_note,
+                        )
+                        st.success(f"Archived {archived} active out-of-period row(s).")
+                        st.rerun()
+
+        conflict_rows = pmt_schedule_conflicts(run_items)
+        if not conflict_rows.empty:
+            conflict_store_count = distinct_store_count(conflict_rows)
+            st.error(
+                f"{conflict_store_count} schedule conflict(s) found. These stores are actively scheduled more than once "
+                "or are scheduled under a PMT who no longer owns them."
+            )
+            with st.expander("Review and Resolve Schedule Conflicts", expanded=True):
+                st.caption(
+                    "Recommended fix: keep the schedule row for the store's current assigned PMT, then mark the other active future rows as Transferred."
+                )
+                conflict_view = conflict_rows[
+                    [
+                        "store_id",
+                        "store_number",
+                        "assigned_technician",
+                        "technician",
+                        "other_active_technicians",
+                        "month",
+                        "schedule_date",
+                        "sequence_number",
+                        "status",
+                        "conflict_type",
+                    ]
+                ].copy()
+                conflict_view.insert(0, "Resolve", True)
+                edited_conflicts = st.data_editor(
+                    conflict_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=[
+                        "store_id",
+                        "store_number",
+                        "assigned_technician",
+                        "technician",
+                        "other_active_technicians",
+                        "month",
+                        "schedule_date",
+                        "sequence_number",
+                        "status",
+                        "conflict_type",
+                    ],
+                    column_config={
+                        "Resolve": st.column_config.CheckboxColumn("Resolve", help="Resolve this store by keeping the current assigned PMT's active schedule."),
+                        "store_id": None,
+                        "store_number": "Store",
+                        "assigned_technician": "Current Assigned PMT",
+                        "technician": "Scheduled PMT",
+                        "other_active_technicians": "All Active Scheduled PMTs",
+                        "month": "Month",
+                        "schedule_date": "Date",
+                        "sequence_number": "Stop",
+                        "status": "Status",
+                        "conflict_type": "Conflict",
+                    },
+                    key=f"pmt_manage_conflict_editor_{selected_run}",
+                )
+                selected_conflict_store_ids = (
+                    edited_conflicts.loc[edited_conflicts["Resolve"], "store_id"].dropna().astype(int).unique().tolist()
+                    if not edited_conflicts.empty
+                    else []
+                )
+                st.write(
+                    f"Selected stores to resolve: {len(selected_conflict_store_ids)}. "
+                    "Completed historical rows are not changed."
+                )
+                conflict_notes = st.text_input(
+                    "Resolution note",
+                    value="Territory transfer conflict resolved from Manage Schedule.",
+                    key=f"pmt_manage_conflict_notes_{selected_run}",
+                )
+                confirm_conflict_resolution = st.checkbox(
+                    "Confirm: keep each store with its current assigned PMT and transfer/supersede the other active future rows.",
+                    key=f"pmt_manage_conflict_confirm_{selected_run}",
+                )
+                if st.button(
+                    "Resolve Selected Conflicts",
+                    type="primary",
+                    disabled=not selected_conflict_store_ids or not confirm_conflict_resolution,
+                    key=f"pmt_manage_conflict_resolve_{selected_run}",
+                ):
+                    result = resolve_pmt_conflicts_keep_assigned(selected_run, selected_conflict_store_ids, conflict_notes)
+                    for state_key in [
+                        "pmt_manage_build_preview",
+                        "pmt_manage_build_preview_ids",
+                        "pmt_manage_build_preview_conflict_ids",
+                        "pmt_manage_build_preview_method",
+                    ]:
+                        st.session_state.pop(state_key, None)
+                    st.success(
+                        f"Resolved {result['stores']} store conflict(s), transferred/superseded {result['superseded']} old row(s), "
+                        f"moved {result['moved']} row(s), and resequenced {result['resequenced_rows']} active row(s)."
+                    )
+                    st.rerun()
 
         if run_items.empty:
             st.info("This selected schedule plan has no PMT schedule rows inside its selected date range.")
@@ -4174,6 +4646,8 @@ with tab_manage:
                             value=selected_method == "Manual First + Auto-Fill Remaining",
                             key="pmt_manage_build_move_all_conflicts",
                         )
+                    if move_assigned_conflicts and not conflicts.empty:
+                        candidate_stores = pd.concat([candidate_stores, conflicts], ignore_index=True).drop_duplicates("store_id", keep="first")
                     if candidate_stores.empty:
                         st.info("No stores match the current add-store filters.")
                     else:
@@ -4215,31 +4689,31 @@ with tab_manage:
                             key=f"pmt_manage_build_editor_{selected_run}_{selected_employee}_{selected_month}_{sort_choice}_{add_limit}",
                         )
                         selected_rows = edited_candidates[edited_candidates["Add"].astype(bool)].copy()
-                        selected_store_ids = selected_rows.loc[~selected_rows["already_scheduled"].astype(bool), "store_id"].dropna().astype(int).tolist()
-                        selected_conflict_ids = selected_rows.loc[
-                            selected_rows["already_scheduled"].astype(bool)
-                            & (pd.to_numeric(selected_rows.get("scheduled_employee_id"), errors="coerce").fillna(0).astype(int) != int(selected_employee)),
-                            "store_id",
-                        ].dropna().astype(int).tolist()
+                        manual_store_ids = selected_rows["store_id"].dropna().astype(int).tolist()
                         fill_capacity = st.number_input("Stores per month", min_value=1, max_value=100, value=10, step=1, key="pmt_manage_build_capacity")
                         fill_end_options = [add_months(add_month, offset) for offset in range(0, 13)]
                         fill_end_month = st.selectbox("Fill through", fill_end_options, index=min(5, len(fill_end_options) - 1), format_func=month_label, key="pmt_manage_build_fill_end")
-                        available_sorted = candidate_stores[~candidate_stores["already_scheduled"]].copy()
-                        selected_set = set(selected_store_ids)
-                        remaining_ids = pmt_order_remaining_by_home_distance(candidate_stores, selected_store_ids)
-                        auto_move_conflict_ids = []
-                        if move_assigned_conflicts and not conflicts.empty:
-                            conflicts["_home_distance_sort"] = pd.to_numeric(conflicts.get("distance_from_home"), errors="coerce")
-                            auto_move_conflict_ids = (
-                                conflicts.sort_values(["_home_distance_sort", "store_number"], ascending=[True, True], na_position="last")["store_id"]
-                                .dropna()
-                                .astype(int)
-                                .tolist()
-                            )
-                        selected_conflict_ids = list(dict.fromkeys(selected_conflict_ids + auto_move_conflict_ids))
-                        fill_store_ids = selected_store_ids + (remaining_ids if selected_method == "Manual First + Auto-Fill Remaining" else [])
+                        selected_set = set(manual_store_ids)
+                        remaining_candidates = candidate_stores.loc[~candidate_stores["store_id"].astype(int).isin(selected_set)].copy()
+                        if not move_assigned_conflicts:
+                            remaining_candidates = remaining_candidates.loc[~remaining_candidates["already_scheduled"].astype(bool)].copy()
+                        remaining_candidates["_home_distance_sort"] = pd.to_numeric(remaining_candidates.get("distance_from_home"), errors="coerce")
+                        remaining_ids = (
+                            remaining_candidates.sort_values(["_home_distance_sort", "store_number"], ascending=[True, True], na_position="last")["store_id"]
+                            .dropna()
+                            .astype(int)
+                            .tolist()
+                        )
+                        fill_store_ids = manual_store_ids + (remaining_ids if selected_method == "Manual First + Auto-Fill Remaining" else [])
+                        route_source = candidate_stores[candidate_stores["store_id"].astype(int).isin(fill_store_ids)].copy()
+                        route_scheduled_employee_ids = pd.to_numeric(route_source.get("scheduled_employee_id"), errors="coerce").fillna(0).astype(int)
+                        selected_conflict_ids = route_source.loc[
+                            route_source["already_scheduled"].astype(bool)
+                            & (route_scheduled_employee_ids != int(selected_employee)),
+                            "store_id",
+                        ].dropna().astype(int).tolist()
                         summary_cols = st.columns(4)
-                        summary_cols[0].metric("Manual selected", len(selected_store_ids))
+                        summary_cols[0].metric("Manual selected", len(manual_store_ids))
                         summary_cols[1].metric("Auto-fill", len(remaining_ids) if selected_method == "Manual First + Auto-Fill Remaining" else 0)
                         summary_cols[2].metric("Total result", len(fill_store_ids))
                         summary_cols[3].metric("Selected conflicts", len(selected_conflict_ids))
@@ -4250,27 +4724,41 @@ with tab_manage:
                                 "The preview will show those stores moving to this PMT and the other PMT's remaining schedule."
                             )
                         if st.button("Preview Schedule Changes", type="primary", disabled=not fill_store_ids and not selected_conflict_ids, key="pmt_manage_build_preview_button"):
-                            preview_source = available_sorted[available_sorted["store_id"].astype(int).isin(fill_store_ids)].copy()
-                            conflict_preview = candidate_stores[candidate_stores["store_id"].astype(int).isin(selected_conflict_ids)].copy()
-                            if not conflict_preview.empty:
-                                conflict_preview["Manual or Auto-Filled"] = conflict_preview["scheduled_technician"].apply(lambda value: f"Move from {value or 'another PMT'}")
-                                conflict_preview["move_from_employee_id"] = conflict_preview["scheduled_employee_id"]
-                                conflict_preview["move_from_technician"] = conflict_preview["scheduled_technician"]
-                                preview_source = pd.concat([conflict_preview, preview_source], ignore_index=True)
+                            preview_source = route_source.copy()
+                            preview_source["move_from_employee_id"] = preview_source["scheduled_employee_id"]
+                            preview_source["move_from_technician"] = preview_source["scheduled_technician"]
                             order_lookup = {int(store_id): index for index, store_id in enumerate(fill_store_ids)}
-                            conflict_order = {int(store_id): index - len(selected_conflict_ids) for index, store_id in enumerate(selected_conflict_ids)}
-                            order_lookup = {**conflict_order, **order_lookup}
                             preview_source["_proposed_order"] = preview_source["store_id"].astype(int).map(order_lookup)
                             preview_source = preview_source.sort_values("_proposed_order").drop(columns=["_proposed_order"], errors="ignore")
                             preview_source["Manual or Auto-Filled"] = preview_source.apply(
-                                lambda row: row.get("Manual or Auto-Filled")
-                                if clean(row.get("Manual or Auto-Filled"))
-                                else ("Manual" if int(row["store_id"]) in selected_set else "Auto-filled"),
+                                lambda row: (
+                                    f"{'Manual' if int(row['store_id']) in selected_set else 'Auto-filled'} - move from {row.get('scheduled_technician') or 'another PMT'}"
+                                    if bool(row.get("already_scheduled")) and scalar_int(row.get("scheduled_employee_id"), 0) != int(selected_employee)
+                                    else ("Manual" if int(row["store_id"]) in selected_set else "Auto-filled")
+                                ),
                                 axis=1,
                             )
-                            preview_source["Proposed Month"] = month_label(add_month)
-                            preview_source["Proposed Date"] = first_workday(add_month, employee_id=int(selected_employee))
-                            preview_source["Proposed Stop"] = range(1, len(preview_source) + 1)
+                            proposed_dates = []
+                            proposed_month_labels = []
+                            proposed_stops = []
+                            kept_indices = []
+                            cursor_month = add_month
+                            month_stop = 0
+                            for row_index in preview_source.index:
+                                if selected_method == "Manual First + Auto-Fill Remaining" and month_stop >= int(fill_capacity):
+                                    cursor_month = add_months(cursor_month, 1)
+                                    month_stop = 0
+                                if selected_method == "Manual First + Auto-Fill Remaining" and cursor_month > fill_end_month:
+                                    continue
+                                month_stop += 1
+                                kept_indices.append(row_index)
+                                proposed_month_labels.append(month_label(cursor_month))
+                                proposed_dates.append(first_workday(cursor_month, employee_id=int(selected_employee)))
+                                proposed_stops.append(month_stop)
+                            preview_source = preview_source.loc[kept_indices].copy()
+                            preview_source["Proposed Month"] = proposed_month_labels
+                            preview_source["Proposed Date"] = proposed_dates
+                            preview_source["Proposed Stop"] = proposed_stops
                             preview_source["technician"] = selected_tech_name
                             preview_source["schedule_date"] = preview_source["Proposed Date"]
                             preview_source["sequence_number"] = preview_source["Proposed Stop"]
@@ -4326,17 +4814,12 @@ with tab_manage:
                                                 )
                             confirm_apply = st.checkbox("I reviewed this preview and want to apply these schedule changes.", key="pmt_manage_build_confirm_apply")
                             if st.button("Apply Schedule Changes", type="primary", disabled=not confirm_apply, key="pmt_manage_build_apply"):
-                                preview_ids = st.session_state.get("pmt_manage_build_preview_ids", [])
-                                preview_conflict_ids = st.session_state.get("pmt_manage_build_preview_conflict_ids", [])
-                                moved = 0
-                                if preview_conflict_ids:
-                                    moved = move_scheduled_stores_to_pmt(selected_run, selected_employee, preview_conflict_ids, add_month, add_notes)
-                                if st.session_state.get("pmt_manage_build_preview_method") == "Manual First + Auto-Fill Remaining":
-                                    result = add_assigned_stores_auto_fill_to_pmt_run(selected_run, selected_employee, preview_ids, add_month, fill_end_month, fill_capacity, add_notes)
-                                    st.success(f"Moved {moved} conflicting store(s). Added {result['added']} store(s). Skipped {result['skipped']} duplicate or out-of-range store(s).")
-                                else:
-                                    added = add_assigned_stores_to_pmt_run(selected_run, selected_employee, preview_ids, add_month, add_notes)
-                                    st.success(f"Moved {moved} conflicting store(s). Added {added} store(s).")
+                                preview_records = st.session_state.get("pmt_manage_build_preview", [])
+                                result = apply_pmt_manage_build_preview(selected_run, selected_employee, preview_records, add_notes)
+                                st.success(
+                                    f"Saved {result['saved']} preview store(s): created {result['created']}, updated {result['updated']}, "
+                                    f"transferred/superseded {result['superseded']} conflicting row(s), and resequenced {result['resequenced_rows']} active row(s)."
+                                )
                                 st.session_state.pop("pmt_manage_build_preview", None)
                                 st.session_state.pop("pmt_manage_build_preview_ids", None)
                                 st.session_state.pop("pmt_manage_build_preview_conflict_ids", None)
@@ -4489,5 +4972,21 @@ with tab_export:
                 format_func=lambda value: f"#{value} - {_export_runs.set_index('id').loc[value, 'run_name']}",
                 key="pmt_bottom_export_run",
             )
-            published_export_draft = published_pmt_run_export_draft(selected_export_run)
-            render_pmt_export_controls(published_export_draft, f"pmt_bottom_export_run_{selected_export_run}")
+            export_run_row = _export_runs.set_index("id").loc[selected_export_run]
+            export_raw_items = pmt_manage_run_items(selected_export_run)
+            export_cycle_start = scalar_date(export_run_row.get("cycle_start"))
+            export_cycle_end = scalar_date(export_run_row.get("cycle_end"))
+            export_run_items, _export_outside_items = split_run_items_by_period(export_raw_items, export_cycle_start, export_cycle_end)
+            export_conflicts = pmt_schedule_conflicts(export_run_items)
+            if not export_conflicts.empty:
+                st.error(
+                    f"Export blocked: duplicate or wrong-technician active PMT schedule assignments remain for "
+                    f"{distinct_store_count(export_conflicts)} store(s). Open Manage Schedule and resolve the conflicts before exporting."
+                )
+                export_conflict_view = export_conflicts[
+                    ["store_number", "assigned_technician", "technician", "month", "schedule_date", "sequence_number", "status", "conflict_type"]
+                ].copy()
+                st.dataframe(export_conflict_view, use_container_width=True, hide_index=True)
+            else:
+                published_export_draft = published_pmt_run_export_draft(selected_export_run)
+                render_pmt_export_controls(published_export_draft, f"pmt_bottom_export_run_{selected_export_run}")
