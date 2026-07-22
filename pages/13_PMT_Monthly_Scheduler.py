@@ -4344,46 +4344,53 @@ with tab_manage:
             ] if not run_items.empty else pd.DataFrame()
             st.dataframe(run_item_view, use_container_width=True, hide_index=True)
             st.download_button("Export Full Schedule", data=excel_bytes(run_item_view), file_name=f"pmt_schedule_plan_{selected_run}.xlsx", key=f"export_selected_pmt_run_{selected_run}")
-        if not out_of_period_items.empty:
-            st.warning(
-                f"{len(out_of_period_items)} schedule row(s) are linked to this schedule plan but fall outside the plan dates. "
-                "They are excluded from the Manage Schedule counts below."
+        active_outside_items = out_of_period_items[pmt_active_item_mask(out_of_period_items)].copy() if not out_of_period_items.empty else pd.DataFrame()
+        history_outside_items = out_of_period_items[~pmt_active_item_mask(out_of_period_items)].copy() if not out_of_period_items.empty else pd.DataFrame()
+        if not active_outside_items.empty:
+            st.error(
+                f"{len(active_outside_items)} active row(s) are outside this schedule plan's date range. "
+                "These should be archived so they do not look like current schedule work."
             )
-            with st.expander("Review rows outside this schedule plan's date range", expanded=True):
+            with st.expander("Fix Active Rows Outside This Schedule Plan Date Range", expanded=True):
+                outside_view = active_outside_items[
+                    ["schedule_item_id", "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source", "notes"]
+                ].copy()
+                st.dataframe(outside_view, use_container_width=True, hide_index=True)
+                st.warning(
+                    "Archiving keeps the audit trail but removes these rows from active schedule logic. "
+                    "Completed historical rows are not changed."
+                )
+                cleanup_note = st.text_input(
+                    "Cleanup note",
+                    value="Out-of-period rows from this PMT schedule run were archived.",
+                    key=f"pmt_manage_outside_cleanup_note_{selected_run}",
+                )
+                confirm_outside_archive = st.checkbox(
+                    "Confirm archive active rows outside this schedule plan date range.",
+                    key=f"pmt_manage_outside_archive_confirm_{selected_run}",
+                )
+                if st.button(
+                    "Archive Active Out-of-Period Rows",
+                    type="secondary",
+                    disabled=not confirm_outside_archive,
+                    key=f"pmt_manage_outside_archive_button_{selected_run}",
+                ):
+                    archived = archive_out_of_period_pmt_schedule_items(
+                        selected_run,
+                        active_outside_items["schedule_item_id"].dropna().astype(int).tolist(),
+                        cleanup_note,
+                    )
+                    st.success(f"Archived {archived} active out-of-period row(s).")
+                    st.rerun()
+        elif not history_outside_items.empty:
+            with st.expander("Archived or Historical Rows Outside This Schedule Plan", expanded=False):
+                st.caption(
+                    "These rows are not active schedule work and are excluded from Manage Schedule counts, maps, and current exports."
+                )
                 outside_view = out_of_period_items[
                     ["schedule_item_id", "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source", "notes"]
                 ].copy()
                 st.dataframe(outside_view, use_container_width=True, hide_index=True)
-                active_outside = out_of_period_items[pmt_active_item_mask(out_of_period_items)].copy()
-                if active_outside.empty:
-                    st.info("These rows are not active schedule work. They are shown only so the run history is transparent.")
-                else:
-                    st.warning(
-                        f"{len(active_outside)} active out-of-period row(s) can be archived. "
-                        "Archiving keeps the audit trail but removes them from active schedule logic."
-                    )
-                    cleanup_note = st.text_input(
-                        "Cleanup note",
-                        value="Out-of-period rows from this PMT schedule run were archived.",
-                        key=f"pmt_manage_outside_cleanup_note_{selected_run}",
-                    )
-                    confirm_outside_archive = st.checkbox(
-                        "Confirm archive active rows outside this schedule plan date range.",
-                        key=f"pmt_manage_outside_archive_confirm_{selected_run}",
-                    )
-                    if st.button(
-                        "Archive Active Out-of-Period Rows",
-                        type="secondary",
-                        disabled=not confirm_outside_archive,
-                        key=f"pmt_manage_outside_archive_button_{selected_run}",
-                    ):
-                        archived = archive_out_of_period_pmt_schedule_items(
-                            selected_run,
-                            active_outside["schedule_item_id"].dropna().astype(int).tolist(),
-                            cleanup_note,
-                        )
-                        st.success(f"Archived {archived} active out-of-period row(s).")
-                        st.rerun()
 
         conflict_rows = pmt_schedule_conflicts(run_items)
         if not conflict_rows.empty:
