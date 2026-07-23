@@ -52,6 +52,21 @@ def countable_attendance_events(df):
     return df[~df["status"].fillna("").astype(str).str.strip().str.lower().isin(["denied", "cancelled", "canceled"])].copy()
 
 
+def delete_attendance_events(event_ids):
+    event_ids = [int(value) for value in event_ids if pd.notna(value)]
+    if not event_ids:
+        return 0
+    deleted = 0
+    with session_scope("Delete call off / PTO event") as session:
+        records = session.query(CalloffPTO).filter(CalloffPTO.id.in_(event_ids)).all()
+        for record in records:
+            session.delete(record)
+            deleted += 1
+    log_action("calloff pto deleted", "calloff_pto", description=f"{deleted} attendance event(s) deleted")
+    st.cache_data.clear()
+    return deleted
+
+
 if is_all_managed_view():
     page_header("Call Off / PTO", "Manager roll-up view of attendance across all managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to manage that person's attendance records.")
@@ -151,6 +166,34 @@ with tabs[1]:
     )
     records = add_event_days(records, start_filter, end_filter, "days_in_range")
     st.dataframe(records, use_container_width=True, hide_index=True)
+    if records.empty:
+        st.info("No attendance events match this date range.")
+    else:
+        st.markdown("**Delete Duplicate / Incorrect Log**")
+        delete_view = records.copy()
+        delete_view["label"] = delete_view.apply(
+            lambda row: (
+                f"#{row['id']} - {row['employee']} - {row['event_type']} - "
+                f"{row['event_date']} to {row['end_date'] or row['event_date']} - {row['status']}"
+            ),
+            axis=1,
+        )
+        delete_id = st.selectbox(
+            "Attendance log to delete",
+            delete_view["id"].astype(int).tolist(),
+            format_func=lambda value: delete_view.set_index("id").loc[value, "label"],
+            key="calloff_delete_event_id",
+        )
+        selected_delete = delete_view.set_index("id").loc[delete_id]
+        st.warning(
+            f"Selected: {selected_delete['employee']} | {selected_delete['event_type']} | "
+            f"{selected_delete['event_date']} to {selected_delete['end_date'] or selected_delete['event_date']}"
+        )
+        confirm_delete = st.checkbox("Confirm delete this attendance log", key="calloff_confirm_delete_event")
+        if st.button("Delete Selected Attendance Log", type="secondary", disabled=not confirm_delete, key="calloff_delete_event_button"):
+            deleted = delete_attendance_events([delete_id])
+            st.success(f"Deleted {deleted} attendance log(s).")
+            st.rerun()
 
 with tabs[2]:
     employees = safe_query("select id, full_name as employee from employees order by full_name")
