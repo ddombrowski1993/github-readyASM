@@ -781,7 +781,7 @@ def dashboard_counts():
                     (select count(*) from schedule_items where work_type in ('Brand Enhancement','Calibration') and status = 'Completed' and schedule_date >= :week_start) as completed_week,
                     (select count(*) from followups where status not in ('Completed','Cancelled')) as open_followups,
                     (select count(*) from followups where status not in ('Completed','Cancelled') and coalesce(due_date,next_followup_date) < :today) as overdue_followups,
-                    (select count(*) from calloff_pto where event_date <= :today and coalesce(end_date,event_date) >= :today) as off_today,
+                    (select count(*) from calloff_pto where event_date <= :today and coalesce(end_date,event_date) >= :today and lower(trim(coalesce(status, ''))) not in ('denied','cancelled','canceled')) as off_today,
                     (select count(*) from deferred_work_orders where status = 'Available') as deferred_available,
                     (select count(*) from schedule_items where status = 'Needs Rescheduled') as needs_rescheduled
                 """

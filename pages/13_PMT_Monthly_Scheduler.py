@@ -177,6 +177,7 @@ def first_workday(value, avoid_weekends=True, avoid_holidays=True, employee_id=N
             where employee_id = :employee_id
               and event_date < :end_date
               and coalesce(end_date, event_date) >= :start_date
+              and lower(trim(coalesce(status, ''))) not in ('denied','cancelled','canceled')
             """,
             {"employee_id": int(employee_id), "start_date": value, "end_date": end},
         )

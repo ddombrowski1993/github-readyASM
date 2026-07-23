@@ -466,23 +466,29 @@ def apply_theme():
             padding: 0.35rem;
         }
         .stTabs [data-baseweb="tab"] {
-            background: #2563eb;
-            border: 1px solid #1d4ed8;
+            background: #2563eb !important;
+            border: 1px solid #1d4ed8 !important;
             border-radius: 8px;
             padding: 0.65rem 0.95rem;
             font-weight: 700;
-            color: #ffffff;
+            color: #ffffff !important;
             box-shadow: 0 4px 10px rgba(37, 99, 235, 0.18);
         }
         .stTabs [aria-selected="true"] {
-            background: #1e3a8a;
-            border: 1px solid #1e40af;
-            color: #ffffff;
+            background: #1e3a8a !important;
+            border: 1px solid #1e40af !important;
+            color: #ffffff !important;
             box-shadow: 0 6px 14px rgba(30, 58, 138, 0.25);
         }
         .stTabs [data-baseweb="tab"]:hover {
-            background: #1d4ed8;
-            color: #ffffff;
+            background: #1d4ed8 !important;
+            color: #ffffff !important;
+        }
+        .stTabs [data-baseweb="tab"] p,
+        .stTabs [data-baseweb="tab"] span,
+        .stTabs [data-baseweb="tab"] div {
+            color: #ffffff !important;
+            font-weight: 800 !important;
         }
         div[data-testid="stDataFrame"] {
             border: 1px solid var(--asm-border);
@@ -1299,24 +1305,30 @@ def require_login():
             z-index: 35;
         }
         .stTabs [data-baseweb="tab"] {
-            background: #2563eb;
-            border: 1px solid #1d4ed8;
+            background: #2563eb !important;
+            border: 1px solid #1d4ed8 !important;
             border-radius: 10px;
-            color: #ffffff;
+            color: #ffffff !important;
             font-weight: 750;
             min-width: 150px;
             padding: 0.75rem 1rem;
             box-shadow: 0 4px 10px rgba(37, 99, 235, 0.18);
         }
         .stTabs [aria-selected="true"] {
-            background: #1e3a8a;
-            border: 1px solid #1e40af;
-            color: #ffffff;
+            background: #1e3a8a !important;
+            border: 1px solid #1e40af !important;
+            color: #ffffff !important;
             box-shadow: 0 6px 14px rgba(30, 58, 138, 0.25);
         }
         .stTabs [data-baseweb="tab"]:hover {
-            background: #1d4ed8;
-            color: #ffffff;
+            background: #1d4ed8 !important;
+            color: #ffffff !important;
+        }
+        .stTabs [data-baseweb="tab"] p,
+        .stTabs [data-baseweb="tab"] span,
+        .stTabs [data-baseweb="tab"] div {
+            color: #ffffff !important;
+            font-weight: 800 !important;
         }
         div[data-testid="stForm"] {
             backdrop-filter: blur(16px);

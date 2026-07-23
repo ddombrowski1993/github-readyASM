@@ -38,10 +38,18 @@ def add_event_days(df, start_date=None, end_date=None, column_name="days"):
 def event_days_total(df, event_type, start_date, end_date):
     if df.empty:
         return 0
-    filtered = df[df["event_type"].fillna("").astype(str) == event_type]
+    filtered = df[df["event_type"].fillna("").astype(str).str.strip().str.lower() == str(event_type).strip().lower()]
+    if "status" in filtered.columns:
+        filtered = filtered[~filtered["status"].fillna("").astype(str).str.strip().str.lower().isin(["denied", "cancelled", "canceled"])]
     if filtered.empty:
         return 0
     return int(add_event_days(filtered, start_date, end_date)["days"].sum())
+
+
+def countable_attendance_events(df):
+    if df.empty or "status" not in df.columns:
+        return df
+    return df[~df["status"].fillna("").astype(str).str.strip().str.lower().isin(["denied", "cancelled", "canceled"])].copy()
 
 
 if is_all_managed_view():
@@ -60,6 +68,7 @@ if is_all_managed_view():
         join employees e on e.id = c.employee_id
         left join teams t on t.id = e.team_id
         where c.event_date <= :end_date and coalesce(c.end_date, c.event_date) >= :start_date
+          and lower(trim(coalesce(c.status, ''))) not in ('denied','cancelled','canceled')
         order by c.event_date desc, e.full_name
         """,
         {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
@@ -93,6 +102,9 @@ year_start = date(today.year, 1, 1)
 next_year = date(today.year + 1, 1, 1)
 
 with tabs[0]:
+    saved_event = st.session_state.pop("calloff_saved_event", None)
+    if saved_event:
+        st.success(saved_event)
     with st.form("add_calloff"):
         c1, c2, c3, c4 = st.columns(4)
         employee_id = c1.selectbox("Employee", emp_df["id"].tolist() if not emp_df.empty else [], format_func=lambda x: emp_df.set_index("id").loc[x, "full_name"] if not emp_df.empty else "")
@@ -114,7 +126,12 @@ with tabs[0]:
             session.flush()
             rec_id = rec.id
         log_action("calloff pto added", "calloff_pto", rec_id, event_type)
-        st.success("Attendance event saved.")
+        st.cache_data.clear()
+        employee_name = emp_df.set_index("id").loc[employee_id, "full_name"] if not emp_df.empty else f"Employee #{employee_id}"
+        st.session_state["calloff_saved_event"] = (
+            f"Attendance event saved for {employee_name}: {event_type}, {start} to {end}, status {status}."
+        )
+        st.rerun()
 
 with tabs[1]:
     c1, c2 = st.columns(2)
@@ -127,6 +144,7 @@ with tabs[1]:
         join employees e on e.id = c.employee_id
         left join teams t on t.id = e.team_id
         where c.event_date <= :end and coalesce(c.end_date, c.event_date) >= :start
+          and lower(trim(coalesce(c.status, ''))) not in ('denied','cancelled','canceled')
         order by c.event_date desc, e.full_name
         """,
         {"start": start_filter, "end": end_filter},
@@ -138,9 +156,10 @@ with tabs[2]:
     employees = safe_query("select id, full_name as employee from employees order by full_name")
     events = safe_query(
         """
-        select employee_id, event_type, event_date, end_date
+        select employee_id, event_type, event_date, end_date, status
         from calloff_pto
         where event_date < :next_year and coalesce(end_date, event_date) >= :year_start
+          and lower(trim(coalesce(status, ''))) not in ('denied','cancelled','canceled')
         """,
         {"year_start": year_start, "next_year": next_year},
     )
@@ -151,6 +170,7 @@ with tabs[2]:
         select employee_id, count(*) as late_left_early_count
         from calloff_pto
         where event_type in ('Late','Left Early')
+          and lower(trim(coalesce(status, ''))) not in ('denied','cancelled','canceled')
         group by employee_id
         """
     )
@@ -180,6 +200,7 @@ with tabs[3]:
         select e.full_name as employee, c.event_type, c.event_date, c.end_date
         from calloff_pto c join employees e on e.id = c.employee_id
         where c.event_date < :next_month and coalesce(c.end_date, c.event_date) >= :month_start
+          and lower(trim(coalesce(c.status, ''))) not in ('denied','cancelled','canceled')
         order by e.full_name, c.event_type
         """,
         {"month_start": month_start, "next_month": next_month},
@@ -194,6 +215,7 @@ with tabs[4]:
         """
         select e.full_name as employee, c.event_type, c.event_date, c.end_date, c.status, c.approved_by, c.notes
         from calloff_pto c join employees e on e.id = c.employee_id
+        where lower(trim(coalesce(c.status, ''))) not in ('denied','cancelled','canceled')
         order by c.event_date desc
         """
     )

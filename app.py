@@ -824,6 +824,7 @@ off_today = safe_query(
     from calloff_pto c
     join employees e on e.id = c.employee_id
     where c.event_date <= :today and coalesce(c.end_date,c.event_date) >= :today
+      and lower(trim(coalesce(c.status, ''))) not in ('denied','cancelled','canceled')
     order by e.full_name
     """,
     {"today": today},

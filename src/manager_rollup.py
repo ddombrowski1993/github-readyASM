@@ -222,7 +222,7 @@ def _workspace_counts(account):
         counts["Employees Off Today"] = _scalar(
             conn,
             "calloff_pto",
-            "select count(*) from calloff_pto where event_date <= ? and coalesce(end_date,event_date) >= ?",
+            "select count(*) from calloff_pto where event_date <= ? and coalesce(end_date,event_date) >= ? and lower(trim(coalesce(status, ''))) not in ('denied','cancelled','canceled')",
             (today.isoformat(), today.isoformat()),
         )
         counts["Open Follow-Ups"] = _scalar(conn, "followups", "select count(*) from followups where status not in ('Completed','Cancelled')")
