@@ -460,22 +460,29 @@ def apply_theme():
         }
         .stTabs [data-baseweb="tab-list"] {
             gap: 0.35rem;
-            border-bottom: 1px solid var(--asm-border);
-            background: rgba(255,255,255,0.72);
-            border-radius: 10px 10px 0 0;
-            padding: 0.25rem 0.25rem 0 0.25rem;
+            border: 1px solid #bfdbfe;
+            background: rgba(219, 234, 254, 0.72);
+            border-radius: 10px;
+            padding: 0.35rem;
         }
         .stTabs [data-baseweb="tab"] {
-            border-radius: 8px 8px 0 0;
+            background: #2563eb;
+            border: 1px solid #1d4ed8;
+            border-radius: 8px;
             padding: 0.65rem 0.95rem;
             font-weight: 700;
-            color: #475569;
+            color: #ffffff;
+            box-shadow: 0 4px 10px rgba(37, 99, 235, 0.18);
         }
         .stTabs [aria-selected="true"] {
-            background: linear-gradient(180deg, #ffffff, #eef4ff);
-            border: 1px solid #9fb7d3;
-            border-bottom-color: #ffffff;
-            color: var(--asm-blue);
+            background: #1e3a8a;
+            border: 1px solid #1e40af;
+            color: #ffffff;
+            box-shadow: 0 6px 14px rgba(30, 58, 138, 0.25);
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            background: #1d4ed8;
+            color: #ffffff;
         }
         div[data-testid="stDataFrame"] {
             border: 1px solid var(--asm-border);
@@ -1281,7 +1288,7 @@ def require_login():
         }
         .stTabs [data-baseweb="tab-list"] {
             backdrop-filter: blur(16px);
-            background: rgba(255, 255, 255, 0.9);
+            background: rgba(219, 234, 254, 0.92);
             border: 1px solid rgba(191, 219, 254, 0.95);
             border-radius: 14px;
             box-shadow: 0 10px 26px rgba(15, 23, 42, 0.1);
@@ -1292,16 +1299,24 @@ def require_login():
             z-index: 35;
         }
         .stTabs [data-baseweb="tab"] {
+            background: #2563eb;
+            border: 1px solid #1d4ed8;
             border-radius: 10px;
-            color: #64748b;
+            color: #ffffff;
             font-weight: 750;
             min-width: 150px;
             padding: 0.75rem 1rem;
+            box-shadow: 0 4px 10px rgba(37, 99, 235, 0.18);
         }
         .stTabs [aria-selected="true"] {
-            background: #dcfce7;
-            border: 1px solid #bbf7d0;
-            color: #166534;
+            background: #1e3a8a;
+            border: 1px solid #1e40af;
+            color: #ffffff;
+            box-shadow: 0 6px 14px rgba(30, 58, 138, 0.25);
+        }
+        .stTabs [data-baseweb="tab"]:hover {
+            background: #1d4ed8;
+            color: #ffffff;
         }
         div[data-testid="stForm"] {
             backdrop-filter: blur(16px);
