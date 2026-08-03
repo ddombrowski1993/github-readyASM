@@ -18,6 +18,7 @@ from streamlit_folium import st_folium
 
 from src.anchor_store import app_city_center_for
 from src.database import active_employees, ensure_pmt_assignment_changes_table, log_action, safe_query, session_scope, teams
+from src.employee_deactivation import clear_technician_store_assignments
 from src.exports import csv_bytes, excel_bytes
 from src.geo_coverage import geographic_coverage_summary
 from src.geocoding import geocode_address
@@ -1796,7 +1797,7 @@ def create_or_update_technician_profile(role, full_name, employee_number="", pho
     return True, f"{'Created' if created else 'Updated'} {role} technician {clean_name}.{location_text}{geocode_text}"
 
 
-def remove_or_deactivate_technician(employee_id, role, employee_field, team_field):
+def remove_or_deactivate_technician(employee_id, role, employee_field, team_field, unassign_stores=False):
     log_details = None
     with session_scope() as session:
         employee = session.get(Employee, int(employee_id))
@@ -1807,8 +1808,13 @@ def remove_or_deactivate_technician(employee_id, role, employee_field, team_fiel
         if assigned_count:
             employee.active = False
             employee.inactive_reason = "Deactivated from Areas and Maps technician table."
-            log_details = (f"{role.lower()} technician deactivated", int(employee_id), f"{name} had {assigned_count} assigned store(s). Assignments were left in place.")
-            message = f"Deactivated {name}. They still have {assigned_count} assigned store(s), so assignments were left in place for review."
+            if unassign_stores:
+                cleared_count = clear_technician_store_assignments(session, employee, role)
+                log_details = (f"{role.lower()} technician deactivated", int(employee_id), f"{name} had {cleared_count} assigned store(s) cleared.")
+                message = f"Deactivated {name} and cleared {cleared_count} assigned store(s)."
+            else:
+                log_details = (f"{role.lower()} technician deactivated", int(employee_id), f"{name} had {assigned_count} assigned store(s). Assignments were left in place.")
+                message = f"Deactivated {name}. Store assignments were left in place."
         else:
             teams_to_check = session.query(Team).filter(Team.team_name == name, Team.team_type == role).all()
             for team in teams_to_check:
@@ -3748,6 +3754,10 @@ if selected_group in ("PMT", "Calibration"):
                             if not changed:
                                 continue
                             audit_rows.append({"store_id": int(store.id), "store_number": store.store_number, "old": old_value, "new": new_value})
+                        if employee and deactivate_action == "Clear assignments and mark unassigned":
+                            for area in session.query(MapArea).filter(MapArea.area_type == selected_group, MapArea.employee_id == int(deactivate_employee)).all():
+                                area.assigned_store_ids = json.dumps([])
+                                area.active = False
                     for audit in audit_rows:
                         log_action(
                             f"{selected_group.lower()} technician deactivated",
@@ -3910,15 +3920,29 @@ if selected_group in ("PMT", "Calibration"):
                 with st.container(border=True):
                     st.warning(
                         f"Remove {remove_row['technician']}? "
-                        + ("They have no assigned stores, so this will delete the technician record." if assigned_to_remove == 0 else f"They have {assigned_to_remove} assigned store(s), so this will deactivate them and leave assignments for review.")
+                        + ("They have no assigned stores, so this will delete the technician record." if assigned_to_remove == 0 else f"They have {assigned_to_remove} assigned store(s), so this will deactivate them.")
                     )
+                    unassign_remove_choice = "No"
+                    if assigned_to_remove > 0:
+                        unassign_remove_choice = st.radio(
+                            "Do you want to unassign their stores?",
+                            ["Yes", "No"],
+                            horizontal=True,
+                            key=f"{selected_group}_remove_unassign_choice",
+                        )
                     confirm_remove = st.checkbox(
                         f"I reviewed this {selected_group} technician removal.",
                         key=f"{selected_group}_remove_confirm",
                     )
                     c_remove, c_cancel = st.columns(2)
                     if c_remove.button("Confirm Remove Technician", type="primary", disabled=not confirm_remove, key=f"{selected_group}_confirm_remove_btn"):
-                        ok, message = remove_or_deactivate_technician(remove_id, selected_group, tech_config["employee_field"], tech_config["team_field"])
+                        ok, message = remove_or_deactivate_technician(
+                            remove_id,
+                            selected_group,
+                            tech_config["employee_field"],
+                            tech_config["team_field"],
+                            unassign_stores=unassign_remove_choice == "Yes",
+                        )
                         st.session_state.pop(f"{selected_group}_remove_tech_id", None)
                         if ok:
                             st.success(message)

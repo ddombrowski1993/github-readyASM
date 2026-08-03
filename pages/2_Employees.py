@@ -8,6 +8,7 @@ st.set_page_config(page_title="Employees", layout="wide")
 
 from src.auth import claim_user_for_manager, list_app_users, release_user_from_manager
 from src.database import active_employees, log_action, safe_query, session_scope, teams, teams_for_work_group
+from src.employee_deactivation import assigned_store_count_for_role, deactivate_employee, technician_assignment_config
 from src.exports import download_table, excel_bytes
 from src.geocoding import geocode_address
 from src.imports import import_employees, sample_employee_template
@@ -177,23 +178,41 @@ with tab_list:
     download_table(filtered, "employees")
     st.subheader("Mark Inactive")
     emp_id = st.selectbox("Employee", filtered["id"].tolist() if not filtered.empty else [])
+    selected_employee_row = filtered.set_index("id").loc[emp_id] if emp_id and not filtered.empty else None
+    selected_role = str(selected_employee_row.get("role", "")) if selected_employee_row is not None else ""
+    assigned_count = 0
+    if emp_id and technician_assignment_config(selected_role):
+        with session_scope() as session:
+            assigned_count = assigned_store_count_for_role(session, int(emp_id), selected_role)
+    unassign_stores_choice = "No"
+    if emp_id and technician_assignment_config(selected_role):
+        if assigned_count:
+            st.warning(f"This {selected_role} has {assigned_count} assigned store(s).")
+        unassign_stores_choice = st.radio(
+            "Do you want to unassign their stores?",
+            ["Yes", "No"],
+            horizontal=True,
+            key="employee_deactivation_unassign_stores",
+        )
     reason = st.text_input("Inactive reason")
     if st.button("Mark Selected Employee Inactive", disabled=not emp_id):
-        assigned_count = 0
-        selected_role = ""
         with session_scope() as session:
-            emp = session.get(Employee, int(emp_id))
-            selected_role = emp.role if emp else ""
-            if emp and emp.role == "PMT":
-                assigned_count = assigned_pmt_store_count(session, int(emp_id))
-            if emp:
-                emp.active = False
-                emp.inactive_reason = reason
+            emp, cleared_count = deactivate_employee(
+                session,
+                int(emp_id),
+                reason=reason,
+                unassign_stores=unassign_stores_choice == "Yes",
+            )
+            deactivated_name = emp.full_name if emp else f"Employee {emp_id}"
         log_action("employee marked inactive", "employees", int(emp_id), reason)
-        if selected_role == "PMT" and assigned_count:
-            st.session_state["pmt_removal_employee_id"] = int(emp_id)
-            st.session_state["pmt_removal_reason"] = reason
-            st.warning(f"This PMT has {assigned_count} assigned store(s). Choose how to handle those assignments below.")
+        if cleared_count:
+            log_action(
+                f"{selected_role.lower()} stores unassigned during employee deactivation",
+                "employees",
+                int(emp_id),
+                f"{deactivated_name}; cleared {cleared_count} assigned store(s).",
+            )
+            st.success(f"Employee marked inactive and {cleared_count} store assignment(s) were cleared.")
         else:
             st.success("Employee marked inactive.")
         st.rerun()
