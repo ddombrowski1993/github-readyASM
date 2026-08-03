@@ -1624,8 +1624,20 @@ def pmt_schedule_conflicts(run_items):
     return conflicts.sort_values(["store_number", "schedule_date", "technician", "sequence_number"])
 
 
-def pmt_reconciliation_scan(effective_date, run_id=None):
-    params = {"effective_date": effective_date, "run_id": int(run_id) if run_id else None}
+def reconciliation_store_number(value):
+    raw = clean(value)
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    return raw.strip()
+
+
+def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=False):
+    scan_start_date = date(1900, 1, 1) if ignore_effective_date else month_start(effective_date)
+    params = {
+        "effective_date": effective_date,
+        "scan_start_date": scan_start_date,
+        "run_id": int(run_id) if run_id else None,
+    }
     future_items = safe_query(
         """
         select si.id as schedule_item_id, si.schedule_id, si.pmt_schedule_run_id,
@@ -1647,12 +1659,13 @@ def pmt_reconciliation_scan(effective_date, run_id=None):
         left join employees se on se.id = si.employee_id
         left join employees ae on ae.id = s.assigned_pmt_employee_id
         where si.work_type = 'PMT'
-          and si.schedule_date >= :effective_date
+          and si.schedule_date >= :scan_start_date
           and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
           and (:run_id is null or si.pmt_schedule_run_id = :run_id)
         order by si.schedule_date, scheduled_technician, si.sequence_number, s.store_number
         """,
         params,
+        use_cache=False,
     )
     if future_items.empty:
         future_items = pd.DataFrame(
@@ -1669,7 +1682,10 @@ def pmt_reconciliation_scan(effective_date, run_id=None):
             future_items[column] = pd.to_numeric(future_items[column], errors="coerce")
         future_items["schedule_date"] = pd.to_datetime(future_items["schedule_date"], errors="coerce").dt.date
         future_items["month"] = future_items["schedule_date"].apply(month_label)
+        future_items["normalized_store_number"] = future_items["store_number"].apply(reconciliation_store_number)
+        future_items["before_effective_date"] = future_items["schedule_date"].apply(lambda value: bool(value and value < effective_date))
 
+    duplicate_store_ids = set()
     conflicts = future_items.copy()
     if conflicts.empty:
         conflicts = pd.DataFrame(columns=list(future_items.columns) + ["conflict_type", "recommended_action", "assignment_effective_date", "resolution"])
@@ -1692,8 +1708,11 @@ def pmt_reconciliation_scan(effective_date, run_id=None):
             if pd.isna(assigned_id):
                 reasons.append("Unassigned Store Still Scheduled")
             elif pd.notna(scheduled_id) and int(scheduled_id) != int(assigned_id):
-                reasons.append("Scheduled to Previous Technician")
-                reasons.append("Store Scheduled After Reassignment")
+                reasons.append("Scheduled Technician Does Not Match Current Assignment")
+                if bool(row.get("before_effective_date")) and not ignore_effective_date:
+                    reasons.append("Current Month Unfinished Before Effective Date")
+                else:
+                    reasons.append("Store Scheduled After Reassignment")
             if pd.notna(row.get("store_id")) and int(row["store_id"]) in duplicate_store_ids:
                 reasons.append("Duplicate Future Schedule")
             return "; ".join(dict.fromkeys(reasons))
@@ -1711,20 +1730,23 @@ def pmt_reconciliation_scan(effective_date, run_id=None):
         """
         select s.id as store_id, s.store_number, s.city, s.state,
                s.assigned_pmt_employee_id as assigned_employee_id,
-               e.full_name as assigned_technician
+               coalesce(e.full_name, 'Unknown PMT') as assigned_technician,
+               coalesce(e.active, false) as assigned_employee_active,
+               e.role as assigned_employee_role
         from stores s
-        join employees e on e.id = s.assigned_pmt_employee_id
+        left join employees e on e.id = s.assigned_pmt_employee_id
         where s.active = true
-          and e.active = true
-          and e.role = 'PMT'
-        order by e.full_name, s.store_number
-        """
+          and s.assigned_pmt_employee_id is not null
+        order by assigned_technician, s.store_number
+        """,
+        use_cache=False,
     )
     assigned_not_scheduled = pd.DataFrame()
     if not active_assigned.empty:
         active_assigned = active_assigned.copy()
         active_assigned["store_id"] = pd.to_numeric(active_assigned["store_id"], errors="coerce")
         active_assigned["assigned_employee_id"] = pd.to_numeric(active_assigned["assigned_employee_id"], errors="coerce")
+        active_assigned["normalized_store_number"] = active_assigned["store_number"].apply(reconciliation_store_number)
         scheduled_pairs = set()
         if not future_items.empty:
             scheduled_pairs = set(
@@ -1754,7 +1776,7 @@ def pmt_reconciliation_scan(effective_date, run_id=None):
             select employee_id, count(*) as future_schedule_items
             from schedule_items
             where work_type = 'PMT'
-              and schedule_date >= :effective_date
+              and schedule_date >= :scan_start_date
               and status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
               and employee_id is not null
             group by employee_id
@@ -1762,7 +1784,8 @@ def pmt_reconciliation_scan(effective_date, run_id=None):
         where e.active = true and e.role = 'PMT'
         order by e.full_name
         """,
-        {"effective_date": effective_date},
+        {"scan_start_date": scan_start_date},
+        use_cache=False,
     )
     affected_ids = set()
     for column in ["scheduled_employee_id", "assigned_employee_id"]:
@@ -1779,12 +1802,52 @@ def pmt_reconciliation_scan(effective_date, run_id=None):
         active_pmts["reconciliation_status"] = active_pmts["employee_id"].apply(lambda value: "Affected" if pd.notna(value) and int(value) in affected_ids else "Protected - No assignment conflict detected")
         affected = active_pmts[active_pmts["reconciliation_status"] == "Affected"].copy()
         protected = active_pmts[active_pmts["reconciliation_status"].str.startswith("Protected")].copy()
+    schedule_runs_scanned = safe_query(
+        """
+        select count(*) as count
+        from pmt_schedule_runs
+        where (:run_id is null or id = :run_id)
+        """,
+        {"run_id": int(run_id) if run_id else None},
+        use_cache=False,
+    )
+    total_assignments = int(len(active_assigned)) if isinstance(active_assigned, pd.DataFrame) else 0
+    total_runs = int(schedule_runs_scanned.iloc[0]["count"] or 0) if not schedule_runs_scanned.empty else 0
+    rows_with_store_join = int(future_items["store_id"].notna().sum()) if "store_id" in future_items.columns else 0
+    rows_not_joined = int(future_items["store_id"].isna().sum()) if "store_id" in future_items.columns else 0
+    null_scheduled_employee_ids = int(future_items["scheduled_employee_id"].isna().sum()) if "scheduled_employee_id" in future_items.columns else 0
+    null_assigned_employee_ids = int(future_items["assigned_employee_id"].isna().sum()) if "assigned_employee_id" in future_items.columns else 0
+    effective_date_exclusions = int(future_items["before_effective_date"].sum()) if "before_effective_date" in future_items.columns else 0
+    diagnostics = {
+        "assignment_source": "stores.assigned_pmt_employee_id left joined to employees.id",
+        "schedule_source": "schedule_items where work_type = 'PMT'",
+        "technician_identifier": "employees.id",
+        "workspace": st.session_state.get("active_account_label") or st.session_state.get("active_account_slug") or "Current workspace",
+        "pm_assignment_column": "stores.assigned_pmt_employee_id",
+        "assignments_loaded": total_assignments,
+        "schedule_runs_scanned": total_runs,
+        "schedule_items_loaded": len(future_items),
+        "rows_successfully_joined": rows_with_store_join,
+        "rows_not_joined": rows_not_joined,
+        "conflicts_detected": len(conflicts),
+        "assigned_not_scheduled_detected": len(assigned_not_scheduled),
+        "duplicate_future_store_numbers": len(duplicate_store_ids),
+        "null_scheduled_employee_ids": null_scheduled_employee_ids,
+        "null_assigned_employee_ids": null_assigned_employee_ids,
+        "effective_date_exclusions": effective_date_exclusions,
+        "effective_date": str(effective_date),
+        "scan_start_date": str(scan_start_date),
+        "ignore_effective_date": bool(ignore_effective_date),
+        "cache_status": "Bypassed safe_query cache for reconciliation scan",
+        "scan_timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
     return {
         "future_items": future_items,
         "conflicts": conflicts,
         "assigned_not_scheduled": assigned_not_scheduled,
         "affected": affected,
         "protected": protected,
+        "diagnostics": diagnostics,
     }
 
 
@@ -4541,11 +4604,42 @@ with tab_reconcile:
         value="Territory realignment after PMT assignment changes",
         key="pmt_reconciliation_reason",
     )
-    scan = pmt_reconciliation_scan(reconciliation_effective_date, selected_reconcile_run)
+    scan_controls = st.columns([0.34, 0.33, 0.33])
+    ignore_effective_date = scan_controls[0].checkbox(
+        "Ignore effective date and scan all unfinished PMT items",
+        value=False,
+        key="pmt_reconciliation_ignore_effective_date",
+    )
+    if scan_controls[1].button("Run Full PMT Assignment-to-Schedule Scan", type="primary", key="pmt_reconciliation_full_rescan"):
+        st.cache_data.clear()
+        st.session_state["pmt_reconciliation_last_refresh"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        st.rerun()
+    if scan_controls[2].button("Refresh Assignments and Rescan", key="pmt_reconciliation_refresh_rescan"):
+        st.cache_data.clear()
+        st.session_state["pmt_reconciliation_last_refresh"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        st.rerun()
+
+    scan = pmt_reconciliation_scan(reconciliation_effective_date, selected_reconcile_run, ignore_effective_date=ignore_effective_date)
     conflicts = scan["conflicts"].copy()
     assigned_not_scheduled = scan["assigned_not_scheduled"].copy()
     affected = scan["affected"].copy()
     protected = scan["protected"].copy()
+    diagnostics = scan.get("diagnostics", {})
+
+    st.caption(
+        " | ".join(
+            [
+                f"Current Workspace: {diagnostics.get('workspace', 'Current workspace')}",
+                f"Assignments Found: {diagnostics.get('assignments_loaded', 0)}",
+                f"Schedule Runs Found: {diagnostics.get('schedule_runs_scanned', 0)}",
+                f"Future/unfinished Schedule Items Found: {diagnostics.get('schedule_items_loaded', 0)}",
+                f"Last refreshed: {diagnostics.get('scan_timestamp', 'Not scanned')}",
+            ]
+        )
+    )
+    if st.session_state.get("account_role") == "Admin":
+        with st.expander("Reconciliation Scan Diagnostics", expanded=False):
+            st.json(diagnostics)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Schedule Conflicts", len(conflicts))
