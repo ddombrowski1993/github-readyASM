@@ -1633,6 +1633,7 @@ def reconciliation_store_number(value):
 
 def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=False):
     scan_start_date = date(1900, 1, 1) if ignore_effective_date else month_start(effective_date)
+    terminal_statuses = ["completed", "complete", "cancelled", "canceled", "skipped", "deleted", "transferred", "superseded", "archived"]
     params = {
         "effective_date": effective_date,
         "scan_start_date": scan_start_date,
@@ -1658,9 +1659,11 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         left join stores s on s.id = si.store_id
         left join employees se on se.id = si.employee_id
         left join employees ae on ae.id = s.assigned_pmt_employee_id
-        where si.work_type = 'PMT'
+        where upper(coalesce(si.work_type, '')) like '%PMT%'
           and si.schedule_date >= :scan_start_date
-          and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+          and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('completed','complete','cancelled','canceled','skipped','deleted','transferred','superseded','archived')
+          and (r.id is null or coalesce(lower(trim(r.status)), '') <> 'deleted')
+          and (sch.id is null or coalesce(lower(trim(sch.status)), '') <> 'deleted')
           and (:run_id is null or si.pmt_schedule_run_id = :run_id)
         order by si.schedule_date, scheduled_technician, si.sequence_number, s.store_number
         """,
@@ -1775,9 +1778,9 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         left join (
             select employee_id, count(*) as future_schedule_items
             from schedule_items
-            where work_type = 'PMT'
+            where upper(coalesce(work_type, '')) like '%PMT%'
               and schedule_date >= :scan_start_date
-              and status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+              and coalesce(nullif(lower(trim(status)), ''), 'scheduled') not in ('completed','complete','cancelled','canceled','skipped','deleted','transferred','superseded','archived')
               and employee_id is not null
             group by employee_id
         ) scheduled on scheduled.employee_id = e.id
@@ -1807,6 +1810,7 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         select count(*) as count
         from pmt_schedule_runs
         where (:run_id is null or id = :run_id)
+          and coalesce(lower(trim(status)), '') <> 'deleted'
         """,
         {"run_id": int(run_id) if run_id else None},
         use_cache=False,
@@ -1820,7 +1824,7 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
     effective_date_exclusions = int(future_items["before_effective_date"].sum()) if "before_effective_date" in future_items.columns else 0
     diagnostics = {
         "assignment_source": "stores.assigned_pmt_employee_id left joined to employees.id",
-        "schedule_source": "schedule_items where work_type = 'PMT'",
+        "schedule_source": "schedule_items where work_type contains PMT",
         "technician_identifier": "employees.id",
         "workspace": st.session_state.get("active_account_label") or st.session_state.get("active_account_slug") or "Current workspace",
         "pm_assignment_column": "stores.assigned_pmt_employee_id",
@@ -1838,6 +1842,7 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         "effective_date": str(effective_date),
         "scan_start_date": str(scan_start_date),
         "ignore_effective_date": bool(ignore_effective_date),
+        "terminal_statuses_excluded": terminal_statuses,
         "cache_status": "Bypassed safe_query cache for reconciliation scan",
         "scan_timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
@@ -4607,8 +4612,8 @@ with tab_reconcile:
     scan_controls = st.columns([0.34, 0.33, 0.33])
     ignore_effective_date = scan_controls[0].checkbox(
         "Ignore effective date and scan all unfinished PMT items",
-        value=False,
-        key="pmt_reconciliation_ignore_effective_date",
+        value=True,
+        key="pmt_reconciliation_full_scan_ignore_effective_date",
     )
     if scan_controls[1].button("Run Full PMT Assignment-to-Schedule Scan", type="primary", key="pmt_reconciliation_full_rescan"):
         st.cache_data.clear()
