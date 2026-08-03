@@ -2465,6 +2465,7 @@ def rebalance_candidate_preview(
     target_employee_id,
     source_mode,
     source_employee_id=None,
+    source_employee_ids=None,
     target_store_count=20,
     distance_limit=None,
 ):
@@ -2489,11 +2490,14 @@ def rebalance_candidate_preview(
     avg_count = sum(active_counts.values()) / len(active_counts) if active_counts else 0
     fair_count = int(ceil(avg_count)) if avg_count else 0
     overloaded_ids = {emp_id for emp_id, count in active_counts.items() if count > fair_count}
+    selected_source_ids = {int(value) for value in (source_employee_ids or [])}
+    if source_employee_id:
+        selected_source_ids.add(int(source_employee_id))
 
     if source_mode == "Unassigned stores only":
         df = df[df[employee_field].isna()]
-    elif source_mode == "Pull from selected technician" and source_employee_id:
-        df = df[df[employee_field] == int(source_employee_id)]
+    elif source_mode in ("Pull from selected technician", "Pull from selected technicians") and selected_source_ids:
+        df = df[df[employee_field].isin(selected_source_ids)]
     elif source_mode == "Pull from overloaded technicians":
         df = df[df[employee_field].isin(overloaded_ids)]
     elif source_mode == "All stores":
@@ -2526,7 +2530,7 @@ def rebalance_candidate_preview(
             current_distance = haversine_miles(store_lat, store_lon, current_location["latitude"], current_location["longitude"])
         if source_mode == "Unassigned stores only":
             reason = "Unassigned store"
-        elif source_mode == "Pull from selected technician":
+        elif source_mode in ("Pull from selected technician", "Pull from selected technicians"):
             reason = "Pulled from selected technician"
         elif current_employee_id in overloaded_ids:
             reason = "Current technician overloaded"
@@ -2562,11 +2566,11 @@ def rebalance_candidate_preview(
     if preview.empty:
         return preview, "No suggested stores matched the distance and source settings."
     source_take_limits = {}
-    if source_mode == "Pull from selected technician" and source_employee_id:
-        source_employee_id = int(source_employee_id)
-        combined_count = active_counts.get(source_employee_id, 0) + active_counts.get(target_employee_id, 0)
-        source_floor = int(ceil(combined_count / 2)) if combined_count else 0
-        source_take_limits[source_employee_id] = max(active_counts.get(source_employee_id, 0) - source_floor, 0)
+    if source_mode in ("Pull from selected technician", "Pull from selected technicians") and selected_source_ids:
+        combined_count = active_counts.get(target_employee_id, 0) + sum(active_counts.get(employee_id, 0) for employee_id in selected_source_ids)
+        source_floor = int(ceil(combined_count / (len(selected_source_ids) + 1))) if combined_count else 0
+        for employee_id in selected_source_ids:
+            source_take_limits[employee_id] = max(active_counts.get(employee_id, 0) - source_floor, 0)
     elif source_mode in ("All stores", "Pull from overloaded technicians"):
         candidate_source_ids = {
             int(value)
@@ -3463,23 +3467,24 @@ if selected_group in ("PMT", "Calibration"):
             spread_target_employees = []
             spread_source_employees = []
             source_employee = None
+            source_employees = []
             source_options = source_technician_options(stores_df, tech_config["employee_field"], tech_config["person_column"])
             source_values = [value for value, _ in source_options]
             source_labels = dict(source_options)
             tech_lookup = tech_summary.set_index("employee_id")
             if rebalance_result == "Move stores to one selected technician":
                 if source_values:
-                    source_employee = control_cols[0].selectbox(
+                    source_employees = control_cols[0].multiselect(
                         "Pull stores from",
                         source_values,
                         format_func=lambda value: source_labels.get(value, f"Employee {value}"),
-                        key=f"{selected_group}_rebalance_source_tech_one",
-                        help="Choose the technician whose assigned stores should be considered for reassignment.",
+                        key=f"{selected_group}_rebalance_source_techs_one",
+                        help="Choose one or more technicians whose assigned stores should be considered for reassignment.",
                     )
                 else:
                     control_cols[0].warning("No assigned source technicians found.")
-                source_mode = "Pull from selected technician"
-                target_options = [value for value in active_targets if value != source_employee]
+                source_mode = "Pull from selected technicians"
+                target_options = [value for value in active_targets if value not in source_employees]
                 if target_options:
                     default_target_value = active_targets[default_target_index]
                     target_index = target_options.index(default_target_value) if default_target_value in target_options else 0
@@ -3537,7 +3542,8 @@ if selected_group in ("PMT", "Calibration"):
                 distance_limit = int(distance_choice.split()[0])
             generate_disabled = (
                 (source_mode == "Pull from selected technician" and source_employee is None)
-                or (source_mode == "Pull from selected technicians" and not spread_source_employees)
+                or (rebalance_result == "Move stores to one selected technician" and source_mode == "Pull from selected technicians" and not source_employees)
+                or (rebalance_result == "Spread stores across multiple nearby technicians" and source_mode == "Pull from selected technicians" and not spread_source_employees)
                 or (rebalance_result == "Move stores to one selected technician" and target_employee is None)
                 or (rebalance_result == "Spread stores across multiple nearby technicians" and not spread_target_employees)
             )
@@ -3551,6 +3557,7 @@ if selected_group in ("PMT", "Calibration"):
                         target_employee,
                         source_mode,
                         source_employee_id=source_employee,
+                        source_employee_ids=source_employees,
                         target_store_count=target_count,
                         distance_limit=distance_limit,
                     )
