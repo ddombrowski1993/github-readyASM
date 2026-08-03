@@ -2386,7 +2386,7 @@ def add_drawn_stores_to_rebalance_preview(preview_df, stores_df, tech_summary, e
     return pd.concat([preview_df, pd.DataFrame(rows)], ignore_index=True)
 
 
-def set_drawn_stores_rebalance_target(preview_df, stores_df, tech_summary, employee_field, person_column, drawn_ids, target_employee_id=None):
+def set_drawn_stores_rebalance_target(preview_df, stores_df, tech_summary, employee_field, person_column, drawn_ids, target_employee_id=None, reason="Set from preview map drawing"):
     if preview_df.empty or stores_df.empty or not drawn_ids:
         return preview_df
     updated = preview_df.copy()
@@ -2445,7 +2445,7 @@ def set_drawn_stores_rebalance_target(preview_df, stores_df, tech_summary, emplo
             "distance_from_target_home": round(target_distance, 1) if target_distance is not None else "",
             "distance_from_current_home": round(current_distance, 1) if current_distance is not None else "",
             "distance_improvement": round(current_distance - target_distance, 1) if current_distance is not None and target_distance is not None else "",
-            "reason": "Set from preview map drawing",
+            "reason": reason,
             "review_flag": "",
         }
         if store_id in rows_by_store_id:
@@ -2455,6 +2455,15 @@ def set_drawn_stores_rebalance_target(preview_df, stores_df, tech_summary, emplo
             updated = pd.concat([updated, pd.DataFrame([row_values])], ignore_index=True)
             rows_by_store_id[store_id] = len(updated) - 1
     return updated
+
+
+def drawing_store_id_sets(stores_df, drawings):
+    rows = []
+    for index, drawing in enumerate(drawings or [], start=1):
+        selected = stores_within_drawings(stores_df, [drawing], close_lines_as_areas=True)
+        store_ids = set(int(value) for value in selected["id"].tolist()) if not selected.empty else set()
+        rows.append({"polygon": index, "store_ids": store_ids, "stores": selected})
+    return rows
 
 
 def rebalance_candidate_preview(
@@ -2468,6 +2477,7 @@ def rebalance_candidate_preview(
     source_employee_ids=None,
     target_store_count=20,
     distance_limit=None,
+    balance_source_counts=True,
 ):
     if stores_df.empty:
         return pd.DataFrame(), "No active stores are loaded."
@@ -2566,7 +2576,9 @@ def rebalance_candidate_preview(
     if preview.empty:
         return preview, "No suggested stores matched the distance and source settings."
     source_take_limits = {}
-    if source_mode in ("Pull from selected technician", "Pull from selected technicians") and selected_source_ids:
+    if not balance_source_counts:
+        source_take_limits = {}
+    elif source_mode in ("Pull from selected technician", "Pull from selected technicians") and selected_source_ids:
         combined_count = active_counts.get(target_employee_id, 0) + sum(active_counts.get(employee_id, 0) for employee_id in selected_source_ids)
         source_floor = int(ceil(combined_count / (len(selected_source_ids) + 1))) if combined_count else 0
         for employee_id in selected_source_ids:
@@ -3560,6 +3572,7 @@ if selected_group in ("PMT", "Calibration"):
                         source_employee_ids=source_employees,
                         target_store_count=target_count,
                         distance_limit=distance_limit,
+                        balance_source_counts=assignment_purpose != "Initial assignment",
                     )
                 else:
                     preview, issue = multi_technician_rebalance_preview(
@@ -3581,6 +3594,11 @@ if selected_group in ("PMT", "Calibration"):
                     st.session_state[rebalance_key] = enrich_rebalance_preview_with_store_locations(preview, stores_df)
                     st.session_state.pop(editor_key, None)
                     st.success(f"Suggested {len(preview)} store assignment change(s). Review before saving.")
+                    if len(preview) < int(target_count):
+                        st.info(
+                            f"Only {len(preview)} matching store(s) were available for the selected source techs, "
+                            f"distance limit, and target technician. To reach {int(target_count)}, add more source techs or increase the distance limit."
+                        )
 
             preview_df = st.session_state.get(rebalance_key)
             if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
@@ -3706,6 +3724,49 @@ if selected_group in ("PMT", "Calibration"):
                         st.session_state[map_edit_count_key] = map_edit_count + 1
                         st.rerun()
                     map_adjust_cols[3].caption("Use Keep current PMT to remove suggested stores from the plan, or choose a PMT to add/change the drawn stores.")
+                    polygon_sets = drawing_store_id_sets(map_context_df, preview_drawings)
+                    polygon_sets = [item for item in polygon_sets if item["store_ids"]]
+                    if len(polygon_sets) > 1:
+                        st.markdown("**Assign Multiple Drawn Polygons**")
+                        st.caption("Each polygon can go to a different technician. Later polygons override earlier polygons if they overlap.")
+                        polygon_targets = {}
+                        for item in polygon_sets:
+                            polygon_number = int(item["polygon"])
+                            polygon_cols = st.columns([0.18, 0.22, 0.60])
+                            polygon_cols[0].metric(f"Polygon {polygon_number}", len(item["store_ids"]))
+                            polygon_targets[polygon_number] = polygon_cols[1].selectbox(
+                                "Send to",
+                                target_choice_options,
+                                format_func=lambda value: value if isinstance(value, str) else tech_summary.set_index("employee_id").loc[value, "technician"],
+                                key=f"{selected_group}_rebalance_polygon_{polygon_number}_target",
+                            )
+                            polygon_preview = item["stores"].copy()
+                            polygon_preview["Original Technician"] = polygon_preview[tech_config["person_column"]].fillna("Unassigned").replace("", "Unassigned")
+                            polygon_cols[2].dataframe(
+                                polygon_preview[["store_number", "city", "state", "Original Technician"]].head(20),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        if st.button(f"Apply {len(polygon_sets)} Polygon Assignment Choices", type="secondary", key=f"{selected_group}_rebalance_apply_multi_polygon_choices"):
+                            updated_preview = full_preview.copy()
+                            for item in polygon_sets:
+                                polygon_number = int(item["polygon"])
+                                polygon_target_choice = polygon_targets.get(polygon_number)
+                                selected_target_employee = None if polygon_target_choice == "Keep current PMT" else int(polygon_target_choice)
+                                updated_preview = set_drawn_stores_rebalance_target(
+                                    updated_preview,
+                                    stores_df,
+                                    tech_summary,
+                                    tech_config["employee_field"],
+                                    tech_config["person_column"],
+                                    item["store_ids"],
+                                    target_employee_id=selected_target_employee,
+                                    reason=f"Set from preview map polygon {polygon_number}",
+                                )
+                            st.session_state[rebalance_key] = updated_preview
+                            st.session_state.pop(editor_key, None)
+                            st.session_state[map_edit_count_key] = map_edit_count + 1
+                            st.rerun()
                 confirmed = st.checkbox(
                     f"I reviewed these {selected_count} {selected_group} assignment change(s).",
                     key=f"{selected_group}_rebalance_confirm_check",
