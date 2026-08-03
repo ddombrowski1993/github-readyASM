@@ -975,6 +975,10 @@ def active_areas(group=None):
     )
 
 
+def empty_polygon_json():
+    return json.dumps({"type": "Polygon", "coordinates": [[]]})
+
+
 def map_value(value, default=""):
     if pd.isna(value):
         return default
@@ -4527,7 +4531,7 @@ store_options = visible_stores["id"].tolist() if not visible_stores.empty else [
 manual_store = a2.selectbox("Manual store add/remove", store_options, format_func=lambda x: f"{visible_stores.set_index('id').loc[x, 'store_number']} - {visible_stores.set_index('id').loc[x, 'city']}" if store_options else "", key="manual_store")
 selected_target_team = a3.selectbox("Target area", [None] + group_teams["id"].tolist() if not group_teams.empty else [None], format_func=lambda x: "Select area" if x is None else group_teams.set_index("id").loc[x, "team_name"], key="target_area")
 
-b1, b2, b3 = st.columns(3)
+b1, b2, b3, b4 = st.columns(4)
 if b1.button("Save Drawn Stores to Selected Area", type="primary", disabled=not selected_target_team or not selected_store_ids):
     with session_scope() as session:
         target_employee_id = pmt_employee_for_team(session, selected_target_team) if selected_group == "PMT" else (tech_1 if selected_group != "Brand Enhancement" else None)
@@ -4554,7 +4558,7 @@ if b1.button("Save Drawn Stores to Selected Area", type="primary", disabled=not 
                     team_id=int(selected_target_team),
                     employee_id=int(target_employee_id) if target_employee_id else None,
                     assignment_type=GROUPS[selected_group]["default_assignment"],
-                    geometry_json=geometry or json.dumps({"type": "Polygon", "coordinates": [[]]}),
+                    geometry_json=geometry or empty_polygon_json(),
                     assigned_store_ids=json.dumps(sorted([int(value) for value in selected_store_ids])),
                     color=stable_color(team_name),
                     active=True,
@@ -4577,6 +4581,23 @@ if b3.button("Remove Manual Store", disabled=not manual_store):
         store = session.get(Store, int(manual_store))
         clear_store_group(store, selected_group)
     st.success("Store removed from this group assignment.")
+    st.rerun()
+
+clear_polygon_team = selected_target_team or selected_team_id
+if b4.button("Clear Saved Polygon", disabled=not clear_polygon_team or not selected_group, type="secondary"):
+    with session_scope() as session:
+        for area in session.query(MapArea).filter(
+            MapArea.team_id == int(clear_polygon_team),
+            MapArea.area_type == selected_group,
+            MapArea.active == True,
+        ).all():
+            area.geometry_json = empty_polygon_json()
+    log_action(
+        "saved polygon cleared",
+        "map_areas",
+        description=f"Cleared saved polygon for {selected_group} area {clear_polygon_team}. Store assignments were not changed.",
+    )
+    st.success("Saved polygon cleared. Store assignments were not changed.")
     st.rerun()
 
 st.divider()
