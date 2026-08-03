@@ -50,6 +50,24 @@ GROUPS = {
         "default_assignment": "Calibration area",
     },
 }
+TECHNICIAN_CONTRAST_PALETTE = [
+    "#e11d48",
+    "#2563eb",
+    "#16a34a",
+    "#9333ea",
+    "#f59e0b",
+    "#0891b2",
+    "#db2777",
+    "#65a30d",
+    "#7c2d12",
+    "#4f46e5",
+    "#0f766e",
+    "#b91c1c",
+    "#854d0e",
+    "#0369a1",
+    "#a21caf",
+    "#15803d",
+]
 EXACT_GROUP_ASSIGNMENT_HEADERS = {
     "PMT": ["pmt", "assigned pmt", "pmt technician", "assigned pmt technician"],
     "Brand Enhancement": ["assigned brand", "brand enhancement", "brand team", "brand technician", "afm"],
@@ -988,17 +1006,10 @@ def store_status_for_map(row, group, selected_team_id=None, selected_ids=None):
             return "different_group"
         return "unassigned"
     assigned_team = assignment_id(row, group)
-    has_other_group = any(
-        row.get(field)
-        for field in ["assigned_brand_team_id", "assigned_pmt_team_id", "assigned_calibration_team_id"]
-        if field != config["team_field"]
-    )
     if selected_team_id and assigned_team == selected_team_id:
         return "current_area"
     if assigned_team:
         return "other_same_group"
-    if has_other_group:
-        return "different_group"
     return "unassigned"
 
 
@@ -1010,6 +1021,50 @@ def marker_color(status):
         "other_same_group": "#dc2626",
         "different_group": "#2563eb",
     }.get(status, "#2563eb")
+
+
+def technician_color_lookup(stores_df, group):
+    if group not in ("PMT", "Calibration") or stores_df is None or stores_df.empty:
+        return {}
+    person_col = "pmt_person" if group == "PMT" else "calibration_person"
+    if person_col not in stores_df.columns:
+        return {}
+    assigned = stores_df.copy()
+    assigned[person_col] = assigned[person_col].fillna("").astype(str).str.strip()
+    assigned = assigned[assigned[person_col].ne("")]
+    if assigned.empty:
+        return {}
+    for coord_col in ["latitude", "longitude"]:
+        assigned[coord_col] = pd.to_numeric(assigned.get(coord_col), errors="coerce")
+    centers = (
+        assigned.dropna(subset=["latitude", "longitude"])
+        .groupby(person_col, as_index=False)
+        .agg(latitude=("latitude", "mean"), longitude=("longitude", "mean"), stores=("id", "count"))
+    )
+    if centers.empty:
+        names = sorted(assigned[person_col].unique().tolist())
+    else:
+        centers = centers.sort_values(["longitude", "latitude", person_col])
+        names = centers[person_col].tolist()
+        missing_names = sorted(set(assigned[person_col].unique().tolist()) - set(names))
+        names.extend(missing_names)
+    return {
+        name: TECHNICIAN_CONTRAST_PALETTE[index % len(TECHNICIAN_CONTRAST_PALETTE)]
+        for index, name in enumerate(names)
+    }
+
+
+def colorized_technician_areas(areas_df, color_lookup, group):
+    if areas_df is None or areas_df.empty or not color_lookup or group not in ("PMT", "Calibration"):
+        return areas_df
+    colored = areas_df.copy()
+    for index, row in colored.iterrows():
+        for field in ["area_name", "team_name"]:
+            name = str(row.get(field, "") or "").strip()
+            if name in color_lookup:
+                colored.at[index, "color"] = color_lookup[name]
+                break
+    return colored
 
 
 def render_area_manager_map(
@@ -1031,7 +1086,8 @@ def render_area_manager_map(
         return None, {}
 
     fmap = folium.Map(location=center_for(valid), zoom_start=8, tiles="OpenStreetMap")
-    add_area_overlays(fmap, areas_df)
+    tech_color_lookup = technician_color_lookup(valid, group)
+    add_area_overlays(fmap, colorized_technician_areas(areas_df, tech_color_lookup, group))
     if teams_df is not None and not teams_df.empty:
         anchor_source = team_anchor_stores_df if team_anchor_stores_df is not None else valid
         for _, team in teams_df.iterrows():
@@ -1054,7 +1110,7 @@ def render_area_manager_map(
         tech_names = sorted(valid[person_col].fillna("Unassigned").replace("", "Unassigned").unique().tolist())
         legend_rows = []
         for name in tech_names:
-            color = "#9ca3af" if name == "Unassigned" else stable_color(name)
+            color = "#9ca3af" if name == "Unassigned" else tech_color_lookup.get(name, stable_color(name))
             count = int((valid[person_col].fillna("Unassigned").replace("", "Unassigned") == name).sum())
             legend_rows.append(
                 f"<div style='display:flex;align-items:center;gap:6px;margin:3px 0;'>"
@@ -1116,7 +1172,13 @@ def render_area_manager_map(
             color="#111827" if state == "selected" else "#ffffff",
             weight=2 if state in ("selected", "current_area") else 1,
             fill=True,
-            fill_color=(stable_color(row.get("pmt_person")) if group == "PMT" and row.get("pmt_person") else stable_color(row.get("calibration_person")) if group == "Calibration" and row.get("calibration_person") else marker_color(state)),
+            fill_color=(
+                tech_color_lookup.get(str(row.get("pmt_person")).strip(), stable_color(row.get("pmt_person")))
+                if group == "PMT" and row.get("pmt_person")
+                else tech_color_lookup.get(str(row.get("calibration_person")).strip(), stable_color(row.get("calibration_person")))
+                if group == "Calibration" and row.get("calibration_person")
+                else marker_color(state)
+            ),
             fill_opacity=0.92,
             popup=folium.Popup(popup, max_width=340),
             tooltip=f"Store {row.get('store_number','')} - {tooltip_assignment}",
