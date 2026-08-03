@@ -975,13 +975,35 @@ def active_areas(group=None):
     )
 
 
+def map_value(value, default=""):
+    if pd.isna(value):
+        return default
+    text_value = str(value).strip()
+    if not text_value or text_value.lower() == "nan":
+        return default
+    return value
+
+
+def map_label(value, default="Unassigned"):
+    clean_value = map_value(value, "")
+    return str(clean_value).strip() if clean_value != "" else default
+
+
+def first_map_value(*values):
+    for value in values:
+        clean_value = map_value(value, "")
+        if clean_value != "":
+            return clean_value
+    return None
+
+
 def assignment_label(row, group):
     if group == "Brand Enhancement":
-        return row.get("brand_area") or ""
+        return map_label(row.get("brand_area"), "")
     if group == "PMT":
-        return row.get("pmt_person") or row.get("pmt_area") or ""
+        return map_label(first_map_value(row.get("pmt_person"), row.get("pmt_area")), "")
     if group == "Calibration":
-        return row.get("calibration_area") or row.get("calibration_person") or ""
+        return map_label(first_map_value(row.get("calibration_person"), row.get("calibration_area")), "")
     return ""
 
 
@@ -990,10 +1012,10 @@ def assignment_id(row, group):
     if not config:
         return None
     if group == "PMT":
-        return row.get("assigned_pmt_employee_id") or row.get("assigned_pmt_team_id")
+        return first_map_value(row.get("assigned_pmt_employee_id"), row.get("assigned_pmt_team_id"))
     if group == "Calibration":
-        return row.get("assigned_calibration_employee_id") or row.get("assigned_calibration_team_id")
-    return row.get(config["team_field"])
+        return first_map_value(row.get("assigned_calibration_employee_id"), row.get("assigned_calibration_team_id"))
+    return first_map_value(row.get(config["team_field"]))
 
 
 def store_status_for_map(row, group, selected_team_id=None, selected_ids=None):
@@ -1002,7 +1024,7 @@ def store_status_for_map(row, group, selected_team_id=None, selected_ids=None):
         return "selected"
     config = group_config(group)
     if not config:
-        if row.get("brand_area") or row.get("pmt_area") or row.get("calibration_area"):
+        if first_map_value(row.get("brand_area"), row.get("pmt_area"), row.get("calibration_area")):
             return "different_group"
         return "unassigned"
     assigned_team = assignment_id(row, group)
@@ -1147,23 +1169,28 @@ def render_area_manager_map(
 
     for _, row in valid.iterrows():
         state = store_status_for_map(row, group, selected_team_id, selected_ids)
+        pmt_person = map_label(row.get("pmt_person"))
+        calibration_person = map_label(row.get("calibration_person"))
+        brand_area = map_label(row.get("brand_area"))
+        pmt_area = map_label(row.get("pmt_area"))
+        calibration_area = map_label(row.get("calibration_area"))
         if group == "PMT":
-            tooltip_assignment = f"PMT Technician: {row.get('pmt_person') or 'Unassigned'}"
+            tooltip_assignment = f"PMT Technician: {pmt_person}"
         elif group == "Calibration":
-            tooltip_assignment = f"Calibration Technician: {row.get('calibration_person') or 'Unassigned'}"
+            tooltip_assignment = f"Calibration Technician: {calibration_person}"
         elif group == "Brand Enhancement":
-            tooltip_assignment = f"Brand Area: {row.get('brand_area') or 'Unassigned'}"
+            tooltip_assignment = f"Brand Area: {brand_area}"
         else:
-            tooltip_assignment = f"PMT Technician: {row.get('pmt_person') or 'Unassigned'}"
+            tooltip_assignment = f"PMT Technician: {pmt_person}"
         popup = f"""
         <b>Store {row.get('store_number','')}</b><br>
         {row.get('address','')}<br>
         {row.get('city','')}, {row.get('state','')} {row.get('zip','')}<br><br>
-        Brand Enhancement: {row.get('brand_area') or 'Unassigned'}<br>
-        PMT Technician: {row.get('pmt_person') or 'Unassigned'}<br>
-        PMT Area: {row.get('pmt_area') or 'Unassigned'}<br>
-        Calibration Technician: {row.get('calibration_person') or 'Unassigned'}<br>
-        Calibration Area: {row.get('calibration_area') or 'Unassigned'}<br><br>
+        Brand Enhancement: {brand_area}<br>
+        PMT Technician: {pmt_person}<br>
+        PMT Area: {pmt_area}<br>
+        Calibration Technician: {calibration_person}<br>
+        Calibration Area: {calibration_area}<br><br>
         Use the manual add/remove controls below the map to change this store.
         """
         folium.CircleMarker(
@@ -1173,10 +1200,10 @@ def render_area_manager_map(
             weight=2 if state in ("selected", "current_area") else 1,
             fill=True,
             fill_color=(
-                tech_color_lookup.get(str(row.get("pmt_person")).strip(), stable_color(row.get("pmt_person")))
-                if group == "PMT" and row.get("pmt_person")
-                else tech_color_lookup.get(str(row.get("calibration_person")).strip(), stable_color(row.get("calibration_person")))
-                if group == "Calibration" and row.get("calibration_person")
+                tech_color_lookup.get(pmt_person, stable_color(pmt_person))
+                if group == "PMT" and pmt_person != "Unassigned"
+                else tech_color_lookup.get(calibration_person, stable_color(calibration_person))
+                if group == "Calibration" and calibration_person != "Unassigned"
                 else marker_color(state)
             ),
             fill_opacity=0.92,
