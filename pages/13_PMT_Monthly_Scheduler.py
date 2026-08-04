@@ -1428,7 +1428,7 @@ def pmt_manage_run_items(run_id):
                si.store_id, s.store_number, s.address, s.city, s.state, s.zip,
                s.assigned_pmt_employee_id, owner.full_name as assigned_technician,
                s.latitude, s.longitude, si.work_type, si.status, si.cycle_label,
-               si.schedule_source,
+               si.schedule_source, si.original_schedule_date,
                si.completion_notes as notes
         from schedule_items si
         left join employees e on e.id = si.employee_id
@@ -1450,6 +1450,7 @@ def pmt_manage_run_items(run_id):
     df["month_start"] = df["schedule_date"].dt.to_period("M").dt.to_timestamp().dt.date
     df["month"] = df["month_start"].apply(month_label)
     df["schedule_date"] = df["schedule_date"].dt.date
+    df["original_schedule_date"] = pd.to_datetime(df.get("original_schedule_date"), errors="coerce").dt.date
     for column in ["employee_id", "store_id", "schedule_item_id", "schedule_id", "sequence_number", "assigned_pmt_employee_id"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     return df
@@ -2127,6 +2128,124 @@ def pmt_reconciliation_compare_workbook_bytes(preview):
         preview.get("old_schedule", pd.DataFrame()).to_excel(writer, index=False, sheet_name="Old Schedule")
         preview.get("new_schedule", pd.DataFrame()).to_excel(writer, index=False, sheet_name="New Schedule Preview")
         preview.get("protected", pd.DataFrame()).to_excel(writer, index=False, sheet_name="Protected Techs")
+    return buffer.getvalue()
+
+
+SCHEDULE_EXPORT_COLOR_RULES = [
+    ("#dbeafe", "Blue", "Transferred to the current assigned PMT by reconciliation"),
+    ("#dcfce7", "Green", "Route order or schedule date changed after reconciliation"),
+    ("#f3e8ff", "Purple", "Superseded or transferred off old PMT schedule"),
+    ("#e5e7eb", "Gray", "Old schedule snapshot row"),
+]
+
+
+def schedule_export_change_type(row, is_snapshot=False):
+    if is_snapshot:
+        return "Old schedule snapshot"
+    source = clean(row.get("schedule_source", "")).lower()
+    status = normalize_schedule_status(row.get("status", ""))
+    original_date = row.get("original_schedule_date")
+    schedule_date = row.get("schedule_date")
+    if status in {"transferred", "superseded"} or "superseded" in source:
+        return "Superseded/transferred old row"
+    if "reconciliation" in source or "territory transfer" in source:
+        return "Transferred to current assigned PMT"
+    if pd.notna(original_date) and pd.notna(schedule_date) and original_date != schedule_date:
+        return "Date changed after reconciliation"
+    return "Unchanged"
+
+
+def schedule_export_row_color(change_type):
+    if change_type == "Transferred to current assigned PMT":
+        return "#dbeafe"
+    if change_type == "Date changed after reconciliation":
+        return "#dcfce7"
+    if change_type == "Superseded/transferred old row":
+        return "#f3e8ff"
+    if change_type == "Old schedule snapshot":
+        return "#e5e7eb"
+    return ""
+
+
+def prepare_schedule_export_view(df, is_snapshot=False):
+    if df.empty:
+        return df
+    view = df.copy()
+    view["Change Type"] = view.apply(lambda row: schedule_export_change_type(row, is_snapshot=is_snapshot), axis=1)
+    view["Current Assigned PMT"] = view.get("assigned_technician", "")
+    export_columns = [
+        "Change Type", "month", "schedule_date", "original_schedule_date", "sequence_number",
+        "technician", "Current Assigned PMT", "store_number", "address", "city", "state", "zip",
+        "status", "cycle_label", "schedule_source", "notes",
+    ]
+    return view[[col for col in export_columns if col in view.columns]].sort_values(
+        [col for col in ["month", "technician", "sequence_number", "store_number"] if col in view.columns]
+    )
+
+
+def reconciliation_schedule_export_workbook_bytes(new_run_items, old_run_items=None, run_name="", snapshot_name=""):
+    from openpyxl.styles import Font, PatternFill
+
+    old_run_items = old_run_items if old_run_items is not None else pd.DataFrame()
+    current_export = prepare_schedule_export_view(new_run_items, is_snapshot=False)
+    old_export = prepare_schedule_export_view(old_run_items, is_snapshot=True)
+    changed_export = current_export[
+        current_export.get("Change Type", pd.Series(dtype=str)).astype(str).ne("Unchanged")
+    ].copy() if not current_export.empty else pd.DataFrame()
+    legend = pd.DataFrame(
+        [{"Color Code": name, "Meaning": meaning, "Excel Fill": color} for color, name, meaning in SCHEDULE_EXPORT_COLOR_RULES]
+    )
+    summary = pd.DataFrame(
+        [
+            {"Metric": "Updated Schedule Run", "Value": run_name},
+            {"Metric": "Old Snapshot Schedule", "Value": snapshot_name or "Not selected"},
+            {"Metric": "Current Schedule Rows", "Value": len(current_export)},
+            {"Metric": "Changed Current Rows", "Value": len(changed_export)},
+            {"Metric": "Old Snapshot Rows", "Value": len(old_export)},
+        ]
+    )
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        summary.to_excel(writer, index=False, sheet_name="Summary")
+        legend.to_excel(writer, index=False, sheet_name="Color Legend")
+        current_export.to_excel(writer, index=False, sheet_name="New Normal Schedule")
+        changed_export.to_excel(writer, index=False, sheet_name="New Schedule Changes")
+        old_export.to_excel(writer, index=False, sheet_name="Old Schedule Snapshot")
+
+        workbook = writer.book
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            sheet.freeze_panes = "A2"
+            if sheet.max_row and sheet.max_column:
+                sheet.auto_filter.ref = sheet.dimensions
+            for cell in sheet[1]:
+                cell.font = Font(bold=True)
+
+        for row_index, (color, _, _) in enumerate(SCHEDULE_EXPORT_COLOR_RULES, start=2):
+            fill = PatternFill("solid", fgColor=color.replace("#", "").upper())
+            for cell in workbook["Color Legend"][row_index]:
+                cell.fill = fill
+
+        def color_sheet(sheet_name):
+            sheet = workbook[sheet_name]
+            if sheet.max_row < 2:
+                return
+            headers = [cell.value for cell in sheet[1]]
+            try:
+                change_col_index = headers.index("Change Type") + 1
+            except ValueError:
+                return
+            for row_index in range(2, sheet.max_row + 1):
+                change_type = sheet.cell(row=row_index, column=change_col_index).value
+                color = schedule_export_row_color(change_type)
+                if not color:
+                    continue
+                fill = PatternFill("solid", fgColor=color.replace("#", "").upper())
+                for cell in sheet[row_index]:
+                    cell.fill = fill
+
+        for sheet_name in ["New Normal Schedule", "New Schedule Changes", "Old Schedule Snapshot"]:
+            color_sheet(sheet_name)
     return buffer.getvalue()
 
 
@@ -6131,3 +6250,76 @@ with tab_export:
             else:
                 published_export_draft = published_pmt_run_export_draft(selected_export_run)
                 render_pmt_export_controls(published_export_draft, f"pmt_bottom_export_run_{selected_export_run}")
+
+        st.divider()
+        st.markdown("**Reconciliation Schedule Exports**")
+        st.caption(
+            "Use this after PMT reconciliation. This is separate from the normal schedule export and includes the old snapshot, "
+            "the new normal schedule, changed rows, color legend, and reconciliation change columns."
+        )
+        if _export_runs.empty:
+            st.info("No PMT schedule runs are available for reconciliation exports.")
+        else:
+            reconciled_runs = _export_runs[
+                ~_export_runs["status"].fillna("").astype(str).str.lower().eq("snapshot")
+            ].copy()
+            snapshot_runs = _export_runs[
+                _export_runs["status"].fillna("").astype(str).str.lower().eq("snapshot")
+            ].copy()
+            if reconciled_runs.empty:
+                st.info("No active PMT schedule run is available for the new schedule export.")
+            else:
+                recon_export_cols = st.columns([0.5, 0.5])
+                selected_recon_export_run = recon_export_cols[0].selectbox(
+                    "New / updated schedule run",
+                    reconciled_runs["id"].tolist(),
+                    format_func=lambda value: f"#{value} - {reconciled_runs.set_index('id').loc[value, 'run_name']}",
+                    key="pmt_reconciliation_export_new_run",
+                )
+                inferred_snapshot_ids = []
+                if not snapshot_runs.empty:
+                    notes_by_id = snapshot_runs.set_index("id")["run_name"].fillna("").astype(str).to_dict()
+                    snapshot_notes = safe_query(
+                        """
+                        select id, run_name, notes
+                        from pmt_schedule_runs
+                        where lower(coalesce(status, '')) = 'snapshot'
+                        order by created_at desc, id desc
+                        """,
+                        use_cache=False,
+                    )
+                    if not snapshot_notes.empty:
+                        snapshot_notes["notes_text"] = snapshot_notes["notes"].fillna("").astype(str)
+                        inferred_snapshot_ids = snapshot_notes[
+                            snapshot_notes["notes_text"].str.contains(f"Source run #{int(selected_recon_export_run)}", regex=False)
+                        ]["id"].tolist()
+                        notes_by_id.update(snapshot_notes.set_index("id")["run_name"].fillna("").astype(str).to_dict())
+                snapshot_options = [None] + (inferred_snapshot_ids if inferred_snapshot_ids else (snapshot_runs["id"].tolist() if not snapshot_runs.empty else []))
+                selected_old_snapshot_run = recon_export_cols[1].selectbox(
+                    "Old schedule snapshot",
+                    snapshot_options,
+                    format_func=lambda value: "No old snapshot selected" if value is None else f"#{value} - {notes_by_id.get(value, 'Snapshot')}",
+                    key="pmt_reconciliation_export_old_snapshot",
+                )
+                new_schedule_items = pmt_manage_run_items(selected_recon_export_run)
+                old_schedule_items = pmt_manage_run_items(selected_old_snapshot_run) if selected_old_snapshot_run else pd.DataFrame()
+                recon_export_metrics = st.columns(4)
+                changed_preview = prepare_schedule_export_view(new_schedule_items)
+                changed_count = int(changed_preview.get("Change Type", pd.Series(dtype=str)).astype(str).ne("Unchanged").sum()) if not changed_preview.empty else 0
+                recon_export_metrics[0].metric("New Schedule Rows", len(new_schedule_items))
+                recon_export_metrics[1].metric("Changed Rows", changed_count)
+                recon_export_metrics[2].metric("Old Snapshot Rows", len(old_schedule_items))
+                recon_export_metrics[3].metric("Snapshot Found", "Yes" if selected_old_snapshot_run else "No")
+                st.download_button(
+                    "Export Reconciled Schedule Package",
+                    data=reconciliation_schedule_export_workbook_bytes(
+                        new_schedule_items,
+                        old_schedule_items,
+                        run_name=reconciled_runs.set_index("id").loc[selected_recon_export_run, "run_name"],
+                        snapshot_name="" if selected_old_snapshot_run is None else notes_by_id.get(selected_old_snapshot_run, "Snapshot"),
+                    ),
+                    file_name=f"pmt_reconciled_schedule_package_run_{selected_recon_export_run}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    disabled=new_schedule_items.empty,
+                    key="pmt_reconciliation_schedule_package_export",
+                )
