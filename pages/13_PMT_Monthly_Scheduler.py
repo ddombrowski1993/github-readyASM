@@ -2206,11 +2206,34 @@ def reconciliation_schedule_export_workbook_bytes(new_run_items, old_run_items=N
     )
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        used_sheets = set()
         summary.to_excel(writer, index=False, sheet_name="Summary")
+        used_sheets.add("Summary")
         legend.to_excel(writer, index=False, sheet_name="Color Legend")
+        used_sheets.add("Color Legend")
         current_export.to_excel(writer, index=False, sheet_name="New Normal Schedule")
+        used_sheets.add("New Normal Schedule")
         changed_export.to_excel(writer, index=False, sheet_name="New Schedule Changes")
+        used_sheets.add("New Schedule Changes")
         old_export.to_excel(writer, index=False, sheet_name="Old Schedule Snapshot")
+        used_sheets.add("Old Schedule Snapshot")
+
+        new_month_sheet_names = []
+        old_month_sheet_names = []
+        if not current_export.empty and "month" in current_export.columns:
+            for month_name in current_export["month"].dropna().drop_duplicates().tolist():
+                month_df = current_export[current_export["month"] == month_name].copy()
+                sheet_name = safe_sheet_name(f"New {month_name}", used_sheets)
+                used_sheets.add(sheet_name)
+                month_df.to_excel(writer, index=False, sheet_name=sheet_name)
+                new_month_sheet_names.append(sheet_name)
+        if not old_export.empty and "month" in old_export.columns:
+            for month_name in old_export["month"].dropna().drop_duplicates().tolist():
+                month_df = old_export[old_export["month"] == month_name].copy()
+                sheet_name = safe_sheet_name(f"Old {month_name}", used_sheets)
+                used_sheets.add(sheet_name)
+                month_df.to_excel(writer, index=False, sheet_name=sheet_name)
+                old_month_sheet_names.append(sheet_name)
 
         workbook = writer.book
         for sheet_name in workbook.sheetnames:
@@ -2244,7 +2267,7 @@ def reconciliation_schedule_export_workbook_bytes(new_run_items, old_run_items=N
                 for cell in sheet[row_index]:
                     cell.fill = fill
 
-        for sheet_name in ["New Normal Schedule", "New Schedule Changes", "Old Schedule Snapshot"]:
+        for sheet_name in ["New Normal Schedule", "New Schedule Changes", "Old Schedule Snapshot"] + new_month_sheet_names + old_month_sheet_names:
             color_sheet(sheet_name)
     return buffer.getvalue()
 
@@ -6255,7 +6278,7 @@ with tab_export:
         st.markdown("**Reconciliation Schedule Exports**")
         st.caption(
             "Use this after PMT reconciliation. This is separate from the normal schedule export and includes the old snapshot, "
-            "the new normal schedule, changed rows, color legend, and reconciliation change columns."
+            "the new normal schedule, month-by-month tabs, changed rows, color legend, and reconciliation change columns."
         )
         if _export_runs.empty:
             st.info("No PMT schedule runs are available for reconciliation exports.")
