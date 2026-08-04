@@ -5203,8 +5203,58 @@ with tab_reconcile:
             else:
                 st.dataframe(protected, use_container_width=True, hide_index=True)
 
+    st.divider()
+    st.markdown("**Where To Get The New Schedule**")
+    st.info(
+        "After applying reconciliation transfers, the updated active schedule is in `Manage Existing PMT Schedule`. "
+        "Select the same schedule plan there, then use `View all schedule rows` -> `Export Full Schedule`. "
+        "Use `Compare Old vs New` here before applying, and use the snapshot schedule plan later if you need the old schedule."
+    )
+    next_cols = st.columns([0.34, 0.33, 0.33])
+    if next_cols[0].button(
+        "Set Manage Tab To This Schedule",
+        disabled=selected_reconcile_run is None,
+        key="pmt_reconciliation_prepare_manage_schedule",
+    ):
+        st.session_state["pmt_manage_selected_run"] = int(selected_reconcile_run)
+        st.session_state["pmt_reconciliation_manage_notice"] = (
+            "Open `Manage Existing PMT Schedule` above. The schedule plan you reconciled is preselected there."
+        )
+        st.success(st.session_state["pmt_reconciliation_manage_notice"])
+    if selected_reconcile_run is None:
+        next_cols[0].caption("Pick one schedule run scope above to preselect it in Manage.")
+    updated_schedule_export = pd.DataFrame()
+    if selected_reconcile_run is not None:
+        updated_schedule_export = pmt_manage_run_items(selected_reconcile_run)
+        export_cols = [
+            col for col in [
+                "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number",
+                "address", "city", "state", "zip", "status", "cycle_label", "schedule_source", "notes"
+            ] if col in updated_schedule_export.columns
+        ]
+        if export_cols:
+            updated_schedule_export = updated_schedule_export[export_cols]
+    next_cols[1].download_button(
+        "Export Updated Schedule",
+        data=excel_bytes(updated_schedule_export),
+        file_name=f"pmt_updated_schedule_run_{selected_reconcile_run or 'all'}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        disabled=selected_reconcile_run is None or updated_schedule_export.empty,
+        key="pmt_reconciliation_export_updated_schedule",
+    )
+    next_cols[2].download_button(
+        "Export Reconciliation Package",
+        data=pmt_reconciliation_package_bytes(scan, reconciliation_effective_date, reconciliation_reason),
+        file_name=f"pmt_territory_schedule_change_package_{reconciliation_effective_date}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        disabled=conflicts.empty and assigned_not_scheduled.empty,
+        key="pmt_reconciliation_bottom_compare_export",
+    )
+
 
 with tab_manage:
+    if st.session_state.get("pmt_reconciliation_manage_notice"):
+        st.success(st.session_state.pop("pmt_reconciliation_manage_notice"))
     with st.expander("Optional: Import an Existing PMT Schedule", expanded=False):
         st.caption(
             "Use this only when a PMT schedule was created outside this application and needs to be brought into the system. "
