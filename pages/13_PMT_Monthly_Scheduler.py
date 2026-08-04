@@ -1723,8 +1723,11 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         conflicts["conflict_type"] = conflicts.apply(conflict_type, axis=1)
         conflicts = conflicts[conflicts["conflict_type"].astype(str).str.strip().ne("")].copy()
         conflicts["assignment_effective_date"] = effective_date
+        conflicts["work_timing"] = conflicts["schedule_date"].apply(
+            lambda value: "Earlier unfinished work" if value and value < effective_date else "Effective-date/future work"
+        )
         conflicts["recommended_action"] = conflicts["assigned_employee_id"].apply(
-            lambda value: "Transfer future schedule item to current assigned PMT" if pd.notna(value) else "Manual review - store is unassigned"
+            lambda value: "Transfer unfinished schedule item to current assigned PMT and resequence route" if pd.notna(value) else "Manual review - store is unassigned"
         )
         conflicts["resolution"] = "Unresolved"
         conflicts = conflicts.sort_values(["scheduled_technician", "schedule_date", "store_number"])
@@ -1751,17 +1754,32 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         active_assigned["assigned_employee_id"] = pd.to_numeric(active_assigned["assigned_employee_id"], errors="coerce")
         active_assigned["normalized_store_number"] = active_assigned["store_number"].apply(reconciliation_store_number)
         scheduled_pairs = set()
+        scheduled_store_ids = set()
+        scheduled_employee_ids = set()
         if not future_items.empty:
             scheduled_pairs = set(
                 tuple(int(value) for value in pair)
                 for pair in future_items[["store_id", "scheduled_employee_id"]].dropna().astype(int).drop_duplicates().values.tolist()
             )
-        assigned_not_scheduled = active_assigned[
-            ~active_assigned.apply(lambda row: (int(row["store_id"]), int(row["assigned_employee_id"])) in scheduled_pairs, axis=1)
-        ].copy()
-        assigned_not_scheduled["conflict_type"] = "Assigned but Not Scheduled"
+            scheduled_store_ids = set(future_items["store_id"].dropna().astype(int).tolist())
+            scheduled_employee_ids = set(future_items["scheduled_employee_id"].dropna().astype(int).tolist())
+
+        def missing_schedule_reason(row):
+            if pd.isna(row.get("store_id")) or pd.isna(row.get("assigned_employee_id")):
+                return ""
+            store_id = int(row["store_id"])
+            assigned_employee_id = int(row["assigned_employee_id"])
+            if store_id in scheduled_store_ids and (store_id, assigned_employee_id) not in scheduled_pairs:
+                return "Assigned Store Missing From Receiving PMT Schedule"
+            if assigned_employee_id not in scheduled_employee_ids:
+                return "New Technician Has Assigned Stores but No Schedule"
+            return ""
+
+        active_assigned["conflict_type"] = active_assigned.apply(missing_schedule_reason, axis=1)
+        assigned_not_scheduled = active_assigned[active_assigned["conflict_type"].astype(str).str.strip().ne("")].copy()
         assigned_not_scheduled["recommended_action"] = "Build or add schedule only for this PMT"
         assigned_not_scheduled["assignment_effective_date"] = effective_date
+        assigned_not_scheduled["work_timing"] = "Assigned store gap"
 
     active_pmts = safe_query(
         """
@@ -1885,6 +1903,55 @@ def pmt_reconciliation_package_bytes(scan, effective_date, reason=""):
     return buffer.getvalue()
 
 
+RECONCILIATION_COLOR_RULES = [
+    ("#fee2e2", "Red", "Scheduled to inactive technician or inactive owner issue"),
+    ("#ffedd5", "Orange", "Earlier unfinished work that still needs reassignment"),
+    ("#dbeafe", "Blue", "Scheduled PMT does not match current assigned PMT"),
+    ("#f3e8ff", "Purple", "Duplicate future/unfinished schedule row"),
+    ("#fef9c3", "Yellow", "Assigned store is missing from receiving PMT schedule"),
+    ("#e5e7eb", "Gray", "Store is unassigned but still scheduled"),
+]
+
+
+def reconciliation_row_color(row):
+    conflict_text = clean(row.get("conflict_type", "")).lower()
+    timing_text = clean(row.get("work_timing", "")).lower()
+    if "inactive" in conflict_text:
+        return "#fee2e2"
+    if "earlier unfinished" in timing_text:
+        return "#ffedd5"
+    if "does not match" in conflict_text or "after reassignment" in conflict_text:
+        return "#dbeafe"
+    if "duplicate" in conflict_text:
+        return "#f3e8ff"
+    if "missing" in conflict_text or "no schedule" in conflict_text:
+        return "#fef9c3"
+    if "unassigned" in conflict_text:
+        return "#e5e7eb"
+    return ""
+
+
+def reconciliation_styler(df):
+    if df.empty:
+        return df
+
+    def style_row(row):
+        color = reconciliation_row_color(row)
+        return [f"background-color: {color}" if color else "" for _ in row]
+
+    return df.style.apply(style_row, axis=1)
+
+
+def render_reconciliation_color_legend():
+    items = "".join(
+        f"<span style='display:inline-flex;align-items:center;gap:.35rem;margin-right:1rem;margin-bottom:.35rem;'>"
+        f"<span style='display:inline-block;width:1rem;height:1rem;border:1px solid #94a3b8;background:{color};'></span>"
+        f"<span><strong>{name}</strong>: {meaning}</span></span>"
+        for color, name, meaning in RECONCILIATION_COLOR_RULES
+    )
+    st.markdown(f"<div style='line-height:1.6'>{items}</div>", unsafe_allow_html=True)
+
+
 def pmt_team_for_employee(session, employee):
     if not employee:
         return None
@@ -1906,17 +1973,28 @@ def pmt_team_for_employee(session, employee):
     return team
 
 
+def is_active_pmt_schedule_item(item):
+    if not item:
+        return False
+    if "PMT" not in clean(getattr(item, "work_type", "")).upper():
+        return False
+    terminal_statuses = PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES
+    return normalize_schedule_status(getattr(item, "status", "")) not in terminal_statuses
+
+
 def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason=""):
     selected_ids = [int(value) for value in schedule_item_ids if pd.notna(value)]
     if not selected_ids:
-        return {"transferred": 0, "superseded": 0}
+        return {"transferred": 0, "superseded": 0, "resequenced_rows": 0}
     transferred = 0
     superseded = 0
+    resequenced_rows = 0
+    touched_months = set()
     with session_scope("PMT schedule reconciliation transfer") as session:
         team_cache = {}
         for item_id in selected_ids:
             item = session.get(ScheduleItem, int(item_id))
-            if not item or item.work_type != "PMT" or item.schedule_date < effective_date or item.status not in PMT_ACTIVE_STATUS_VALUES:
+            if not is_active_pmt_schedule_item(item):
                 continue
             store = session.get(Store, int(item.store_id)) if item.store_id else None
             assigned_employee_id = int(store.assigned_pmt_employee_id) if store and store.assigned_pmt_employee_id else None
@@ -1926,14 +2004,14 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
                 select(ScheduleItem)
                 .where(
                     ScheduleItem.id != int(item.id),
-                    ScheduleItem.work_type == "PMT",
+                    func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
                     ScheduleItem.store_id == int(item.store_id),
                     ScheduleItem.employee_id == assigned_employee_id,
-                    ScheduleItem.schedule_date >= effective_date,
-                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                    func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
                 )
                 .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.id)
             ).first()
+            old_employee_id = item.employee_id
             if duplicate:
                 item.status = "Transferred"
                 item.schedule_source = "PMT Reconciliation Superseded"
@@ -1944,12 +2022,12 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
                 ]
                 item.completion_notes = " | ".join([part for part in note_parts if part])
                 superseded += 1
+                touched_months.add((old_employee_id, month_start(item.schedule_date), item.pmt_schedule_run_id))
                 continue
             employee = session.get(Employee, assigned_employee_id)
             if assigned_employee_id not in team_cache:
                 team_cache[assigned_employee_id] = pmt_team_for_employee(session, employee)
             team = team_cache[assigned_employee_id]
-            old_employee_id = item.employee_id
             if item.original_schedule_date is None:
                 item.original_schedule_date = item.schedule_date
             item.employee_id = assigned_employee_id
@@ -1962,12 +2040,16 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
             ]
             item.completion_notes = " | ".join([part for part in note_parts if part])
             transferred += 1
-    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded. Effective {effective_date}. {reason}")
-    return {"transferred": transferred, "superseded": superseded}
+            touched_months.add((old_employee_id, month_start(item.schedule_date), item.pmt_schedule_run_id))
+            touched_months.add((assigned_employee_id, month_start(item.schedule_date), item.pmt_schedule_run_id))
+        for employee_id, month_value, run_id in touched_months:
+            resequenced_rows += resequence_pmt_month(session, run_id, employee_id, month_value)
+    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced. Effective {effective_date}. {reason}")
+    return {"transferred": transferred, "superseded": superseded, "resequenced_rows": resequenced_rows}
 
 
 def resequence_pmt_month(session, run_id, employee_id, month_start_value):
-    if employee_id is None or month_start_value is None:
+    if run_id is None or employee_id is None or month_start_value is None:
         return 0
     start_value = month_start(month_start_value)
     items = session.scalars(
@@ -1975,14 +2057,28 @@ def resequence_pmt_month(session, run_id, employee_id, month_start_value):
         .where(
             ScheduleItem.pmt_schedule_run_id == int(run_id),
             ScheduleItem.employee_id == int(employee_id),
-            ScheduleItem.work_type == "PMT",
-            ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+            func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
+            func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
             ScheduleItem.schedule_date >= start_value,
             ScheduleItem.schedule_date < add_months(start_value, 1),
         )
         .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.store_id, ScheduleItem.id)
     ).all()
-    for index, item in enumerate(items, start=1):
+    employee = session.get(Employee, int(employee_id))
+    home_lat = to_float(getattr(employee, "home_latitude", None)) if employee else None
+    home_lon = to_float(getattr(employee, "home_longitude", None)) if employee else None
+
+    def route_sort_key(item):
+        store = session.get(Store, int(item.store_id)) if item.store_id else None
+        store_lat = to_float(getattr(store, "latitude", None)) if store else None
+        store_lon = to_float(getattr(store, "longitude", None)) if store else None
+        if home_lat is not None and home_lon is not None and store_lat is not None and store_lon is not None:
+            distance = haversine_miles(home_lat, home_lon, store_lat, store_lon)
+        else:
+            distance = 999999
+        return (distance, clean(getattr(store, "store_number", "")) if store else "", item.schedule_date, item.sequence_number or 0, item.id)
+
+    for index, item in enumerate(sorted(items, key=route_sort_key), start=1):
         item.sequence_number = index
     return len(items)
 
@@ -4684,51 +4780,77 @@ with tab_reconcile:
             filtered_conflicts = filtered_conflicts[filtered_conflicts["assigned_employee_id"].notna()]
 
         st.markdown("**Schedule Conflicts**")
+        render_reconciliation_color_legend()
         if filtered_conflicts.empty:
             st.info("No conflicts match the selected filters.")
         else:
-            conflict_view = filtered_conflicts.copy()
-            conflict_view["Apply"] = False
-            conflict_view["Can Transfer"] = conflict_view["assigned_employee_id"].notna()
-            view_cols = [
-                "Apply", "Can Transfer", "schedule_item_id", "store_number", "city", "state", "scheduled_technician",
-                "assigned_technician", "schedule_name", "schedule_date", "status", "conflict_type",
-                "assignment_effective_date", "recommended_action", "resolution",
+            decision_tab, earlier_tab, future_tab = st.tabs(["Transfer Decisions", "Earlier Unfinished Work", "Effective-Date / Future Work"])
+            with decision_tab:
+                conflict_view = filtered_conflicts.copy()
+                conflict_view["Apply"] = False
+                conflict_view["Can Transfer"] = conflict_view["assigned_employee_id"].notna()
+                view_cols = [
+                    "Apply", "Can Transfer", "work_timing", "schedule_item_id", "store_number", "city", "state", "scheduled_technician",
+                    "assigned_technician", "schedule_name", "schedule_date", "status", "conflict_type",
+                    "assignment_effective_date", "recommended_action", "resolution",
+                ]
+                edited_conflicts = st.data_editor(
+                    conflict_view[[col for col in view_cols if col in conflict_view.columns]],
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=[col for col in view_cols if col != "Apply"],
+                    column_config={
+                        "Apply": st.column_config.CheckboxColumn("Apply Transfer", default=False),
+                        "Can Transfer": st.column_config.CheckboxColumn("Can Transfer", disabled=True),
+                        "work_timing": st.column_config.TextColumn("Timing"),
+                        "schedule_item_id": st.column_config.NumberColumn("Item ID", disabled=True),
+                        "scheduled_technician": st.column_config.TextColumn("Original Scheduled PMT"),
+                        "assigned_technician": st.column_config.TextColumn("Current Assigned PMT"),
+                    },
+                    key="pmt_reconciliation_conflict_editor",
+                )
+                selected_item_ids = edited_conflicts.loc[
+                    edited_conflicts["Apply"].astype(bool) & edited_conflicts["Can Transfer"].astype(bool),
+                    "schedule_item_id",
+                ].dropna().astype(int).tolist()
+                st.caption(f"Selected unfinished schedule rows to transfer and resequence: {len(selected_item_ids)}")
+                confirm_reconciliation = st.checkbox(
+                    "I reviewed the PMT assignment conflicts and confirm I am ready to transfer the checked unfinished schedule rows.",
+                    key="pmt_reconciliation_confirm_apply",
+                )
+                if st.button("Apply Selected Reconciliation Transfers", type="primary", disabled=not selected_item_ids or not confirm_reconciliation, key="pmt_reconciliation_apply_transfers"):
+                    result = apply_pmt_reconciliation_transfers(selected_item_ids, reconciliation_effective_date, reconciliation_reason)
+                    st.success(
+                        f"Reconciliation applied. Transferred {result['transferred']} row(s); "
+                        f"superseded {result['superseded']} duplicate row(s); resequenced {result.get('resequenced_rows', 0)} route row(s)."
+                    )
+                    st.rerun()
+            display_cols = [
+                "work_timing", "schedule_item_id", "store_number", "city", "state", "scheduled_technician",
+                "assigned_technician", "schedule_name", "schedule_date", "status", "conflict_type", "recommended_action",
             ]
-            edited_conflicts = st.data_editor(
-                conflict_view[[col for col in view_cols if col in conflict_view.columns]],
-                use_container_width=True,
-                hide_index=True,
-                disabled=[col for col in view_cols if col != "Apply"],
-                column_config={
-                    "Apply": st.column_config.CheckboxColumn("Apply Transfer", default=False),
-                    "Can Transfer": st.column_config.CheckboxColumn("Can Transfer", disabled=True),
-                    "schedule_item_id": st.column_config.NumberColumn("Item ID", disabled=True),
-                    "scheduled_technician": st.column_config.TextColumn("Original Scheduled PMT"),
-                    "assigned_technician": st.column_config.TextColumn("Current Assigned PMT"),
-                },
-                key="pmt_reconciliation_conflict_editor",
-            )
-            selected_item_ids = edited_conflicts.loc[
-                edited_conflicts["Apply"].astype(bool) & edited_conflicts["Can Transfer"].astype(bool),
-                "schedule_item_id",
-            ].dropna().astype(int).tolist()
-            st.caption(f"Selected future schedule rows to transfer: {len(selected_item_ids)}")
-            confirm_reconciliation = st.checkbox(
-                "I reviewed the PMT assignment conflicts and confirm I am ready to transfer the checked future unfinished schedule rows.",
-                key="pmt_reconciliation_confirm_apply",
-            )
-            if st.button("Apply Selected Reconciliation Transfers", type="primary", disabled=not selected_item_ids or not confirm_reconciliation, key="pmt_reconciliation_apply_transfers"):
-                result = apply_pmt_reconciliation_transfers(selected_item_ids, reconciliation_effective_date, reconciliation_reason)
-                st.success(f"Reconciliation applied. Transferred {result['transferred']} row(s); superseded {result['superseded']} duplicate row(s).")
-                st.rerun()
+            with earlier_tab:
+                earlier_conflicts = filtered_conflicts[filtered_conflicts.get("work_timing", "").astype(str) == "Earlier unfinished work"].copy()
+                if earlier_conflicts.empty:
+                    st.success("No earlier unfinished reassignment conflicts match the selected filters.")
+                else:
+                    st.dataframe(reconciliation_styler(earlier_conflicts[[col for col in display_cols if col in earlier_conflicts.columns]]), use_container_width=True, hide_index=True)
+            with future_tab:
+                future_conflicts = filtered_conflicts[filtered_conflicts.get("work_timing", "").astype(str) != "Earlier unfinished work"].copy()
+                if future_conflicts.empty:
+                    st.success("No effective-date or future conflicts match the selected filters.")
+                else:
+                    st.dataframe(reconciliation_styler(future_conflicts[[col for col in display_cols if col in future_conflicts.columns]]), use_container_width=True, hide_index=True)
 
         st.markdown("**Assigned Stores With No Future Schedule For Their Current PMT**")
         if assigned_not_scheduled.empty:
             st.success("No assigned-but-not-scheduled PMT stores found.")
         else:
+            assigned_gap_view = assigned_not_scheduled[
+                [col for col in ["work_timing", "assigned_technician", "store_number", "city", "state", "conflict_type", "recommended_action"] if col in assigned_not_scheduled.columns]
+            ].copy()
             st.dataframe(
-                assigned_not_scheduled[["assigned_technician", "store_number", "city", "state", "conflict_type", "recommended_action"]],
+                reconciliation_styler(assigned_gap_view),
                 use_container_width=True,
                 hide_index=True,
             )
