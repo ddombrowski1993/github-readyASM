@@ -1644,12 +1644,16 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         select si.id as schedule_item_id, si.schedule_id, si.pmt_schedule_run_id,
                coalesce(r.run_name, sch.schedule_name, '') as schedule_name,
                si.schedule_date, si.sequence_number, si.status, si.cycle_label,
-               si.store_id, s.store_number, s.city, s.state,
+               si.store_id, s.store_number, s.city, s.state, s.latitude, s.longitude,
                si.employee_id as scheduled_employee_id,
                coalesce(se.full_name, 'Unassigned') as scheduled_technician,
                coalesce(se.active, false) as scheduled_employee_active,
+               se.home_latitude as scheduled_home_latitude,
+               se.home_longitude as scheduled_home_longitude,
                s.assigned_pmt_employee_id as assigned_employee_id,
                coalesce(ae.full_name, 'Unassigned') as assigned_technician,
+               ae.home_latitude as assigned_home_latitude,
+               ae.home_longitude as assigned_home_longitude,
                s.assigned_pmt_team_id as assigned_team_id,
                si.schedule_source,
                si.completion_notes as notes
@@ -1676,13 +1680,17 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
                 "schedule_item_id", "schedule_id", "pmt_schedule_run_id", "schedule_name", "schedule_date",
                 "sequence_number", "status", "cycle_label", "store_id", "store_number", "city", "state",
                 "scheduled_employee_id", "scheduled_technician", "scheduled_employee_active",
-                "assigned_employee_id", "assigned_technician", "assigned_team_id", "schedule_source", "notes",
+                "scheduled_home_latitude", "scheduled_home_longitude", "assigned_employee_id", "assigned_technician",
+                "assigned_home_latitude", "assigned_home_longitude", "assigned_team_id", "schedule_source", "notes",
             ]
         )
     else:
         future_items = future_items.copy()
         for column in ["schedule_item_id", "schedule_id", "pmt_schedule_run_id", "store_id", "scheduled_employee_id", "assigned_employee_id", "assigned_team_id", "sequence_number"]:
             future_items[column] = pd.to_numeric(future_items[column], errors="coerce")
+        for column in ["latitude", "longitude", "scheduled_home_latitude", "scheduled_home_longitude", "assigned_home_latitude", "assigned_home_longitude"]:
+            if column in future_items.columns:
+                future_items[column] = pd.to_numeric(future_items[column], errors="coerce")
         future_items["schedule_date"] = pd.to_datetime(future_items["schedule_date"], errors="coerce").dt.date
         future_items["month"] = future_items["schedule_date"].apply(month_label)
         future_items["normalized_store_number"] = future_items["store_number"].apply(reconciliation_store_number)
@@ -2011,6 +2019,117 @@ def render_reconciliation_color_legend():
     st.markdown(f"<div style='line-height:1.6'>{items}</div>", unsafe_allow_html=True)
 
 
+def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
+    selected_ids = {int(value) for value in selected_item_ids if pd.notna(value)}
+    base = scan.get("future_items", pd.DataFrame()).copy()
+    conflicts = scan.get("conflicts", pd.DataFrame()).copy()
+    protected = scan.get("protected", pd.DataFrame()).copy()
+    if base.empty:
+        return {"compare": pd.DataFrame(), "old_schedule": pd.DataFrame(), "new_schedule": pd.DataFrame(), "protected": protected}
+
+    for column in ["schedule_item_id", "scheduled_employee_id", "assigned_employee_id", "sequence_number", "store_id"]:
+        if column in base.columns:
+            base[column] = pd.to_numeric(base[column], errors="coerce")
+    base["month_start"] = base["schedule_date"].apply(lambda value: month_start(value) if value else None)
+    base["old_employee_id"] = base["scheduled_employee_id"]
+    base["old_technician"] = base["scheduled_technician"]
+    base["old_sequence_number"] = base["sequence_number"]
+    base["old_schedule_date"] = base["schedule_date"]
+    base["old_month"] = base["month"]
+    base["new_employee_id"] = base["scheduled_employee_id"]
+    base["new_technician"] = base["scheduled_technician"]
+    base["new_sequence_number"] = base["sequence_number"]
+    base["new_schedule_date"] = base["schedule_date"]
+    base["new_month"] = base["month"]
+    base["new_home_latitude"] = base.get("scheduled_home_latitude")
+    base["new_home_longitude"] = base.get("scheduled_home_longitude")
+    base["proposed_change"] = "No change"
+
+    transferable = base["schedule_item_id"].fillna(-1).astype(int).isin(selected_ids) & base["assigned_employee_id"].notna()
+    base.loc[transferable, "new_employee_id"] = base.loc[transferable, "assigned_employee_id"]
+    base.loc[transferable, "new_technician"] = base.loc[transferable, "assigned_technician"]
+    base.loc[transferable, "new_home_latitude"] = base.loc[transferable, "assigned_home_latitude"]
+    base.loc[transferable, "new_home_longitude"] = base.loc[transferable, "assigned_home_longitude"]
+    base.loc[transferable, "proposed_change"] = "Transfer to current assigned PMT"
+
+    touched_pairs = set()
+    for _, row in base.loc[transferable].iterrows():
+        month_value = row.get("month_start")
+        if pd.notna(row.get("old_employee_id")) and month_value:
+            touched_pairs.add((int(row["old_employee_id"]), month_value))
+        if pd.notna(row.get("new_employee_id")) and month_value:
+            touched_pairs.add((int(row["new_employee_id"]), month_value))
+
+    for employee_id, month_value in touched_pairs:
+        mask = (
+            base["new_employee_id"].notna()
+            & (base["new_employee_id"].astype("Int64") == int(employee_id))
+            & (base["month_start"] == month_value)
+        )
+        month_rows = base.loc[mask].copy()
+        if month_rows.empty:
+            continue
+        home_lat = to_float(month_rows["new_home_latitude"].dropna().iloc[0]) if month_rows["new_home_latitude"].notna().any() else None
+        home_lon = to_float(month_rows["new_home_longitude"].dropna().iloc[0]) if month_rows["new_home_longitude"].notna().any() else None
+
+        def route_key(row):
+            lat = to_float(row.get("latitude"))
+            lon = to_float(row.get("longitude"))
+            distance = haversine_miles(home_lat, home_lon, lat, lon) if home_lat is not None and home_lon is not None and lat is not None and lon is not None else 999999
+            return (distance, clean(row.get("store_number")), row.get("old_schedule_date") or date.max, int(row.get("old_sequence_number") or 0))
+
+        ordered_indexes = sorted(month_rows.index.tolist(), key=lambda idx: route_key(month_rows.loc[idx]))
+        for new_sequence, index in enumerate(ordered_indexes, start=1):
+            old_change = clean(base.at[index, "proposed_change"])
+            base.at[index, "new_sequence_number"] = new_sequence
+            if old_change == "No change" and int(base.at[index, "old_sequence_number"] or 0) != int(new_sequence):
+                base.at[index, "proposed_change"] = "Route order adjusted in affected month"
+
+    compare = base.copy()
+    compare["change_status"] = compare["proposed_change"]
+    current_month = month_start(date.today())
+    compare_current_forward = compare[compare["month_start"].notna() & (compare["month_start"] >= current_month)].copy()
+    compare_columns = [
+        "change_status", "store_number", "city", "state", "old_technician", "new_technician",
+        "old_month", "new_month", "old_schedule_date", "new_schedule_date", "old_sequence_number",
+        "new_sequence_number", "status", "schedule_name", "conflict_type",
+    ]
+    if "conflict_type" not in compare_current_forward.columns and not conflicts.empty:
+        conflict_lookup = conflicts.set_index("schedule_item_id")["conflict_type"].to_dict()
+        compare_current_forward["conflict_type"] = compare_current_forward["schedule_item_id"].map(conflict_lookup).fillna("")
+
+    old_schedule = compare_current_forward[
+        ["old_month", "old_schedule_date", "old_sequence_number", "old_technician", "store_number", "city", "state", "status", "schedule_name"]
+    ].rename(columns={
+        "old_month": "month",
+        "old_schedule_date": "schedule_date",
+        "old_sequence_number": "sequence_number",
+        "old_technician": "technician",
+    }).sort_values(["month", "technician", "sequence_number", "store_number"])
+    new_schedule = compare_current_forward[
+        ["new_month", "new_schedule_date", "new_sequence_number", "new_technician", "store_number", "city", "state", "status", "schedule_name", "proposed_change"]
+    ].rename(columns={
+        "new_month": "month",
+        "new_schedule_date": "schedule_date",
+        "new_sequence_number": "sequence_number",
+        "new_technician": "technician",
+    }).sort_values(["month", "technician", "sequence_number", "store_number"])
+    compare_view = compare_current_forward[
+        [col for col in compare_columns if col in compare_current_forward.columns]
+    ].sort_values(["old_technician", "old_month", "old_sequence_number", "store_number"])
+    return {"compare": compare_view, "old_schedule": old_schedule, "new_schedule": new_schedule, "protected": protected}
+
+
+def pmt_reconciliation_compare_workbook_bytes(preview):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        preview.get("compare", pd.DataFrame()).to_excel(writer, index=False, sheet_name="Compare Old vs New")
+        preview.get("old_schedule", pd.DataFrame()).to_excel(writer, index=False, sheet_name="Old Schedule")
+        preview.get("new_schedule", pd.DataFrame()).to_excel(writer, index=False, sheet_name="New Schedule Preview")
+        preview.get("protected", pd.DataFrame()).to_excel(writer, index=False, sheet_name="Protected Techs")
+    return buffer.getvalue()
+
+
 def pmt_team_for_employee(session, employee):
     if not employee:
         return None
@@ -2041,15 +2160,99 @@ def is_active_pmt_schedule_item(item):
     return normalize_schedule_status(getattr(item, "status", "")) not in terminal_statuses
 
 
+def create_pmt_reconciliation_snapshots(session, selected_ids, reason=""):
+    if not selected_ids:
+        return 0
+    source_run_ids = {
+        int(run_id)
+        for run_id in session.scalars(
+            select(ScheduleItem.pmt_schedule_run_id).where(
+                ScheduleItem.id.in_([int(value) for value in selected_ids]),
+                ScheduleItem.pmt_schedule_run_id.is_not(None),
+            )
+        ).all()
+        if run_id
+    }
+    snapshots_created = 0
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    for run_id in sorted(source_run_ids):
+        source_run = session.get(PMTScheduleRun, int(run_id))
+        if not source_run:
+            continue
+        source_items = session.scalars(
+            select(ScheduleItem)
+            .where(ScheduleItem.pmt_schedule_run_id == int(run_id))
+            .order_by(ScheduleItem.schedule_date, ScheduleItem.employee_id, ScheduleItem.sequence_number, ScheduleItem.id)
+        ).all()
+        if not source_items:
+            continue
+        snapshot_run = PMTScheduleRun(
+            run_name=f"Snapshot before reconciliation - {source_run.run_name} - {timestamp}",
+            cycle_start=source_run.cycle_start,
+            cycle_end=source_run.cycle_end,
+            months=source_run.months,
+            default_monthly_target=source_run.default_monthly_target,
+            direction=source_run.direction,
+            schedule_mode=source_run.schedule_mode,
+            distance_method=source_run.distance_method,
+            status="Snapshot",
+            technician_count=source_run.technician_count,
+            store_count=source_run.store_count,
+            unscheduled_count=source_run.unscheduled_count,
+            created_by=st.session_state.get("username", ""),
+            notes=f"Read-only old schedule snapshot before PMT reconciliation. Source run #{source_run.id}. Reason: {clean(reason)}",
+        )
+        session.add(snapshot_run)
+        session.flush()
+        snapshot_schedule = Schedule(
+            schedule_name=snapshot_run.run_name,
+            schedule_type="PMT Reconciliation Snapshot",
+            start_date=source_run.cycle_start,
+            end_date=source_run.cycle_end,
+            status="Snapshot",
+            created_by=st.session_state.get("username", ""),
+            notes=f"Old schedule snapshot for source PMT run #{source_run.id}.",
+        )
+        session.add(snapshot_schedule)
+        session.flush()
+        for item in source_items:
+            session.add(
+                ScheduleItem(
+                    schedule_id=snapshot_schedule.id,
+                    schedule_date=item.schedule_date,
+                    sequence_number=item.sequence_number,
+                    store_id=item.store_id,
+                    employee_id=item.employee_id,
+                    team_id=item.team_id,
+                    work_type=item.work_type,
+                    schedule_source="PMT Reconciliation Old Schedule Snapshot",
+                    pmt_schedule_run_id=snapshot_run.id,
+                    cycle_label=item.cycle_label,
+                    deferred_work_order_id=item.deferred_work_order_id,
+                    planned_start_time=item.planned_start_time,
+                    planned_end_time=item.planned_end_time,
+                    status=item.status,
+                    original_schedule_date=item.original_schedule_date,
+                    rescheduled_from_item_id=item.rescheduled_from_item_id,
+                    rain_delay=item.rain_delay,
+                    weather_notes=item.weather_notes,
+                    completion_notes=item.completion_notes,
+                )
+            )
+        snapshots_created += 1
+    return snapshots_created
+
+
 def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason=""):
     selected_ids = [int(value) for value in schedule_item_ids if pd.notna(value)]
     if not selected_ids:
-        return {"transferred": 0, "superseded": 0, "resequenced_rows": 0}
+        return {"transferred": 0, "superseded": 0, "resequenced_rows": 0, "snapshots_created": 0}
     transferred = 0
     superseded = 0
     resequenced_rows = 0
     touched_months = set()
     with session_scope("PMT schedule reconciliation transfer") as session:
+        snapshots_created = create_pmt_reconciliation_snapshots(session, selected_ids, reason)
         team_cache = {}
         for item_id in selected_ids:
             item = session.get(ScheduleItem, int(item_id))
@@ -2103,8 +2306,8 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
             touched_months.add((assigned_employee_id, month_start(item.schedule_date), item.pmt_schedule_run_id))
         for employee_id, month_value, run_id in touched_months:
             resequenced_rows += resequence_pmt_month(session, run_id, employee_id, month_value)
-    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced. Effective {effective_date}. {reason}")
-    return {"transferred": transferred, "superseded": superseded, "resequenced_rows": resequenced_rows}
+    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced; {snapshots_created} snapshot run(s) created. Effective {effective_date}. {reason}")
+    return {"transferred": transferred, "superseded": superseded, "resequenced_rows": resequenced_rows, "snapshots_created": snapshots_created}
 
 
 def resequence_pmt_month(session, run_id, employee_id, month_start_value):
@@ -4846,7 +5049,13 @@ with tab_reconcile:
         if filtered_conflicts.empty:
             st.info("No conflicts match the selected filters.")
         else:
-            decision_tab, earlier_tab, future_tab = st.tabs(["Transfer Decisions", "Earlier Unfinished Work", "Effective-Date / Future Work"])
+            decision_tab, compare_tab, old_new_tab, earlier_tab, future_tab = st.tabs([
+                "Transfer Decisions",
+                "Compare Old vs New",
+                "New Schedule Preview",
+                "Earlier Unfinished Work",
+                "Effective-Date / Future Work",
+            ])
             with decision_tab:
                 conflict_view = filtered_conflicts.copy()
                 conflict_view["Can Transfer"] = conflict_view["assigned_employee_id"].notna()
@@ -4888,6 +5097,7 @@ with tab_reconcile:
                     "schedule_item_id",
                 ].dropna().astype(int).tolist()
                 st.caption(f"Selected unfinished schedule rows to transfer and resequence: {len(selected_item_ids)}")
+                compare_preview = build_pmt_reconciliation_compare_preview(scan, selected_item_ids)
                 confirm_reconciliation = st.checkbox(
                     "I reviewed the PMT assignment conflicts and confirm I am ready to transfer the checked unfinished schedule rows.",
                     key="pmt_reconciliation_confirm_apply",
@@ -4896,13 +5106,62 @@ with tab_reconcile:
                     result = apply_pmt_reconciliation_transfers(selected_item_ids, reconciliation_effective_date, reconciliation_reason)
                     st.success(
                         f"Reconciliation applied. Transferred {result['transferred']} row(s); "
-                        f"superseded {result['superseded']} duplicate row(s); resequenced {result.get('resequenced_rows', 0)} route row(s)."
+                        f"superseded {result['superseded']} duplicate row(s); resequenced {result.get('resequenced_rows', 0)} route row(s); "
+                        f"created {result.get('snapshots_created', 0)} old-schedule snapshot run(s)."
                     )
                     st.rerun()
             display_cols = [
                 "work_timing", "schedule_item_id", "store_number", "city", "state", "scheduled_technician",
                 "assigned_technician", "schedule_name", "schedule_date", "status", "conflict_type", "recommended_action",
             ]
+            with compare_tab:
+                if not selected_item_ids:
+                    st.info("Check one or more rows in Transfer Decisions to preview old schedule vs proposed new schedule.")
+                else:
+                    compare_df = compare_preview.get("compare", pd.DataFrame())
+                    protected_df = compare_preview.get("protected", pd.DataFrame())
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Checked Transfers", len(selected_item_ids))
+                    c2.metric("Changed / Resequenced Rows", int(compare_df["change_status"].astype(str).ne("No change").sum()) if not compare_df.empty and "change_status" in compare_df.columns else 0)
+                    c3.metric("Protected PMTs", len(protected_df))
+                    c4.metric("Rows Compared", len(compare_df))
+                    st.download_button(
+                        "Export Old vs New Schedule Compare",
+                        data=pmt_reconciliation_compare_workbook_bytes(compare_preview),
+                        file_name=f"pmt_reconciliation_old_vs_new_compare_{reconciliation_effective_date}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="pmt_reconciliation_compare_export",
+                    )
+                    if compare_df.empty:
+                        st.info("No current-month-forward rows were found for the selected transfer preview.")
+                    else:
+                        st.dataframe(compare_df, use_container_width=True, hide_index=True)
+                    with st.expander("Protected PMTs - No Proposed Change", expanded=False):
+                        if protected_df.empty:
+                            st.info("No protected PMTs are listed for this scan.")
+                        else:
+                            st.dataframe(protected_df, use_container_width=True, hide_index=True)
+            with old_new_tab:
+                if not selected_item_ids:
+                    st.info("Check rows in Transfer Decisions to preview the proposed new schedule.")
+                else:
+                    old_schedule = compare_preview.get("old_schedule", pd.DataFrame())
+                    new_schedule = compare_preview.get("new_schedule", pd.DataFrame())
+                    old_tab, new_tab = st.tabs(["Old Schedule", "New Schedule Preview"])
+                    with old_tab:
+                        if old_schedule.empty:
+                            st.info("No old schedule rows found from the current month forward.")
+                        else:
+                            for month_name in old_schedule["month"].dropna().drop_duplicates().tolist():
+                                with st.expander(str(month_name), expanded=False):
+                                    st.dataframe(old_schedule[old_schedule["month"] == month_name], use_container_width=True, hide_index=True)
+                    with new_tab:
+                        if new_schedule.empty:
+                            st.info("No new schedule rows found from the current month forward.")
+                        else:
+                            for month_name in new_schedule["month"].dropna().drop_duplicates().tolist():
+                                with st.expander(str(month_name), expanded=False):
+                                    st.dataframe(new_schedule[new_schedule["month"] == month_name], use_container_width=True, hide_index=True)
             with earlier_tab:
                 earlier_conflicts = filtered_conflicts[filtered_conflicts.get("work_timing", "").astype(str) == "Earlier unfinished work"].copy()
                 if earlier_conflicts.empty:
