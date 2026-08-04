@@ -1875,11 +1875,29 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
 
 
 def pmt_reconciliation_package_bytes(scan, effective_date, reason=""):
+    from openpyxl.styles import Font, PatternFill
+
     buffer = io.BytesIO()
     conflicts = scan.get("conflicts", pd.DataFrame())
     assigned_not_scheduled = scan.get("assigned_not_scheduled", pd.DataFrame())
     affected = scan.get("affected", pd.DataFrame())
     protected = scan.get("protected", pd.DataFrame())
+    color_legend = pd.DataFrame(
+        [
+            {"Color Code": color_name, "Meaning": meaning, "Excel Fill": color}
+            for color, color_name, meaning in RECONCILIATION_COLOR_RULES
+        ]
+    )
+
+    def add_color_code(df):
+        if df.empty:
+            return df
+        coded = df.copy()
+        coded.insert(0, "Color Code", coded.apply(reconciliation_row_color_name, axis=1))
+        return coded
+
+    conflict_export = add_color_code(conflicts)
+    assigned_export = add_color_code(assigned_not_scheduled)
     summary = pd.DataFrame(
         [
             {"Metric": "Effective Date", "Value": str(effective_date)},
@@ -1888,18 +1906,51 @@ def pmt_reconciliation_package_bytes(scan, effective_date, reason=""):
             {"Metric": "Assigned But Not Scheduled", "Value": len(assigned_not_scheduled)},
             {"Metric": "Affected Technicians", "Value": len(affected)},
             {"Metric": "Protected Unaffected Technicians", "Value": len(protected)},
+            {"Metric": "Color Coding", "Value": "See Color Legend tab. Colored rows use the same rules as the Reconciliation page."},
         ]
     )
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         summary.to_excel(writer, index=False, sheet_name="Summary")
-        conflicts.to_excel(writer, index=False, sheet_name="Schedule Conflicts")
-        assigned_not_scheduled.to_excel(writer, index=False, sheet_name="Assigned Not Scheduled")
+        color_legend.to_excel(writer, index=False, sheet_name="Color Legend")
+        conflict_export.to_excel(writer, index=False, sheet_name="Schedule Conflicts")
+        assigned_export.to_excel(writer, index=False, sheet_name="Assigned Not Scheduled")
         affected.to_excel(writer, index=False, sheet_name="Affected Techs")
         protected.to_excel(writer, index=False, sheet_name="Unaffected Techs")
         manual_review = conflicts[
             conflicts.get("assigned_employee_id", pd.Series(dtype=float)).isna()
         ].copy() if not conflicts.empty else pd.DataFrame()
-        manual_review.to_excel(writer, index=False, sheet_name="Manual Review")
+        manual_review_export = add_color_code(manual_review)
+        manual_review_export.to_excel(writer, index=False, sheet_name="Manual Review")
+
+        workbook = writer.book
+        for sheet_name in ["Summary", "Color Legend", "Schedule Conflicts", "Assigned Not Scheduled", "Affected Techs", "Unaffected Techs", "Manual Review"]:
+            sheet = workbook[sheet_name]
+            sheet.freeze_panes = "A2"
+            if sheet.max_row and sheet.max_column:
+                sheet.auto_filter.ref = sheet.dimensions
+            for cell in sheet[1]:
+                cell.font = Font(bold=True)
+
+        for row_index, (color, _, _) in enumerate(RECONCILIATION_COLOR_RULES, start=2):
+            fill = PatternFill("solid", fgColor=color.replace("#", "").upper())
+            for cell in workbook["Color Legend"][row_index]:
+                cell.fill = fill
+
+        def apply_reconciliation_fills(sheet_name, source_df):
+            if source_df.empty:
+                return
+            sheet = workbook[sheet_name]
+            for excel_row, (_, source_row) in enumerate(source_df.iterrows(), start=2):
+                color = reconciliation_row_color(source_row)
+                if not color:
+                    continue
+                fill = PatternFill("solid", fgColor=color.replace("#", "").upper())
+                for cell in sheet[excel_row]:
+                    cell.fill = fill
+
+        apply_reconciliation_fills("Schedule Conflicts", conflicts)
+        apply_reconciliation_fills("Assigned Not Scheduled", assigned_not_scheduled)
+        apply_reconciliation_fills("Manual Review", manual_review)
     return buffer.getvalue()
 
 
@@ -1928,6 +1979,14 @@ def reconciliation_row_color(row):
         return "#fef9c3"
     if "unassigned" in conflict_text:
         return "#e5e7eb"
+    return ""
+
+
+def reconciliation_row_color_name(row):
+    color = reconciliation_row_color(row)
+    for rule_color, color_name, _ in RECONCILIATION_COLOR_RULES:
+        if rule_color == color:
+            return color_name
     return ""
 
 
@@ -3159,6 +3218,12 @@ def apply_pmt_rotation_priority(stores_df, schedule_history, backlog_history, cy
     priority.loc[priority["exception_count"] > 0, "rotation_reason"] = "Prior month not completed or exception"
     priority.loc[priority["carryover_count"] > 0, "rotation_reason"] = "Carryover from prior cycle"
     priority.loc[priority["not_scheduled_count"] > 0, "rotation_reason"] = "Did not fit prior schedule"
+    priority["front_of_line_carryover"] = (
+        (priority["not_scheduled_count"] > 0)
+        | (priority["carryover_count"] > 0)
+        | (priority["exception_count"] > 0)
+    )
+    priority["rotation_priority_group"] = priority["front_of_line_carryover"].apply(lambda value: 0 if value else 1)
     return priority
 
 
@@ -3223,10 +3288,8 @@ def build_pmt_draft(assignments, start_month, months, targets, direction, avoid_
         target = int(targets.get(int(employee_id), 10))
         capacity = target * int(months)
         prioritized = apply_pmt_rotation_priority(schedulable, schedule_history, backlog_history, start_month)
-        scheduled = prioritized.sort_values(
-            ["rotation_priority_score", "days_since_completed", "distance_from_home", "store_number"],
-            ascending=[False, False, True, True],
-        ).head(capacity).copy()
+        schedule_sort_columns = ["rotation_priority_group", "distance_from_home", "store_number"]
+        scheduled = prioritized.sort_values(schedule_sort_columns, ascending=[True, True, True]).head(capacity).copy()
         scheduled_indexes = scheduled.index.tolist()
         left = prioritized.drop(index=scheduled_indexes, errors="ignore")
         assigned_count = int(schedulable["store_id"].nunique())
@@ -3249,10 +3312,7 @@ def build_pmt_draft(assignments, start_month, months, targets, direction, avoid_
             if remaining.empty or not target:
                 continue
             cycle_month = add_months(start_month, month_index)
-            month_pool = remaining.sort_values(
-                ["rotation_priority_score", "days_since_completed", "distance_from_home", "store_number"],
-                ascending=[False, False, True, True],
-            ).head(target).copy()
+            month_pool = remaining.sort_values(schedule_sort_columns, ascending=[True, True, True]).head(target).copy()
             routed_rows = home_distance_route(month_pool, home_lat, home_lon, limit=target)
             remaining = remaining.drop(index=[row.name for row in routed_rows], errors="ignore")
             for sequence_number, row in enumerate(routed_rows, start=1):
@@ -3283,6 +3343,8 @@ def build_pmt_draft(assignments, start_month, months, targets, direction, avoid_
                         "work_type": "PMT",
                         "status": "Scheduled",
                         "rotation_priority_score": int(row.get("rotation_priority_score", 0) or 0),
+                        "front_of_line_carryover": bool(row.get("front_of_line_carryover", False)),
+                        "rotation_priority_group": int(row.get("rotation_priority_group", 1) or 1),
                         "rotation_reason": row.get("rotation_reason", "Normal rotation"),
                         "cycles_missed": int(row.get("cycles_missed", 0) or 0),
                         "last_completed_date": row.get("last_completed_date"),
