@@ -4849,12 +4849,24 @@ with tab_reconcile:
             decision_tab, earlier_tab, future_tab = st.tabs(["Transfer Decisions", "Earlier Unfinished Work", "Effective-Date / Future Work"])
             with decision_tab:
                 conflict_view = filtered_conflicts.copy()
-                conflict_view["Apply"] = False
                 conflict_view["Can Transfer"] = conflict_view["assigned_employee_id"].notna()
+                bulk_select_transfers = st.checkbox(
+                    "Select all transferable rows currently shown",
+                    value=False,
+                    key="pmt_reconciliation_select_all_visible_transfers",
+                )
+                conflict_view["Apply"] = conflict_view["Can Transfer"].astype(bool) if bulk_select_transfers else False
                 view_cols = [
                     "Apply", "Can Transfer", "work_timing", "schedule_item_id", "store_number", "city", "state", "scheduled_technician",
                     "assigned_technician", "schedule_name", "schedule_date", "status", "conflict_type",
                     "assignment_effective_date", "recommended_action", "resolution",
+                ]
+                editor_key_parts = [
+                    key(selected_conflict_tech),
+                    key(selected_conflict_type),
+                    key(selected_conflict_month),
+                    str(int(bool(only_transferable))),
+                    str(int(bool(bulk_select_transfers))),
                 ]
                 edited_conflicts = st.data_editor(
                     conflict_view[[col for col in view_cols if col in conflict_view.columns]],
@@ -4869,7 +4881,7 @@ with tab_reconcile:
                         "scheduled_technician": st.column_config.TextColumn("Original Scheduled PMT"),
                         "assigned_technician": st.column_config.TextColumn("Current Assigned PMT"),
                     },
-                    key="pmt_reconciliation_conflict_editor",
+                    key=f"pmt_reconciliation_conflict_editor_{'_'.join(editor_key_parts)}",
                 )
                 selected_item_ids = edited_conflicts.loc[
                     edited_conflicts["Apply"].astype(bool) & edited_conflicts["Can Transfer"].astype(bool),
