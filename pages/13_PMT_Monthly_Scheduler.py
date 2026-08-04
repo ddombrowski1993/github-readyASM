@@ -5204,13 +5204,52 @@ with tab_reconcile:
                 st.dataframe(protected, use_container_width=True, hide_index=True)
 
     st.divider()
-    st.markdown("**Where To Get The New Schedule**")
-    st.info(
-        "After applying reconciliation transfers, the updated active schedule is in `Manage Existing PMT Schedule`. "
-        "Select the same schedule plan there, then use `View all schedule rows` -> `Export Full Schedule`. "
-        "Use `Compare Old vs New` here before applying, and use the snapshot schedule plan later if you need the old schedule."
+    st.markdown(
+        """
+        <style>
+        .pmt-next-steps {
+            border: 2px solid #f59e0b;
+            background: #fff7ed;
+            padding: 1.1rem 1.25rem;
+            border-radius: 8px;
+            margin: .75rem 0 1rem 0;
+            color: #111827;
+        }
+        .pmt-next-steps h3 {
+            margin: 0 0 .65rem 0;
+            font-size: 1.45rem;
+            line-height: 1.2;
+        }
+        .pmt-next-steps ol {
+            margin: .3rem 0 0 1.25rem;
+            padding: 0;
+            font-size: 1.08rem;
+            line-height: 1.65;
+        }
+        .pmt-next-steps strong {
+            font-weight: 800;
+        }
+        .pmt-action-label {
+            font-size: 1.05rem;
+            font-weight: 800;
+            margin-bottom: .25rem;
+            color: #111827;
+        }
+        </style>
+        <div class="pmt-next-steps">
+            <h3>Where To Get The New Schedule</h3>
+            <ol>
+                <li><strong>Before applying:</strong> use <strong>Compare Old vs New</strong> to review what will change.</li>
+                <li><strong>After applying:</strong> the updated active schedule is in <strong>Manage Existing PMT Schedule</strong>.</li>
+                <li>Select the same schedule plan, then open <strong>View all schedule rows</strong> and click <strong>Export Full Schedule</strong>.</li>
+                <li>If you need the old version later, select the schedule plan marked <strong>Snapshot</strong>.</li>
+            </ol>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
     next_cols = st.columns([0.34, 0.33, 0.33])
+    next_cols[0].markdown('<div class="pmt-action-label">Jump to Manage</div>', unsafe_allow_html=True)
     if next_cols[0].button(
         "Set Manage Tab To This Schedule",
         disabled=selected_reconcile_run is None,
@@ -5222,7 +5261,7 @@ with tab_reconcile:
         )
         st.success(st.session_state["pmt_reconciliation_manage_notice"])
     if selected_reconcile_run is None:
-        next_cols[0].caption("Pick one schedule run scope above to preselect it in Manage.")
+        next_cols[0].warning("Pick one schedule run scope above first.")
     updated_schedule_export = pd.DataFrame()
     if selected_reconcile_run is not None:
         updated_schedule_export = pmt_manage_run_items(selected_reconcile_run)
@@ -5234,6 +5273,7 @@ with tab_reconcile:
         ]
         if export_cols:
             updated_schedule_export = updated_schedule_export[export_cols]
+    next_cols[1].markdown('<div class="pmt-action-label">Get New Schedule</div>', unsafe_allow_html=True)
     next_cols[1].download_button(
         "Export Updated Schedule",
         data=excel_bytes(updated_schedule_export),
@@ -5242,6 +5282,7 @@ with tab_reconcile:
         disabled=selected_reconcile_run is None or updated_schedule_export.empty,
         key="pmt_reconciliation_export_updated_schedule",
     )
+    next_cols[2].markdown('<div class="pmt-action-label">Get Change Package</div>', unsafe_allow_html=True)
     next_cols[2].download_button(
         "Export Reconciliation Package",
         data=pmt_reconciliation_package_bytes(scan, reconciliation_effective_date, reconciliation_reason),
