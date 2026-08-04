@@ -2041,6 +2041,7 @@ def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
     base["new_technician"] = base["scheduled_technician"]
     base["new_sequence_number"] = base["sequence_number"]
     base["new_schedule_date"] = base["schedule_date"]
+    base["new_month_start"] = base["month_start"]
     base["new_month"] = base["month"]
     base["new_home_latitude"] = base.get("scheduled_home_latitude")
     base["new_home_longitude"] = base.get("scheduled_home_longitude")
@@ -2052,20 +2053,30 @@ def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
     base.loc[transferable, "new_home_latitude"] = base.loc[transferable, "assigned_home_latitude"]
     base.loc[transferable, "new_home_longitude"] = base.loc[transferable, "assigned_home_longitude"]
     base.loc[transferable, "proposed_change"] = "Transfer to current assigned PMT"
+    for index, row in base.loc[transferable].iterrows():
+        old_date = row.get("old_schedule_date")
+        assigned_id = row.get("assigned_employee_id")
+        if old_date and old_date < month_start(date.today()) and pd.notna(assigned_id):
+            new_date = first_workday(month_start(date.today()), employee_id=int(assigned_id))
+            base.at[index, "new_schedule_date"] = new_date
+            base.at[index, "new_month_start"] = month_start(new_date)
+            base.at[index, "new_month"] = month_label(month_start(new_date))
+            base.at[index, "proposed_change"] = "Transfer to current assigned PMT and carry forward to current month"
 
     touched_pairs = set()
     for _, row in base.loc[transferable].iterrows():
         month_value = row.get("month_start")
+        new_month_value = row.get("new_month_start")
         if pd.notna(row.get("old_employee_id")) and month_value:
             touched_pairs.add((int(row["old_employee_id"]), month_value))
-        if pd.notna(row.get("new_employee_id")) and month_value:
-            touched_pairs.add((int(row["new_employee_id"]), month_value))
+        if pd.notna(row.get("new_employee_id")) and new_month_value:
+            touched_pairs.add((int(row["new_employee_id"]), new_month_value))
 
     for employee_id, month_value in touched_pairs:
         mask = (
             base["new_employee_id"].notna()
             & (base["new_employee_id"].astype("Int64") == int(employee_id))
-            & (base["month_start"] == month_value)
+            & (base["new_month_start"] == month_value)
         )
         month_rows = base.loc[mask].copy()
         if month_rows.empty:
@@ -2089,7 +2100,7 @@ def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
     compare = base.copy()
     compare["change_status"] = compare["proposed_change"]
     current_month = month_start(date.today())
-    compare_current_forward = compare[compare["month_start"].notna() & (compare["month_start"] >= current_month)].copy()
+    compare_current_forward = compare[compare["new_month_start"].notna() & (compare["new_month_start"] >= current_month)].copy()
     compare_columns = [
         "change_status", "store_number", "city", "state", "old_technician", "new_technician",
         "old_month", "new_month", "old_schedule_date", "new_schedule_date", "old_sequence_number",
@@ -2148,10 +2159,14 @@ def schedule_export_change_type(row, is_snapshot=False):
     schedule_date = row.get("schedule_date")
     if status in {"transferred", "superseded"} or "superseded" in source:
         return "Superseded/transferred old row"
-    if "reconciliation" in source or "territory transfer" in source:
-        return "Transferred to current assigned PMT"
     if pd.notna(original_date) and pd.notna(schedule_date) and original_date != schedule_date:
         return "Date changed after reconciliation"
+    if "reconciliation" in source or "territory transfer" in source:
+        previous = clean(row.get("Previous Technician", ""))
+        current = clean(row.get("technician", ""))
+        if previous and current and previous != current:
+            return "Transferred to current assigned PMT"
+        return "Unchanged"
     return "Unchanged"
 
 
@@ -2167,19 +2182,75 @@ def schedule_export_row_color(change_type):
     return ""
 
 
-def prepare_schedule_export_view(df, is_snapshot=False):
+def prepare_schedule_export_view(df, is_snapshot=False, old_lookup=None):
     if df.empty:
         return df
     view = df.copy()
+    view["_month_sort"] = pd.to_datetime(view.get("schedule_date"), errors="coerce")
+    view["Previous Technician"] = ""
+    view["New Technician"] = view.get("technician", "")
+    if is_snapshot:
+        view["Previous Technician"] = view.get("technician", "")
+        view["New Technician"] = ""
+    elif old_lookup:
+        def previous_technician(row):
+            store_key = reconciliation_store_number(row.get("store_number"))
+            old_value = old_lookup.get(store_key, "")
+            current_value = clean(row.get("technician"))
+            return old_value if old_value and old_value != current_value else ""
+
+        view["Previous Technician"] = view.apply(previous_technician, axis=1)
     view["Change Type"] = view.apply(lambda row: schedule_export_change_type(row, is_snapshot=is_snapshot), axis=1)
-    view["Current Assigned PMT"] = view.get("assigned_technician", "")
     export_columns = [
-        "Change Type", "month", "schedule_date", "original_schedule_date", "sequence_number",
-        "technician", "Current Assigned PMT", "store_number", "address", "city", "state", "zip",
-        "status", "cycle_label", "schedule_source", "notes",
+        "store_number", "Previous Technician", "New Technician", "month", "schedule_date",
+        "original_schedule_date", "sequence_number", "status", "cycle_label", "schedule_source",
+        "notes", "Change Type",
     ]
-    return view[[col for col in export_columns if col in view.columns]].sort_values(
-        [col for col in ["month", "technician", "sequence_number", "store_number"] if col in view.columns]
+    sort_columns = [col for col in ["_month_sort", "New Technician", "Previous Technician", "sequence_number", "store_number"] if col in view.columns]
+    view = view.sort_values(sort_columns)
+    return view[[col for col in export_columns if col in view.columns]]
+
+
+def current_month_forward_schedule_rows(df, cycle_start=None, cycle_end=None):
+    if df.empty or "schedule_date" not in df.columns:
+        return df.copy()
+    scoped = df.copy()
+    schedule_dates = pd.to_datetime(scoped["schedule_date"], errors="coerce").dt.date
+    mask = schedule_dates >= month_start(date.today())
+    if cycle_start is not None:
+        mask &= schedule_dates >= cycle_start
+    if cycle_end is not None:
+        mask &= schedule_dates <= cycle_end
+    return scoped[mask].copy()
+
+
+def ordered_export_months(df):
+    if df.empty or "month" not in df.columns or "schedule_date" not in df.columns:
+        return []
+    month_order = (
+        df.assign(_month_sort=pd.to_datetime(df["schedule_date"], errors="coerce"))
+        .dropna(subset=["_month_sort"])
+        .assign(_month_sort=lambda value: value["_month_sort"].dt.to_period("M").dt.to_timestamp())
+        .sort_values("_month_sort")
+        .drop_duplicates("month")["month"]
+        .tolist()
+    )
+    return month_order
+
+
+def old_schedule_technician_lookup(old_run_items):
+    if old_run_items.empty or not {"store_number", "technician"}.issubset(old_run_items.columns):
+        return {}
+    old_lookup_df = old_run_items.copy()
+    old_lookup_df["_store_key"] = old_lookup_df["store_number"].apply(reconciliation_store_number)
+    return (
+        old_lookup_df.sort_values(["schedule_date", "sequence_number"])
+        .dropna(subset=["_store_key"])
+        .drop_duplicates("_store_key", keep="first")
+        .set_index("_store_key")["technician"]
+        .fillna("")
+        .astype(str)
+        .to_dict()
     )
 
 
@@ -2187,7 +2258,8 @@ def reconciliation_schedule_export_workbook_bytes(new_run_items, old_run_items=N
     from openpyxl.styles import Font, PatternFill
 
     old_run_items = old_run_items if old_run_items is not None else pd.DataFrame()
-    current_export = prepare_schedule_export_view(new_run_items, is_snapshot=False)
+    old_lookup = old_schedule_technician_lookup(old_run_items)
+    current_export = prepare_schedule_export_view(new_run_items, is_snapshot=False, old_lookup=old_lookup)
     old_export = prepare_schedule_export_view(old_run_items, is_snapshot=True)
     changed_export = current_export[
         current_export.get("Change Type", pd.Series(dtype=str)).astype(str).ne("Unchanged")
@@ -2221,14 +2293,14 @@ def reconciliation_schedule_export_workbook_bytes(new_run_items, old_run_items=N
         new_month_sheet_names = []
         old_month_sheet_names = []
         if not current_export.empty and "month" in current_export.columns:
-            for month_name in current_export["month"].dropna().drop_duplicates().tolist():
+            for month_name in ordered_export_months(current_export):
                 month_df = current_export[current_export["month"] == month_name].copy()
                 sheet_name = safe_sheet_name(f"New {month_name}", used_sheets)
                 used_sheets.add(sheet_name)
                 month_df.to_excel(writer, index=False, sheet_name=sheet_name)
                 new_month_sheet_names.append(sheet_name)
         if not old_export.empty and "month" in old_export.columns:
-            for month_name in old_export["month"].dropna().drop_duplicates().tolist():
+            for month_name in ordered_export_months(old_export):
                 month_df = old_export[old_export["month"] == month_name].copy()
                 sheet_name = safe_sheet_name(f"Old {month_name}", used_sheets)
                 used_sheets.add(sheet_name)
@@ -2416,6 +2488,10 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
                 .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.id)
             ).first()
             old_employee_id = item.employee_id
+            old_month_value = month_start(item.schedule_date)
+            target_schedule_date = item.schedule_date
+            if item.schedule_date < month_start(date.today()):
+                target_schedule_date = first_workday(month_start(date.today()), employee_id=assigned_employee_id)
             if duplicate:
                 item.status = "Transferred"
                 item.schedule_source = "PMT Reconciliation Superseded"
@@ -2426,7 +2502,7 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
                 ]
                 item.completion_notes = " | ".join([part for part in note_parts if part])
                 superseded += 1
-                touched_months.add((old_employee_id, month_start(item.schedule_date), item.pmt_schedule_run_id))
+                touched_months.add((old_employee_id, old_month_value, item.pmt_schedule_run_id))
                 continue
             employee = session.get(Employee, assigned_employee_id)
             if assigned_employee_id not in team_cache:
@@ -2436,16 +2512,19 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
                 item.original_schedule_date = item.schedule_date
             item.employee_id = assigned_employee_id
             item.team_id = int(team.id) if team else None
+            item.schedule_date = target_schedule_date
+            item.cycle_label = month_label(month_start(target_schedule_date))
             item.schedule_source = "PMT Assignment Reconciliation"
             note_parts = [
                 clean(item.completion_notes),
                 f"Transferred from employee_id={old_employee_id} to employee_id={assigned_employee_id} after PMT assignment reconciliation effective {effective_date}.",
+                f"Original schedule date {item.original_schedule_date}; new schedule date {target_schedule_date}.",
                 clean(reason),
             ]
             item.completion_notes = " | ".join([part for part in note_parts if part])
             transferred += 1
-            touched_months.add((old_employee_id, month_start(item.schedule_date), item.pmt_schedule_run_id))
-            touched_months.add((assigned_employee_id, month_start(item.schedule_date), item.pmt_schedule_run_id))
+            touched_months.add((old_employee_id, old_month_value, item.pmt_schedule_run_id))
+            touched_months.add((assigned_employee_id, month_start(target_schedule_date), item.pmt_schedule_run_id))
         for employee_id, month_value, run_id in touched_months:
             resequenced_rows += resequence_pmt_month(session, run_id, employee_id, month_value)
     log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced; {snapshots_created} snapshot run(s) created. Effective {effective_date}. {reason}")
@@ -5406,7 +5485,12 @@ with tab_reconcile:
         next_cols[0].warning("Pick one schedule run scope above first.")
     updated_schedule_export = pd.DataFrame()
     if selected_reconcile_run is not None:
-        updated_schedule_export = pmt_manage_run_items(selected_reconcile_run)
+        reconcile_run_row = reconcile_runs.set_index("id").loc[selected_reconcile_run] if not reconcile_runs.empty and selected_reconcile_run in reconcile_runs["id"].tolist() else {}
+        updated_schedule_export = current_month_forward_schedule_rows(
+            pmt_manage_run_items(selected_reconcile_run),
+            scalar_date(reconcile_run_row.get("cycle_start")) if hasattr(reconcile_run_row, "get") else None,
+            scalar_date(reconcile_run_row.get("cycle_end")) if hasattr(reconcile_run_row, "get") else None,
+        )
         export_cols = [
             col for col in [
                 "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number",
@@ -6278,7 +6362,7 @@ with tab_export:
         st.markdown("**Reconciliation Schedule Exports**")
         st.caption(
             "Use this after PMT reconciliation. This is separate from the normal schedule export and includes the old snapshot, "
-            "the new normal schedule, month-by-month tabs, changed rows, color legend, and reconciliation change columns."
+            "the new normal schedule from the current month forward, month-by-month tabs, changed rows, color legend, and reconciliation change columns."
         )
         if _export_runs.empty:
             st.info("No PMT schedule runs are available for reconciliation exports.")
@@ -6324,10 +6408,24 @@ with tab_export:
                     format_func=lambda value: "No old snapshot selected" if value is None else f"#{value} - {notes_by_id.get(value, 'Snapshot')}",
                     key="pmt_reconciliation_export_old_snapshot",
                 )
-                new_schedule_items = pmt_manage_run_items(selected_recon_export_run)
-                old_schedule_items = pmt_manage_run_items(selected_old_snapshot_run) if selected_old_snapshot_run else pd.DataFrame()
+                selected_recon_run_row = reconciled_runs.set_index("id").loc[selected_recon_export_run]
+                recon_cycle_start = scalar_date(selected_recon_run_row.get("cycle_start"))
+                recon_cycle_end = scalar_date(selected_recon_run_row.get("cycle_end"))
+                new_schedule_items = current_month_forward_schedule_rows(
+                    pmt_manage_run_items(selected_recon_export_run),
+                    recon_cycle_start,
+                    recon_cycle_end,
+                )
+                old_schedule_items = current_month_forward_schedule_rows(
+                    pmt_manage_run_items(selected_old_snapshot_run),
+                    recon_cycle_start,
+                    recon_cycle_end,
+                ) if selected_old_snapshot_run else pd.DataFrame()
                 recon_export_metrics = st.columns(4)
-                changed_preview = prepare_schedule_export_view(new_schedule_items)
+                changed_preview = prepare_schedule_export_view(
+                    new_schedule_items,
+                    old_lookup=old_schedule_technician_lookup(old_schedule_items),
+                )
                 changed_count = int(changed_preview.get("Change Type", pd.Series(dtype=str)).astype(str).ne("Unchanged").sum()) if not changed_preview.empty else 0
                 recon_export_metrics[0].metric("New Schedule Rows", len(new_schedule_items))
                 recon_export_metrics[1].metric("Changed Rows", changed_count)
@@ -6338,7 +6436,7 @@ with tab_export:
                     data=reconciliation_schedule_export_workbook_bytes(
                         new_schedule_items,
                         old_schedule_items,
-                        run_name=reconciled_runs.set_index("id").loc[selected_recon_export_run, "run_name"],
+                        run_name=selected_recon_run_row["run_name"],
                         snapshot_name="" if selected_old_snapshot_run is None else notes_by_id.get(selected_old_snapshot_run, "Snapshot"),
                     ),
                     file_name=f"pmt_reconciled_schedule_package_run_{selected_recon_export_run}.xlsx",
