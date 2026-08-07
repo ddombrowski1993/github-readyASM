@@ -6,6 +6,8 @@ import time
 
 import pandas as pd
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
 
 st.set_page_config(page_title="PMT Monthly Scheduler", layout="wide")
 
@@ -1717,15 +1719,18 @@ def technician_schedule_reconciliation(run_items, employee_id, selected_month="A
     tech_completed = filter_manage_scope(run_items, employee_id=employee_id, selected_month=selected_month, status_filter="Completed")
     tech_canceled = filter_manage_scope(run_items, employee_id=employee_id, selected_month=selected_month, status_filter="Canceled / Skipped")
     active_any = filter_manage_scope(run_items, selected_month=selected_month, status_filter="Active")
+    completed_any = filter_manage_scope(run_items, selected_month=selected_month, status_filter="Completed")
     active_store_ids_any = set(active_any["store_id"].dropna().astype(int).tolist()) if not active_any.empty else set()
-    assigned_not_scheduled_ids = assigned_ids - active_store_ids_any
+    completed_store_ids_any = set(completed_any["store_id"].dropna().astype(int).tolist()) if not completed_any.empty else set()
+    accounted_store_ids_any = active_store_ids_any | completed_store_ids_any
+    assigned_not_scheduled_ids = assigned_ids - accounted_store_ids_any
     if assigned_df.empty:
         assigned_not_scheduled = pd.DataFrame()
     else:
         assigned_not_scheduled = assigned_df[assigned_df["store_id"].astype(int).isin(assigned_not_scheduled_ids)].copy()
-    scheduled_no_longer_assigned = tech_all[
-        ~pd.to_numeric(tech_all["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
-    ].copy() if not tech_all.empty else pd.DataFrame()
+    scheduled_no_longer_assigned = tech_active[
+        ~pd.to_numeric(tech_active["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
+    ].copy() if not tech_active.empty else pd.DataFrame()
     assigned_scheduled_elsewhere = active_any[
         pd.to_numeric(active_any["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
         & (pd.to_numeric(active_any["employee_id"], errors="coerce").fillna(-1).astype(int) != int(employee_id))
@@ -3698,6 +3703,146 @@ def assigned_pmt_store_candidates(employee_id, run_id=None, include_scheduled=Fa
         axis=1,
     )
     return df
+
+
+def pmt_route_builder_store_pool(run_items, employee_ids, selected_month="All months", run_id=None):
+    employee_ids = [int(employee_id) for employee_id in employee_ids if scalar_int(employee_id, 0)]
+    if not employee_ids:
+        return pd.DataFrame()
+    pool_parts = []
+    for employee_id in employee_ids:
+        assigned = assigned_pmt_store_candidates(employee_id, run_id=run_id, include_scheduled=True)
+        if assigned.empty:
+            continue
+        assigned = assigned.copy()
+        assigned["assigned_employee_id"] = int(employee_id)
+        assigned["assigned_technician"] = assigned.get("technician", "")
+        assigned["route_layer"] = "Assigned Store"
+        pool_parts.append(assigned)
+    if not run_items.empty:
+        scheduled = run_items[pmt_active_item_mask(run_items)].copy()
+        scheduled = scheduled[pd.to_numeric(scheduled.get("employee_id"), errors="coerce").fillna(-1).astype(int).isin(employee_ids)].copy()
+        if selected_month != "All months" and "month_start" in scheduled.columns:
+            scheduled = scheduled[scheduled["month_start"] == selected_month].copy()
+        if not scheduled.empty:
+            scheduled = scheduled.rename(columns={"employee_id": "scheduled_employee_id", "technician": "scheduled_technician"})
+            scheduled["assigned_employee_id"] = pd.to_numeric(scheduled.get("assigned_pmt_employee_id"), errors="coerce")
+            scheduled["route_layer"] = "Existing Schedule"
+            if "assigned_technician" not in scheduled.columns:
+                scheduled["assigned_technician"] = ""
+            pool_parts.append(scheduled)
+    if not pool_parts:
+        return pd.DataFrame()
+    pool = pd.concat(pool_parts, ignore_index=True, sort=False)
+    pool["store_id"] = pd.to_numeric(pool.get("store_id"), errors="coerce")
+    pool["latitude"] = pd.to_numeric(pool.get("latitude"), errors="coerce")
+    pool["longitude"] = pd.to_numeric(pool.get("longitude"), errors="coerce")
+    pool = pool.dropna(subset=["store_id", "latitude", "longitude"]).copy()
+    if pool.empty:
+        return pool
+    pool["store_id"] = pool["store_id"].astype(int)
+    pool["store_number"] = pool.get("store_number", "").fillna("").astype(str)
+    return pool.sort_values(["route_layer", "store_number"]).drop_duplicates("store_id", keep="first")
+
+
+def nearest_route_builder_store(store_pool, clicked):
+    if store_pool.empty or not clicked:
+        return None
+    clicked_lat = clicked.get("lat")
+    clicked_lon = clicked.get("lng")
+    if clicked_lat is None or clicked_lon is None:
+        return None
+    nearest = None
+    nearest_distance = None
+    for _, row in store_pool.iterrows():
+        distance = haversine_miles(float(clicked_lat), float(clicked_lon), float(row["latitude"]), float(row["longitude"]))
+        if nearest_distance is None or distance < nearest_distance:
+            nearest = row
+            nearest_distance = distance
+    if nearest is None or nearest_distance is None or nearest_distance > 1.0:
+        return None
+    return nearest
+
+
+def render_pmt_route_builder_map(store_pool, employees_df, route_df, show_assigned_layer=True, show_existing_layer=True, key=None):
+    mapped_pool = store_pool.copy()
+    mapped_pool["latitude"] = pd.to_numeric(mapped_pool.get("latitude"), errors="coerce")
+    mapped_pool["longitude"] = pd.to_numeric(mapped_pool.get("longitude"), errors="coerce")
+    mapped_pool = mapped_pool.dropna(subset=["latitude", "longitude"])
+    if mapped_pool.empty:
+        st.info("No mapped stores found for the selected PMT layer.")
+        return {}
+    fmap = folium.Map(location=[float(mapped_pool["latitude"].mean()), float(mapped_pool["longitude"].mean())], zoom_start=9, tiles="OpenStreetMap")
+    if employees_df is not None and not employees_df.empty:
+        employees_df = employees_df.copy()
+        employees_df["home_latitude"] = pd.to_numeric(employees_df.get("home_latitude"), errors="coerce")
+        employees_df["home_longitude"] = pd.to_numeric(employees_df.get("home_longitude"), errors="coerce")
+        for _, row in employees_df.dropna(subset=["home_latitude", "home_longitude"]).iterrows():
+            folium.Marker(
+                [float(row["home_latitude"]), float(row["home_longitude"])],
+                icon=folium.Icon(color="black", icon="home", prefix="fa"),
+                popup=folium.Popup(f"<b>{row.get('technician_name', '')}</b><br>Home", max_width=260),
+                tooltip=f"{row.get('technician_name', '')} home",
+            ).add_to(fmap)
+    assigned_group = folium.FeatureGroup(name="Assigned Store Ownership", show=show_assigned_layer)
+    schedule_group = folium.FeatureGroup(name="Existing Schedule Route", show=show_existing_layer)
+    for _, row in mapped_pool.iterrows():
+        assigned_name = clean(row.get("assigned_technician", "")) or clean(row.get("technician", "")) or "Unassigned"
+        scheduled_name = clean(row.get("scheduled_technician", "")) or ""
+        popup = f"""
+        <b>Store {row.get('store_number', '')}</b><br>
+        {row.get('address', '')}<br>
+        {row.get('city', '')}, {row.get('state', '')}<br>
+        Assigned PMT: {assigned_name}<br>
+        Scheduled PMT: {scheduled_name or 'Not active in selected schedule'}<br>
+        Click the dot to add it to the proposed route.
+        """
+        folium.CircleMarker(
+            [float(row["latitude"]), float(row["longitude"])],
+            radius=7,
+            color="#ffffff",
+            weight=1,
+            fill=True,
+            fill_color=stable_color(assigned_name),
+            fill_opacity=0.9,
+            popup=folium.Popup(popup, max_width=340),
+            tooltip=f"Store {row.get('store_number', '')} | Assigned: {assigned_name}",
+        ).add_to(assigned_group)
+        if scheduled_name:
+            folium.CircleMarker(
+                [float(row["latitude"]), float(row["longitude"])],
+                radius=10,
+                color="#111827",
+                weight=3,
+                fill=False,
+                popup=folium.Popup(popup, max_width=340),
+                tooltip=f"Scheduled: {scheduled_name} | Store {row.get('store_number', '')}",
+            ).add_to(schedule_group)
+    assigned_group.add_to(fmap)
+    schedule_group.add_to(fmap)
+    proposed = route_df.copy() if route_df is not None else pd.DataFrame()
+    if not proposed.empty:
+        proposed["latitude"] = pd.to_numeric(proposed.get("latitude"), errors="coerce")
+        proposed["longitude"] = pd.to_numeric(proposed.get("longitude"), errors="coerce")
+        proposed = proposed.dropna(subset=["latitude", "longitude"]).sort_values(["Proposed Stop", "store_number"])
+        proposed_points = proposed[["latitude", "longitude"]].astype(float).values.tolist()
+        if len(proposed_points) >= 2:
+            folium.PolyLine(proposed_points, color="#dc2626", weight=5, opacity=0.82, tooltip="Proposed route").add_to(fmap)
+        for _, row in proposed.iterrows():
+            stop_number = scalar_int(row.get("Proposed Stop"), 0)
+            folium.Marker(
+                [float(row["latitude"]), float(row["longitude"])],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="background:#dc2626;color:white;border:2px solid white;border-radius:999px;
+                    width:28px;height:28px;line-height:24px;text-align:center;font-size:13px;font-weight:900;
+                    box-shadow:0 1px 5px rgba(0,0,0,.4);">{stop_number}</div>
+                    """
+                ),
+                tooltip=f"Proposed Stop {stop_number}: Store {row.get('store_number', '')}",
+            ).add_to(fmap)
+    folium.LayerControl(collapsed=False).add_to(fmap)
+    return st_folium(fmap, width=None, height=620, key=key, returned_objects=["last_object_clicked"])
 
 
 def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, notes=""):
@@ -6782,7 +6927,7 @@ with tab_manage:
 
             rec = technician_schedule_reconciliation(run_items, selected_employee, selected_month)
             selected_scope = filter_manage_scope(run_items, selected_employee, selected_month, status_filter).sort_values(["schedule_date", "sequence_number", "store_number"])
-            overview_tab, build_tab, reorder_tab = st.tabs(["Overview", "Build or Add Stores", "Reorder or Remove Stores"])
+            overview_tab, map_builder_tab, build_tab, reorder_tab = st.tabs(["Overview", "Map Route Builder", "Build or Add Stores", "Reorder or Remove Stores"])
 
             with overview_tab:
                 card_cols = st.columns(6)
@@ -6860,6 +7005,178 @@ with tab_manage:
                             static_preview=True,
                             height=560,
                         )
+
+            with map_builder_tab:
+                st.markdown("**Click-To-Build Route Map**")
+                st.caption(
+                    "Use this as a manual scheduling workspace. Turn layers on/off, click store dots to build the route order, then review the notepad list before applying."
+                )
+                if selected_month == "All months":
+                    month_values = [value for value in manage_month_options(run_items) if value != "All months"]
+                    if not month_values:
+                        month_values = [month_start(date.today())]
+                    route_month = st.selectbox(
+                        "Route month",
+                        month_values,
+                        index=0,
+                        format_func=month_label,
+                        key=f"pmt_map_route_month_{selected_run}_{selected_employee}",
+                    )
+                else:
+                    route_month = selected_month
+                    st.caption(f"Route month: {month_label(route_month)}")
+                layer_cols = st.columns([0.42, 0.18, 0.18, 0.22])
+                extra_employee_options = [
+                    int(value)
+                    for value in tech_options["employee_id"].dropna().astype(int).tolist()
+                    if int(value) != int(selected_employee)
+                ]
+                extra_layer_employee_ids = layer_cols[0].multiselect(
+                    "Add PMT layers",
+                    extra_employee_options,
+                    format_func=lambda value: tech_options.set_index("employee_id").loc[value, "technician"],
+                    key=f"pmt_map_route_extra_pmts_{selected_run}_{selected_employee}_{route_month}",
+                )
+                show_assigned_layer = layer_cols[1].checkbox("Assigned layer", value=True, key=f"pmt_map_route_assigned_layer_{selected_run}_{selected_employee}_{route_month}")
+                show_existing_layer = layer_cols[2].checkbox("Existing route layer", value=True, key=f"pmt_map_route_existing_layer_{selected_run}_{selected_employee}_{route_month}")
+                route_date = layer_cols[3].date_input(
+                    "Route date",
+                    value=first_workday(route_month, employee_id=int(selected_employee)),
+                    key=f"pmt_map_route_date_{selected_run}_{selected_employee}_{route_month}",
+                )
+                route_employee_ids = [int(selected_employee)] + [int(value) for value in extra_layer_employee_ids]
+                route_pool = pmt_route_builder_store_pool(run_items, route_employee_ids, route_month, run_id=selected_run)
+                route_state_key = f"pmt_manual_map_route_{selected_run}_{selected_employee}_{route_month}"
+                route_records = st.session_state.get(route_state_key, [])
+                route_df = pd.DataFrame(route_records)
+
+                command_cols = st.columns(4)
+                if command_cols[0].button("Load Existing Route", key=f"pmt_map_load_existing_{selected_run}_{selected_employee}_{route_month}"):
+                    existing_route = filter_manage_scope(run_items, selected_employee, route_month, "Active").sort_values(["schedule_date", "sequence_number", "store_number"]).copy()
+                    if existing_route.empty:
+                        st.info("No existing active route was found for this PMT/month.")
+                    else:
+                        existing_route["Proposed Stop"] = range(1, len(existing_route) + 1)
+                        existing_route["Proposed Date"] = route_date
+                        existing_route["Proposed Month"] = month_label(route_month)
+                        existing_route["Manual or Auto-Filled"] = "Loaded existing route"
+                        st.session_state[route_state_key] = existing_route.to_dict("records")
+                        st.rerun()
+                if command_cols[1].button("Clear Proposed Route", key=f"pmt_map_clear_route_{selected_run}_{selected_employee}_{route_month}"):
+                    st.session_state.pop(route_state_key, None)
+                    st.session_state.pop(f"{route_state_key}_last_click", None)
+                    st.rerun()
+                command_cols[2].metric("Proposed Stops", len(route_records))
+                command_cols[3].metric("Map Stores", len(route_pool))
+
+                employee_layers = active_pmt_employee_summary()
+                if not employee_layers.empty:
+                    employee_layers = employee_layers[
+                        pd.to_numeric(employee_layers["employee_id"], errors="coerce").fillna(-1).astype(int).isin(route_employee_ids)
+                    ].copy()
+                map_data = render_pmt_route_builder_map(
+                    route_pool,
+                    employee_layers,
+                    route_df,
+                    show_assigned_layer=show_assigned_layer,
+                    show_existing_layer=show_existing_layer,
+                    key=f"pmt_route_builder_map_{selected_run}_{selected_employee}_{route_month}_{len(route_records)}",
+                )
+                clicked_store = nearest_route_builder_store(route_pool, map_data.get("last_object_clicked") if isinstance(map_data, dict) else None)
+                if clicked_store is not None:
+                    click_token = f"{int(clicked_store['store_id'])}:{round(float(clicked_store['latitude']), 6)}:{round(float(clicked_store['longitude']), 6)}"
+                    last_click_key = f"{route_state_key}_last_click"
+                    existing_store_ids = {
+                        scalar_int(row.get("store_id"), 0)
+                        for row in route_records
+                    }
+                    if st.session_state.get(last_click_key) != click_token and int(clicked_store["store_id"]) not in existing_store_ids:
+                        new_row = clicked_store.to_dict()
+                        new_row["Proposed Stop"] = len(route_records) + 1
+                        new_row["Proposed Date"] = route_date
+                        new_row["Proposed Month"] = month_label(route_month)
+                        new_row["technician"] = selected_tech_name
+                        new_row["Manual or Auto-Filled"] = "Map selected"
+                        route_records.append(new_row)
+                        st.session_state[route_state_key] = route_records
+                        st.session_state[last_click_key] = click_token
+                        st.rerun()
+
+                route_df = pd.DataFrame(st.session_state.get(route_state_key, []))
+                if route_df.empty:
+                    st.info("Click store dots on the map, or load the existing route, to start the proposed route list.")
+                else:
+                    route_df = route_df.copy()
+                    route_df["Remove"] = False
+                    if "Proposed Stop" in route_df.columns:
+                        route_df["Proposed Stop"] = pd.to_numeric(route_df["Proposed Stop"], errors="coerce")
+                    else:
+                        route_df["Proposed Stop"] = pd.NA
+                    route_df["Proposed Stop"] = route_df["Proposed Stop"].where(route_df["Proposed Stop"].notna(), pd.Series(range(1, len(route_df) + 1), index=route_df.index)).astype(int)
+                    route_df = route_df.sort_values(["Proposed Stop", "store_number"]).reset_index(drop=True)
+                    route_editor_cols = [
+                        "Remove", "Proposed Stop", "store_id", "store_number", "city", "state",
+                        "assigned_technician", "scheduled_technician", "scheduled_date", "distance_from_home", "Manual or Auto-Filled",
+                    ]
+                    edited_route = st.data_editor(
+                        route_df[[col for col in route_editor_cols if col in route_df.columns]],
+                        use_container_width=True,
+                        hide_index=True,
+                        disabled=["store_id", "store_number", "city", "state", "assigned_technician", "scheduled_technician", "scheduled_date", "distance_from_home", "Manual or Auto-Filled"],
+                        column_config={
+                            "Remove": st.column_config.CheckboxColumn("Remove"),
+                            "Proposed Stop": st.column_config.NumberColumn("Stop #", min_value=1, step=1),
+                            "store_id": None,
+                            "store_number": st.column_config.TextColumn("Store"),
+                            "assigned_technician": st.column_config.TextColumn("Assigned PMT"),
+                            "scheduled_technician": st.column_config.TextColumn("Currently Scheduled PMT"),
+                            "scheduled_date": st.column_config.DateColumn("Current Scheduled Date"),
+                            "distance_from_home": st.column_config.NumberColumn("Miles From Home", format="%.1f"),
+                        },
+                        key=f"pmt_map_route_editor_{selected_run}_{selected_employee}_{route_month}",
+                    )
+                    update_cols = st.columns([0.22, 0.26, 0.32, 0.2])
+                    if update_cols[0].button("Update Route List", key=f"pmt_map_update_route_list_{selected_run}_{selected_employee}_{route_month}"):
+                        edited_ids = edited_route.loc[~edited_route["Remove"].astype(bool), "store_id"].dropna().astype(int).tolist()
+                        edited_stops = edited_route.loc[~edited_route["Remove"].astype(bool), ["store_id", "Proposed Stop"]].copy()
+                        stop_lookup = dict(zip(edited_stops["store_id"].astype(int), pd.to_numeric(edited_stops["Proposed Stop"], errors="coerce").fillna(9999).astype(int)))
+                        updated_route = route_df[pd.to_numeric(route_df["store_id"], errors="coerce").fillna(-1).astype(int).isin(edited_ids)].copy()
+                        updated_route["Proposed Stop"] = updated_route["store_id"].astype(int).map(stop_lookup)
+                        updated_route = updated_route.sort_values(["Proposed Stop", "store_number"]).reset_index(drop=True)
+                        updated_route["Proposed Stop"] = range(1, len(updated_route) + 1)
+                        updated_route["Proposed Date"] = route_date
+                        updated_route["Proposed Month"] = month_label(route_month)
+                        st.session_state[route_state_key] = updated_route.drop(columns=["Remove"], errors="ignore").to_dict("records")
+                        st.rerun()
+                    route_note = update_cols[1].text_input(
+                        "Apply note",
+                        value="Manual map route builder schedule update.",
+                        key=f"pmt_map_route_note_{selected_run}_{selected_employee}_{route_month}",
+                    )
+                    apply_confirm = update_cols[2].checkbox(
+                        "I reviewed this map-built route and want to apply it.",
+                        key=f"pmt_map_route_apply_confirm_{selected_run}_{selected_employee}_{route_month}",
+                    )
+                    if update_cols[3].button(
+                        "Apply Map Route",
+                        type="primary",
+                        disabled=not apply_confirm,
+                        key=f"pmt_map_route_apply_{selected_run}_{selected_employee}_{route_month}",
+                    ):
+                        apply_df = route_df.drop(columns=["Remove"], errors="ignore").copy()
+                        apply_df["Proposed Date"] = route_date
+                        apply_df["Proposed Month"] = month_label(route_month)
+                        apply_df["technician"] = selected_tech_name
+                        apply_df = apply_df.sort_values(["Proposed Stop", "store_number"]).reset_index(drop=True)
+                        apply_df["Proposed Stop"] = range(1, len(apply_df) + 1)
+                        result = apply_pmt_manage_build_preview(selected_run, selected_employee, apply_df.to_dict("records"), route_note)
+                        st.success(
+                            f"Applied map route: saved {result['saved']} store(s), created {result['created']}, updated {result['updated']}, "
+                            f"superseded/transferred {result['superseded']}, resequenced {result['resequenced_rows']} row(s)."
+                        )
+                        st.session_state.pop(route_state_key, None)
+                        st.session_state.pop(f"{route_state_key}_last_click", None)
+                        st.rerun()
 
             with build_tab:
                 st.markdown("**Scheduling Method**")
