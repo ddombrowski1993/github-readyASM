@@ -973,6 +973,56 @@ def pmt_route_map_png(group, title, width=900, height=520):
         buffer.seek(0)
         return buffer
 
+    try:
+        from staticmap import CircleMarker, Line, StaticMap
+        osm_map = StaticMap(width, height, url_template="https://a.tile.openstreetmap.org/{z}/{x}/{y}.png")
+        route_coords = [(lon, lat) for lat, lon, _, _ in points]
+        if home_lat is not None and home_lon is not None and route_coords:
+            osm_map.add_line(Line([(home_lon, home_lat), route_coords[0]], "#64748b", 2))
+        if len(route_coords) > 1:
+            osm_map.add_line(Line(route_coords, "#2563eb", 4))
+        if home_lat is not None and home_lon is not None:
+            osm_map.add_marker(CircleMarker((home_lon, home_lat), "#111827", 11))
+        for lat, lon, _, _ in points:
+            osm_map.add_marker(CircleMarker((lon, lat), "#ef4444", 9))
+        image = osm_map.render()
+        draw = ImageDraw.Draw(image)
+        draw.rectangle([(0, 0), (width, 44)], fill="#1f2937")
+        draw.text((18, 15), title, fill="white", font=title_font)
+
+        min_lat = min(lat for lat, _ in all_coords)
+        max_lat = max(lat for lat, _ in all_coords)
+        min_lon = min(lon for _, lon in all_coords)
+        max_lon = max(lon for _, lon in all_coords)
+        lat_pad = max((max_lat - min_lat) * 0.15, 0.03)
+        lon_pad = max((max_lon - min_lon) * 0.15, 0.03)
+        min_lat -= lat_pad
+        max_lat += lat_pad
+        min_lon -= lon_pad
+        max_lon += lon_pad
+        left, top, right, bottom = 0, 0, width, height
+
+        def project_tile(lat, lon):
+            x = left + (lon - min_lon) / (max_lon - min_lon) * (right - left)
+            y = bottom - (lat - min_lat) / (max_lat - min_lat) * (bottom - top)
+            return int(x), int(y)
+
+        if home_lat is not None and home_lon is not None:
+            hx, hy = project_tile(home_lat, home_lon)
+            draw.text((hx + 12, hy - 6), "Home", fill="#111827", font=label_font)
+        for lat, lon, stop, store_number in points:
+            x, y = project_tile(lat, lon)
+            label = str(stop or "")
+            draw.ellipse([(x - 10, y - 10), (x + 10, y + 10)], fill="#ef4444", outline="white", width=2)
+            draw.text((x - 4, y - 5), label, fill="white", font=label_font)
+            draw.text((x + 12, y - 6), store_number, fill="#0f172a", font=label_font)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        return buffer
+    except Exception:
+        pass
+
     min_lat = min(lat for lat, _ in all_coords)
     max_lat = max(lat for lat, _ in all_coords)
     min_lon = min(lon for _, lon in all_coords)
@@ -2161,7 +2211,7 @@ def render_reconciliation_color_legend():
     st.markdown(f"<div style='line-height:1.6'>{items}</div>", unsafe_allow_html=True)
 
 
-def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
+def build_pmt_reconciliation_compare_preview(scan, selected_item_ids, monthly_target_override=None):
     selected_ids = {int(value) for value in selected_item_ids if pd.notna(value)}
     base = scan.get("future_items", pd.DataFrame()).copy()
     conflicts = scan.get("conflicts", pd.DataFrame()).copy()
@@ -2228,7 +2278,7 @@ def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
             monthly_targets = target_rows.set_index("employee_id")["monthly_target"].fillna(10).astype(int).to_dict()
 
     for employee_id, start_month_value in receiving_rebalances.items():
-        monthly_target = max(1, int(monthly_targets.get(employee_id, 10) or 10))
+        monthly_target = max(1, int(monthly_target_override or monthly_targets.get(employee_id, 10) or 10))
         mask = (
             base["new_employee_id"].notna()
             & (base["new_employee_id"].astype("Int64") == int(employee_id))
@@ -2660,16 +2710,17 @@ def create_pmt_reconciliation_snapshots(session, selected_ids, reason=""):
     return snapshots_created
 
 
-def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason=""):
+def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason="", monthly_target=10):
     selected_ids = [int(value) for value in schedule_item_ids if pd.notna(value)]
     if not selected_ids:
         return {"transferred": 0, "superseded": 0, "resequenced_rows": 0, "snapshots_created": 0}
     transferred = 0
     superseded = 0
     resequenced_rows = 0
-    rebalanced_rows = 0
+    rebuilt_rows = 0
+    rebuild_overflow = 0
     touched_months = set()
-    receiving_rebalances = {}
+    affected_rebuilds = {}
     with session_scope("PMT schedule reconciliation transfer") as session:
         snapshots_created = create_pmt_reconciliation_snapshots(session, selected_ids, reason)
         team_cache = {}
@@ -2731,16 +2782,19 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
             touched_months.add((old_employee_id, old_month_value, item.pmt_schedule_run_id))
             touched_months.add((assigned_employee_id, month_start(target_schedule_date), item.pmt_schedule_run_id))
             rebalance_start = max(month_start(target_schedule_date), month_start(effective_date))
-            rebalance_key = (assigned_employee_id, item.pmt_schedule_run_id)
-            receiving_rebalances[rebalance_key] = min(receiving_rebalances.get(rebalance_key, rebalance_start), rebalance_start)
+            for affected_employee_id in [old_employee_id, assigned_employee_id]:
+                rebuild_key = (int(affected_employee_id), item.pmt_schedule_run_id)
+                affected_rebuilds[rebuild_key] = min(affected_rebuilds.get(rebuild_key, rebalance_start), rebalance_start)
         for employee_id, month_value, run_id in touched_months:
-            if (int(employee_id), run_id) not in receiving_rebalances:
+            if (int(employee_id), run_id) not in affected_rebuilds:
                 resequenced_rows += resequence_pmt_month(session, run_id, employee_id, month_value)
-        for (employee_id, run_id), start_month_value in receiving_rebalances.items():
-            result = rebalance_pmt_employee_future_schedule(session, run_id, employee_id, start_month_value, reason)
-            rebalanced_rows += int(result.get("items", 0))
-    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced; {rebalanced_rows} receiving-tech rows rebalanced; {snapshots_created} snapshot run(s) created. Effective {effective_date}. {reason}")
-    return {"transferred": transferred, "superseded": superseded, "resequenced_rows": resequenced_rows, "rebalanced_rows": rebalanced_rows, "snapshots_created": snapshots_created}
+        for (employee_id, run_id), start_month_value in affected_rebuilds.items():
+            result = rebuild_pmt_employee_from_current_assignments(session, run_id, employee_id, start_month_value, monthly_target, reason)
+            rebuilt_rows += int(result.get("scheduled", 0))
+            rebuild_overflow += int(result.get("overflow", 0))
+            superseded += int(result.get("superseded", 0))
+    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced; {rebuilt_rows} assignment-source rows rebuilt; {rebuild_overflow} overflow; {snapshots_created} snapshot run(s) created. Effective {effective_date}. {reason}")
+    return {"transferred": transferred, "superseded": superseded, "resequenced_rows": resequenced_rows, "rebuilt_rows": rebuilt_rows, "rebuild_overflow": rebuild_overflow, "snapshots_created": snapshots_created}
 
 
 def resequence_pmt_month(session, run_id, employee_id, month_start_value):
@@ -2860,6 +2914,257 @@ def rebalance_pmt_employee_future_schedule(session, run_id, employee_id, start_m
         touched_months.add(cursor_month)
         sequence_number += 1
     return {"items": len(items), "months": len(touched_months)}
+
+
+def rebuild_pmt_employee_from_current_assignments(session, run_id, employee_id, start_month_value, monthly_target=10, reason=""):
+    run = session.get(PMTScheduleRun, int(run_id)) if run_id is not None else None
+    employee = session.get(Employee, int(employee_id)) if employee_id is not None else None
+    if run is None or employee is None:
+        return {"assigned": 0, "scheduled": 0, "overflow": 0, "created": 0, "updated": 0, "superseded": 0}
+    start_value = month_start(start_month_value)
+    if run.cycle_start:
+        start_value = max(start_value, month_start(run.cycle_start))
+    cycle_end = run.cycle_end or add_months(start_value, 6) - timedelta(days=1)
+    if start_value > cycle_end:
+        return {"assigned": 0, "scheduled": 0, "overflow": 0, "created": 0, "updated": 0, "superseded": 0}
+    schedule_id = session.scalar(
+        select(ScheduleItem.schedule_id)
+        .where(ScheduleItem.pmt_schedule_run_id == int(run_id))
+        .order_by(ScheduleItem.schedule_id)
+    )
+    if schedule_id is None:
+        return {"assigned": 0, "scheduled": 0, "overflow": 0, "created": 0, "updated": 0, "superseded": 0}
+    stores = session.execute(
+        select(Store)
+        .where(
+            Store.active == True,  # noqa: E712
+            Store.assigned_pmt_employee_id == int(employee_id),
+        )
+        .order_by(Store.store_number)
+    ).scalars().all()
+    assigned_count = len(stores)
+    monthly_target = max(1, int(monthly_target or getattr(employee, "monthly_pmt_store_target", None) or run.default_monthly_target or 10))
+    months_available = 1
+    cursor = start_value
+    while add_months(cursor, 1) <= month_start(cycle_end):
+        months_available += 1
+        cursor = add_months(cursor, 1)
+    capacity = monthly_target * months_available
+    schedule_history, backlog_history = pmt_store_history()
+    assignment_rows = []
+    home_lat = to_float(getattr(employee, "home_latitude", None))
+    home_lon = to_float(getattr(employee, "home_longitude", None))
+    for store in stores:
+        distance = None
+        if home_lat is not None and home_lon is not None and store.latitude is not None and store.longitude is not None:
+            distance = haversine_miles(home_lat, home_lon, float(store.latitude), float(store.longitude))
+        assignment_rows.append(
+            {
+                "employee_id": int(employee_id),
+                "technician_name": employee.full_name,
+                "store_id": int(store.id),
+                "store_number": clean(store.store_number),
+                "store_address": clean(store.address),
+                "store_city": clean(store.city),
+                "store_state": clean(store.state),
+                "store_zip": clean(store.zip),
+                "latitude": store.latitude,
+                "longitude": store.longitude,
+                "home_latitude": home_lat,
+                "home_longitude": home_lon,
+                "distance_from_home": distance,
+            }
+        )
+    assignments = pd.DataFrame(assignment_rows)
+    if assignments.empty:
+        active_employee_items = session.scalars(
+            select(ScheduleItem).where(
+                ScheduleItem.pmt_schedule_run_id == int(run_id),
+                ScheduleItem.employee_id == int(employee_id),
+                func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
+                func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+                ScheduleItem.schedule_date >= start_value,
+                ScheduleItem.schedule_date <= cycle_end,
+            )
+        ).all()
+        for item in active_employee_items:
+            if item.original_schedule_date is None:
+                item.original_schedule_date = item.schedule_date
+            item.status = "Transferred"
+            item.schedule_source = "PMT Reconciliation Superseded - No Current Assignment"
+        return {"assigned": 0, "scheduled": 0, "overflow": 0, "created": 0, "updated": 0, "superseded": len(active_employee_items)}
+    schedulable = assignments.dropna(subset=["distance_from_home"]).copy()
+    unschedulable = assignments[assignments["distance_from_home"].isna()].copy()
+    prioritized = apply_pmt_rotation_priority(schedulable, schedule_history, backlog_history, start_value) if not schedulable.empty else pd.DataFrame()
+    sort_columns = ["rotation_priority_group", "distance_from_home", "store_number"]
+    scheduled = prioritized.sort_values(sort_columns, ascending=[True, True, True]).head(capacity).copy() if not prioritized.empty else pd.DataFrame()
+    overflow = prioritized.drop(index=scheduled.index, errors="ignore").copy() if not prioritized.empty else pd.DataFrame()
+    if not unschedulable.empty:
+        overflow = pd.concat([overflow, unschedulable], ignore_index=True)
+    scheduled_store_ids = set(scheduled["store_id"].dropna().astype(int).tolist()) if not scheduled.empty else set()
+    assigned_store_ids = set(assignments["store_id"].dropna().astype(int).tolist())
+    impacted_items = session.scalars(
+        select(ScheduleItem).where(
+            ScheduleItem.pmt_schedule_run_id == int(run_id),
+            func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
+            func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+            ScheduleItem.schedule_date >= start_value,
+            ScheduleItem.schedule_date <= cycle_end,
+        )
+    ).all()
+    active_by_store = {}
+    active_employee_items = []
+    for item in impacted_items:
+        if item.employee_id == int(employee_id):
+            active_employee_items.append(item)
+        if item.store_id in assigned_store_ids:
+            active_by_store.setdefault(int(item.store_id), []).append(item)
+    created = 0
+    updated = 0
+    superseded = 0
+    superseded_item_ids = set()
+    now = datetime.utcnow()
+    team = pmt_team_for_employee(session, employee)
+    current_month = start_value
+    sequence_number = 1
+    if not scheduled.empty:
+        remaining = scheduled.copy()
+        for month_index in range(months_available):
+            if remaining.empty:
+                break
+            current_month = add_months(start_value, month_index)
+            month_pool = remaining.sort_values(sort_columns, ascending=[True, True, True]).head(monthly_target).copy()
+            routed_rows = home_distance_route(month_pool, home_lat, home_lon, limit=monthly_target) if home_lat is not None and home_lon is not None else [
+                row.copy() for _, row in month_pool.sort_values(["distance_from_home", "store_number"], na_position="last").iterrows()
+            ]
+            remaining = remaining.drop(index=[row.name for row in routed_rows], errors="ignore")
+            for sequence_number, row in enumerate(routed_rows, start=1):
+                store_id = int(row["store_id"])
+                existing_rows = active_by_store.get(store_id, [])
+                target_rows = [item for item in existing_rows if item.employee_id == int(employee_id)]
+                keep_item = target_rows[0] if target_rows else existing_rows[0] if existing_rows else None
+                schedule_date = first_workday(current_month, employee_id=int(employee_id))
+                if clean(run.schedule_mode) == "Monthly schedule with daily stops":
+                    schedule_date = first_workday(current_month + timedelta(days=(sequence_number - 1)), employee_id=int(employee_id))
+                if keep_item is None:
+                    keep_item = ScheduleItem(
+                        schedule_id=int(schedule_id),
+                        schedule_date=schedule_date,
+                        sequence_number=int(sequence_number),
+                        store_id=store_id,
+                        employee_id=int(employee_id),
+                        team_id=int(team.id) if team else None,
+                        work_type="PMT",
+                        status="Scheduled",
+                        schedule_source="PMT Assignment Reconciliation Rebuild",
+                        pmt_schedule_run_id=int(run_id),
+                        cycle_label=month_label(current_month),
+                        completion_notes=clean(reason),
+                        created_at=now,
+                    )
+                    session.add(keep_item)
+                    session.flush()
+                    created += 1
+                else:
+                    if keep_item.original_schedule_date is None and keep_item.schedule_date != schedule_date:
+                        keep_item.original_schedule_date = keep_item.schedule_date
+                    keep_item.employee_id = int(employee_id)
+                    keep_item.team_id = int(team.id) if team else None
+                    keep_item.schedule_date = schedule_date
+                    keep_item.sequence_number = int(sequence_number)
+                    keep_item.status = "Scheduled"
+                    keep_item.schedule_source = "PMT Assignment Reconciliation Rebuild"
+                    keep_item.cycle_label = month_label(current_month)
+                    keep_item.completion_notes = " | ".join([part for part in [clean(keep_item.completion_notes), clean(reason)] if part])
+                    updated += 1
+                for item in existing_rows:
+                    if item.id == keep_item.id:
+                        continue
+                    if item.original_schedule_date is None:
+                        item.original_schedule_date = item.schedule_date
+                    item.status = "Transferred"
+                    item.schedule_source = "PMT Assignment Reconciliation Rebuild Superseded"
+                    item.completion_notes = " | ".join([part for part in [clean(item.completion_notes), f"Superseded by rebuilt schedule item #{keep_item.id}.", clean(reason)] if part])
+                    superseded_item_ids.add(int(item.id))
+                    superseded += 1
+    for store_id, existing_rows in active_by_store.items():
+        if store_id in scheduled_store_ids:
+            continue
+        for item in existing_rows:
+            if int(item.id) in superseded_item_ids:
+                continue
+            if item.original_schedule_date is None:
+                item.original_schedule_date = item.schedule_date
+            item.status = "Transferred"
+            item.schedule_source = "PMT Assignment Reconciliation Rebuild Overflow Removed"
+            item.completion_notes = " | ".join([part for part in [clean(item.completion_notes), "Removed from active future schedule because this current assignment did not fit the rebuild capacity.", clean(reason)] if part])
+            superseded_item_ids.add(int(item.id))
+            superseded += 1
+    for item in active_employee_items:
+        if item.store_id in scheduled_store_ids:
+            continue
+        if int(item.id) in superseded_item_ids:
+            continue
+        if item.original_schedule_date is None:
+            item.original_schedule_date = item.schedule_date
+        item.status = "Transferred"
+        item.schedule_source = "PMT Assignment Reconciliation Rebuild Removed"
+        item.completion_notes = " | ".join([part for part in [clean(item.completion_notes), "Removed from active future schedule because the PMT rebuild uses current assignments and monthly capacity.", clean(reason)] if part])
+        superseded_item_ids.add(int(item.id))
+        superseded += 1
+    overflow_count = 0
+    if not overflow.empty:
+        for _, row in overflow.iterrows():
+            store_id = scalar_int(row.get("store_id"), 0)
+            if not store_id:
+                continue
+            existing = session.query(PMTScheduleBacklog).filter(
+                PMTScheduleBacklog.pmt_schedule_run_id == int(run_id),
+                PMTScheduleBacklog.employee_id == int(employee_id),
+                PMTScheduleBacklog.store_id == store_id,
+                PMTScheduleBacklog.status == "Not Scheduled",
+            ).first()
+            backlog = existing or PMTScheduleBacklog(
+                pmt_schedule_run_id=int(run_id),
+                employee_id=int(employee_id),
+                store_id=store_id,
+                cycle_start=start_value,
+                cycle_end=cycle_end,
+            )
+            if not existing:
+                session.add(backlog)
+            backlog.status = "Not Scheduled"
+            backlog.reason = "Did not fit PMT reconciliation rebuild capacity or missing coordinates"
+            backlog.cycles_missed = max(int(getattr(backlog, "cycles_missed", 0) or 0), scalar_int(row.get("cycles_missed"), 1))
+            backlog.priority_score = max(int(getattr(backlog, "priority_score", 0) or 0), scalar_int(row.get("rotation_priority_score"), 1000))
+            backlog.last_scheduled_month = scalar_date(row.get("last_scheduled_month"))
+            backlog.last_completed_date = scalar_date(row.get("last_completed_date"))
+            backlog.last_completed_month = month_start(backlog.last_completed_date) if backlog.last_completed_date else None
+            backlog.notes = f"PMT reconciliation rebuild run {run_id}: {backlog.reason}"
+            overflow_count += 1
+    run.store_count = int(session.scalar(
+        select(func.count(func.distinct(ScheduleItem.store_id))).where(
+            ScheduleItem.pmt_schedule_run_id == int(run_id),
+            ScheduleItem.work_type == "PMT",
+            ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+        )
+    ) or 0)
+    run.unscheduled_count = int(session.scalar(
+        select(func.count(PMTScheduleBacklog.id)).where(
+            PMTScheduleBacklog.pmt_schedule_run_id == int(run_id),
+            PMTScheduleBacklog.status.in_(PMT_BACKLOG_OPEN_STATUSES),
+        )
+    ) or 0)
+    return {
+        "assigned": assigned_count,
+        "scheduled": len(scheduled_store_ids),
+        "overflow": overflow_count,
+        "created": created,
+        "updated": updated,
+        "superseded": superseded,
+        "monthly_target": monthly_target,
+        "months_available": months_available,
+    }
 
 
 def resolve_pmt_conflicts_keep_assigned(run_id, store_ids, notes=""):
@@ -5487,6 +5792,15 @@ with tab_reconcile:
         value="Territory realignment after PMT assignment changes",
         key="pmt_reconciliation_reason",
     )
+    reconciliation_monthly_target = st.number_input(
+        "Monthly PMT store target for rebuilt affected schedules",
+        min_value=1,
+        max_value=50,
+        value=10,
+        step=1,
+        help="Used when reconciliation rebuilds affected PMTs from current Areas and Maps assignments. Example: Anthony has 33 stores and target 10 means 10/10/10/3 if four months are available.",
+        key="pmt_reconciliation_monthly_target",
+    )
     scan_controls = st.columns([0.34, 0.33, 0.33])
     ignore_effective_date = scan_controls[0].checkbox(
         "Ignore effective date and scan all unfinished PMT items",
@@ -5614,17 +5928,18 @@ with tab_reconcile:
                     "schedule_item_id",
                 ].dropna().astype(int).tolist()
                 st.caption(f"Selected unfinished schedule rows to transfer and resequence: {len(selected_item_ids)}")
-                compare_preview = build_pmt_reconciliation_compare_preview(scan, selected_item_ids)
+                compare_preview = build_pmt_reconciliation_compare_preview(scan, selected_item_ids, reconciliation_monthly_target)
                 confirm_reconciliation = st.checkbox(
                     "I reviewed the PMT assignment conflicts and confirm I am ready to transfer the checked unfinished schedule rows.",
                     key="pmt_reconciliation_confirm_apply",
                 )
                 if st.button("Apply Selected Reconciliation Transfers", type="primary", disabled=not selected_item_ids or not confirm_reconciliation, key="pmt_reconciliation_apply_transfers"):
-                    result = apply_pmt_reconciliation_transfers(selected_item_ids, reconciliation_effective_date, reconciliation_reason)
+                    result = apply_pmt_reconciliation_transfers(selected_item_ids, reconciliation_effective_date, reconciliation_reason, reconciliation_monthly_target)
                     st.success(
                         f"Reconciliation applied. Transferred {result['transferred']} row(s); "
                         f"superseded {result['superseded']} duplicate row(s); resequenced {result.get('resequenced_rows', 0)} source route row(s); "
-                        f"rebalanced {result.get('rebalanced_rows', 0)} receiving-PMT future row(s); "
+                        f"rebuilt {result.get('rebuilt_rows', 0)} row(s) from current assignments; "
+                        f"{result.get('rebuild_overflow', 0)} store(s) went to Not Scheduled/overflow; "
                         f"created {result.get('snapshots_created', 0)} old-schedule snapshot run(s)."
                     )
                     st.rerun()
@@ -6206,10 +6521,10 @@ with tab_manage:
                 if rec["scheduled_no_longer_assigned_count"]:
                     explanation += f" {rec['scheduled_no_longer_assigned_count']} store(s) remain scheduled under {selected_tech_name} but are no longer assigned to this PMT."
                 st.info(explanation)
-                with st.expander("Rebalance This PMT's Future Schedule", expanded=False):
+                with st.expander("Rebuild This PMT From Current Assignments", expanded=False):
                     st.caption(
-                        "Use this to repair an already-applied reconciliation where the receiving PMT's stores landed unevenly across months. "
-                        "Only this selected PMT's active unfinished rows are changed; completed rows and other PMTs stay untouched."
+                        "Use this to repair an already-applied reconciliation where the receiving PMT only got a few transferred rows. "
+                        "This rebuilds this selected PMT from every store currently assigned in Areas and Maps. Completed rows and other PMTs stay untouched."
                     )
                     rebalance_month_options = manage_month_options(run_items)
                     rebalance_default = month_start(date.today())
@@ -6230,30 +6545,40 @@ with tab_manage:
                         rebalance_start_month = month_start(date.today())
                     rebalance_reason = repair_cols[1].text_input(
                         "Reason",
-                        value="Repair receiving PMT schedule balance after territory reconciliation.",
+                        value="Repair receiving PMT schedule from current assignment list after territory reconciliation.",
                         key=f"pmt_manage_rebalance_reason_{selected_run}_{selected_employee}",
                     )
                     confirm_rebalance = repair_cols[2].checkbox(
                         "Confirm",
                         key=f"pmt_manage_rebalance_confirm_{selected_run}_{selected_employee}",
                     )
+                    rebuild_monthly_target = st.number_input(
+                        "Monthly store target for this rebuild",
+                        min_value=1,
+                        max_value=50,
+                        value=10,
+                        step=1,
+                        key=f"pmt_manage_rebuild_monthly_target_{selected_run}_{selected_employee}",
+                    )
                     if st.button(
-                        "Rebalance Selected PMT From Start Month Forward",
+                        "Rebuild Selected PMT From Current Assignments",
                         type="secondary",
                         disabled=not confirm_rebalance,
                         key=f"pmt_manage_rebalance_button_{selected_run}_{selected_employee}",
                     ):
                         with session_scope("PMT selected technician future rebalance") as session:
-                            result = rebalance_pmt_employee_future_schedule(
+                            result = rebuild_pmt_employee_from_current_assignments(
                                 session,
                                 selected_run,
                                 selected_employee,
                                 rebalance_start_month,
+                                rebuild_monthly_target,
                                 rebalance_reason,
                             )
                         st.success(
-                            f"Rebalanced {result.get('items', 0)} active unfinished row(s) for {selected_tech_name} "
-                            f"from {month_label(month_start(rebalance_start_month))} forward."
+                            f"Rebuilt {result.get('scheduled', 0)} of {result.get('assigned', 0)} current assigned store(s) for {selected_tech_name} "
+                            f"from {month_label(month_start(rebalance_start_month))} forward at {result.get('monthly_target', rebuild_monthly_target)} per month. "
+                            f"Overflow/not scheduled: {result.get('overflow', 0)}."
                         )
                         st.rerun()
                 if rec["completed_count"]:
