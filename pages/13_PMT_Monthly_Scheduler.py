@@ -1084,6 +1084,11 @@ def render_pmt_export_controls(export_draft, key_prefix):
         st.info("Generate a PMT draft or select a published PMT schedule run, then the export buttons will appear here.")
         return
     st.subheader("PMT Schedule Exports")
+    export_tech_count = int(export_draft["technician"].dropna().nunique()) if "technician" in export_draft.columns else 0
+    st.caption(f"Export source contains {len(export_draft)} schedule row(s) for {export_tech_count} technician(s).")
+    if export_tech_count == 1:
+        only_tech = clean(export_draft["technician"].dropna().iloc[0]) if "technician" in export_draft.columns and not export_draft["technician"].dropna().empty else "the selected technician"
+        st.warning(f"This selected export source only contains {only_tech}. Choose a full-team schedule run if you need every PMT.")
     route_filter = st.radio(
         "Route export option",
         ROUTE_EXPORT_OPTIONS,
@@ -1134,7 +1139,7 @@ def published_pmt_run_export_draft(run_id):
         left join stores s on s.id = si.store_id
         where si.pmt_schedule_run_id = :run_id
           and si.work_type = 'PMT'
-          and si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
+          and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('cancelled','canceled','skipped','deleted','transferred','superseded','archived')
           and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
           and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
         order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
@@ -6315,7 +6320,10 @@ with tab_export:
     export_source_options = []
     if not latest_export_draft.empty:
         export_source_options.append("Current Draft Schedule")
-    if not _export_runs.empty:
+    normal_export_runs = _export_runs[
+        ~_export_runs["status"].fillna("").astype(str).str.lower().str.strip().isin(["deleted", "snapshot"])
+    ].copy() if not _export_runs.empty else pd.DataFrame()
+    if not normal_export_runs.empty:
         export_source_options.append("Published PMT Schedule Run")
 
     if not export_source_options:
@@ -6332,14 +6340,14 @@ with tab_export:
         if export_source == "Current Draft Schedule":
             render_pmt_export_controls(latest_export_draft, "pmt_bottom_export_draft")
         else:
-            run_options = _export_runs["id"].tolist()
+            run_options = normal_export_runs["id"].tolist()
             selected_export_run = st.selectbox(
                 "Published PMT schedule run",
                 run_options,
-                format_func=lambda value: f"#{value} - {_export_runs.set_index('id').loc[value, 'run_name']}",
+                format_func=lambda value: f"#{value} - {normal_export_runs.set_index('id').loc[value, 'run_name']}",
                 key="pmt_bottom_export_run",
             )
-            export_run_row = _export_runs.set_index("id").loc[selected_export_run]
+            export_run_row = normal_export_runs.set_index("id").loc[selected_export_run]
             export_raw_items = pmt_manage_run_items(selected_export_run)
             export_cycle_start = scalar_date(export_run_row.get("cycle_start"))
             export_cycle_end = scalar_date(export_run_row.get("cycle_end"))
