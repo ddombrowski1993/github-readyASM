@@ -4543,9 +4543,10 @@ def pmt_publish_conflicts(preview, start_month, months):
 
 
 
-tab_build, tab_carryover, tab_reconcile, tab_manage, tab_export = st.tabs([
+tab_build, tab_carryover, tab_fix, tab_reconcile, tab_manage, tab_export = st.tabs([
     "📋  Build Schedule",
     "📊  Carryover & Backlog",
+    "🛠️  Fix Schedule",
     "🔁  Reconciliation",
     "⚙️  Manage Schedule",
     "📥  Export",
@@ -5750,6 +5751,173 @@ with tab_carryover:
             st.success(f"Updated {updated} PMT carryover/backlog record(s).")
             st.rerun()
         export_carryover.download_button("Export PMT Carryover / Not Scheduled", data=excel_bytes(pmt_carryover), file_name="pmt_carryover_not_scheduled.xlsx")
+
+
+with tab_fix:
+    section_header(
+        "Schedule Repair Assistant",
+        "Use this when a PMT schedule looks wrong and you are not sure whether to use Reconciliation, Manage Schedule, or Export.",
+        "orange",
+    )
+    st.info(
+        "Most schedule problems fall into two buckets: territory changes that have not been reconciled yet, or one PMT's schedule needing rebuilt from current Areas and Maps assignments."
+    )
+    repair_runs = safe_query(
+        """
+        select r.id, r.run_name, r.created_at, r.cycle_start, r.cycle_end, r.months, r.technician_count,
+               r.store_count, r.unscheduled_count, r.status
+        from pmt_schedule_runs r
+        where coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot')
+        order by r.created_at desc, r.id desc
+        """,
+        use_cache=False,
+    )
+    if repair_runs.empty:
+        st.warning("No published or imported PMT schedule runs are available to repair.")
+    else:
+        problem_options = [
+            "A PMT has too few stores or uneven months",
+            "Territories changed and schedules do not match assignments",
+            "A store is on the wrong PMT or duplicated",
+            "I just need the corrected Excel/PDF export",
+        ]
+        problem_choice = st.radio("What looks wrong?", problem_options, key="pmt_fix_problem_choice")
+        repair_cols = st.columns([0.5, 0.5])
+        repair_run_id = repair_cols[0].selectbox(
+            "Schedule run to fix",
+            repair_runs["id"].tolist(),
+            format_func=lambda value: f"#{value} - {repair_runs.set_index('id').loc[value, 'run_name']}",
+            key="pmt_fix_run",
+        )
+        repair_run_row = repair_runs.set_index("id").loc[repair_run_id]
+        repair_run_items = pmt_manage_run_items(repair_run_id)
+        repair_cycle_start = scalar_date(repair_run_row.get("cycle_start"))
+        repair_cycle_end = scalar_date(repair_run_row.get("cycle_end"))
+        repair_run_items, repair_outside_items = split_run_items_by_period(repair_run_items, repair_cycle_start, repair_cycle_end)
+        repair_tech_options = (
+            repair_run_items[["employee_id", "technician"]].dropna(subset=["employee_id"]).drop_duplicates()
+            if not repair_run_items.empty and {"employee_id", "technician"}.issubset(repair_run_items.columns)
+            else pd.DataFrame(columns=["employee_id", "technician"])
+        )
+        all_repair_pmts = active_pmt_employee_summary()[["employee_id", "technician_name"]].rename(columns={"technician_name": "technician"})
+        repair_tech_options = pd.concat([repair_tech_options, all_repair_pmts], ignore_index=True).dropna(subset=["employee_id"]).drop_duplicates("employee_id").sort_values("technician")
+        if repair_tech_options.empty:
+            st.warning("No active PMT technicians are available.")
+        else:
+            repair_employee_id = repair_cols[1].selectbox(
+                "PMT to check/fix",
+                repair_tech_options["employee_id"].astype(int).tolist(),
+                format_func=lambda value: repair_tech_options.set_index("employee_id").loc[value, "technician"],
+                key="pmt_fix_employee",
+            )
+            repair_tech_name = repair_tech_options.set_index("employee_id").loc[repair_employee_id, "technician"]
+            repair_rec = technician_schedule_reconciliation(repair_run_items, repair_employee_id, "All months")
+            assigned_count = int(repair_rec.get("assigned_count", 0))
+            active_count = int(repair_rec.get("active_count", 0))
+            completed_count = int(repair_rec.get("completed_count", 0))
+            missing_count = int(repair_rec.get("assigned_not_scheduled_count", 0))
+            wrong_count = int(repair_rec.get("scheduled_no_longer_assigned_count", 0))
+            elsewhere_count = int(repair_rec.get("assigned_scheduled_elsewhere_count", 0))
+            metric_cols = st.columns(6)
+            metric_cols[0].metric("Assigned Now", assigned_count)
+            metric_cols[1].metric("Active Scheduled", active_count)
+            metric_cols[2].metric("Completed", completed_count)
+            metric_cols[3].metric("Missing From Schedule", missing_count)
+            metric_cols[4].metric("Scheduled Not Assigned", wrong_count)
+            metric_cols[5].metric("Assigned Elsewhere", elsewhere_count)
+
+            if problem_choice == "I just need the corrected Excel/PDF export":
+                st.success("Go to the Export tab after repairs are complete. Use Published PMT Schedule Run, then download Full Team Excel or PDF.")
+                st.caption("If the count above still looks wrong, repair the schedule before exporting.")
+            elif problem_choice == "Territories changed and schedules do not match assignments":
+                st.warning(
+                    "Use Reconciliation when assignments just changed and old schedule rows are still under the wrong PMTs. "
+                    "Set the effective date, set monthly target, run the scan, select the conflict rows, and apply."
+                )
+                st.markdown(
+                    """
+                    **Quick rule**
+
+                    Use `Reconciliation` when stores moved between PMTs and you need old PMT rows superseded and affected PMTs rebuilt.
+
+                    Use the rebuild box below when reconciliation was already applied but one PMT, like Anthony, still has too few stores.
+                    """
+                )
+            elif problem_choice == "A store is on the wrong PMT or duplicated":
+                repair_conflicts = pmt_schedule_conflicts(repair_run_items)
+                if repair_conflicts.empty:
+                    st.success("No duplicate or wrong-PMT active rows were found in this schedule run.")
+                else:
+                    st.error(f"{distinct_store_count(repair_conflicts)} store conflict(s) were found. Open Manage Schedule -> Review and Resolve Schedule Conflicts for this run.")
+                    st.dataframe(
+                        repair_conflicts[["store_number", "assigned_technician", "technician", "month", "schedule_date", "status", "conflict_type"]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            if problem_choice in [
+                "A PMT has too few stores or uneven months",
+                "Territories changed and schedules do not match assignments",
+            ]:
+                st.markdown("**Direct Fix: Rebuild This PMT From Current Assignments**")
+                st.caption(
+                    "This is the Anthony-type fix. It pulls every store currently assigned to this PMT in Areas and Maps, schedules up to the monthly target, "
+                    "and puts overflow into Not Scheduled. Completed rows and other PMTs are not changed."
+                )
+                start_options = manage_month_options(repair_run_items)
+                default_start = month_start(date.today())
+                if default_start not in start_options:
+                    start_options.append(default_start)
+                    start_options = ["All months"] + sorted([value for value in start_options if value != "All months"])
+                rebuild_cols = st.columns([0.28, 0.22, 0.34, 0.16])
+                fix_start_month = rebuild_cols[0].selectbox(
+                    "Start month",
+                    start_options,
+                    index=start_options.index(default_start) if default_start in start_options else 0,
+                    format_func=lambda value: value if value == "All months" else month_label(value),
+                    key="pmt_fix_rebuild_start_month",
+                )
+                if fix_start_month == "All months":
+                    fix_start_month = default_start
+                fix_monthly_target = rebuild_cols[1].number_input(
+                    "Monthly target",
+                    min_value=1,
+                    max_value=50,
+                    value=10,
+                    step=1,
+                    key="pmt_fix_rebuild_monthly_target",
+                )
+                fix_reason = rebuild_cols[2].text_input(
+                    "Reason",
+                    value="Repair PMT schedule from current Areas and Maps assignments.",
+                    key="pmt_fix_rebuild_reason",
+                )
+                fix_confirm = rebuild_cols[3].checkbox("Confirm", key="pmt_fix_rebuild_confirm")
+                expected_capacity = int(fix_monthly_target) * max(1, ((repair_cycle_end.year - fix_start_month.year) * 12 + repair_cycle_end.month - fix_start_month.month + 1) if repair_cycle_end else 6)
+                st.caption(
+                    f"Expected result for {repair_tech_name}: current assigned {assigned_count}; target {int(fix_monthly_target)} per month; "
+                    f"capacity from {month_label(month_start(fix_start_month))}: about {expected_capacity} store(s)."
+                )
+                if st.button(
+                    "Fix This PMT Schedule Now",
+                    type="primary",
+                    disabled=not fix_confirm,
+                    key="pmt_fix_rebuild_apply",
+                ):
+                    with session_scope("PMT repair assistant rebuild from assignments") as session:
+                        result = rebuild_pmt_employee_from_current_assignments(
+                            session,
+                            repair_run_id,
+                            repair_employee_id,
+                            fix_start_month,
+                            fix_monthly_target,
+                            fix_reason,
+                        )
+                    st.success(
+                        f"Rebuilt {result.get('scheduled', 0)} of {result.get('assigned', 0)} current assigned store(s) for {repair_tech_name}. "
+                        f"Overflow/not scheduled: {result.get('overflow', 0)}. Created {result.get('created', 0)}, updated {result.get('updated', 0)}, superseded {result.get('superseded', 0)}."
+                    )
+                    st.rerun()
 
 
 with tab_reconcile:
