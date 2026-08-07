@@ -13,6 +13,7 @@ st.set_page_config(page_title="PMT Monthly Scheduler", layout="wide")
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import Image as ReportLabImage
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import func, insert, select
 
@@ -921,6 +922,103 @@ def route_table_view(routes):
     )
 
 
+def route_map_source_for_export(draft, route_filter):
+    if draft.empty:
+        return draft
+    if route_filter in (HOME_ROUTE, NEXT_ROUTE):
+        return draft_with_route_order(draft.copy(), route_filter)
+    return draft_with_route_order(draft.copy(), HOME_ROUTE)
+
+
+def pmt_route_map_png(group, title, width=900, height=520):
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default()
+    label_font = ImageFont.load_default()
+    draw.rectangle([(0, 0), (width - 1, height - 1)], outline="#cbd5e1")
+    draw.rectangle([(0, 0), (width, 44)], fill="#1f2937")
+    draw.text((18, 15), title, fill="white", font=title_font)
+    if group.empty:
+        draw.text((30, 80), "No route rows available.", fill="#334155", font=label_font)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        return buffer
+
+    route = group.copy()
+    if "sequence_number" not in route.columns:
+        route["sequence_number"] = range(1, len(route) + 1)
+    if "store_number" not in route.columns:
+        route["store_number"] = ""
+    route["sequence_number"] = pd.to_numeric(route["sequence_number"], errors="coerce").fillna(0)
+    route = route.sort_values(["sequence_number", "store_number"])
+    points = []
+    for _, row in route.iterrows():
+        lat = to_float(row.get("latitude"))
+        lon = to_float(row.get("longitude"))
+        if lat is not None and lon is not None:
+            points.append((lat, lon, int(row.get("sequence_number") or 0), clean(row.get("store_number"))))
+    home_lat, home_lon = home_coordinates_for_group(route)
+    all_coords = [(lat, lon) for lat, lon, _, _ in points]
+    if home_lat is not None and home_lon is not None:
+        all_coords.append((home_lat, home_lon))
+    if not all_coords:
+        draw.text((30, 80), "No latitude/longitude available for this route.", fill="#334155", font=label_font)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        return buffer
+
+    min_lat = min(lat for lat, _ in all_coords)
+    max_lat = max(lat for lat, _ in all_coords)
+    min_lon = min(lon for _, lon in all_coords)
+    max_lon = max(lon for _, lon in all_coords)
+    lat_pad = max((max_lat - min_lat) * 0.15, 0.03)
+    lon_pad = max((max_lon - min_lon) * 0.15, 0.03)
+    min_lat -= lat_pad
+    max_lat += lat_pad
+    min_lon -= lon_pad
+    max_lon += lon_pad
+    left, top, right, bottom = 44, 68, width - 44, height - 42
+    draw.rectangle([(left, top), (right, bottom)], fill="#f8fafc", outline="#94a3b8")
+    for fraction in [0.25, 0.5, 0.75]:
+        x = left + int((right - left) * fraction)
+        y = top + int((bottom - top) * fraction)
+        draw.line([(x, top), (x, bottom)], fill="#e2e8f0")
+        draw.line([(left, y), (right, y)], fill="#e2e8f0")
+
+    def project(lat, lon):
+        x = left + (lon - min_lon) / (max_lon - min_lon) * (right - left)
+        y = bottom - (lat - min_lat) / (max_lat - min_lat) * (bottom - top)
+        return int(x), int(y)
+
+    route_xy = [project(lat, lon) for lat, lon, _, _ in points]
+    if home_lat is not None and home_lon is not None and route_xy:
+        home_xy = project(home_lat, home_lon)
+        draw.line([home_xy, route_xy[0]], fill="#64748b", width=2)
+    if len(route_xy) > 1:
+        draw.line(route_xy, fill="#2563eb", width=4)
+    if home_lat is not None and home_lon is not None:
+        hx, hy = project(home_lat, home_lon)
+        draw.rectangle([(hx - 8, hy - 8), (hx + 8, hy + 8)], fill="#111827", outline="white", width=2)
+        draw.text((hx + 12, hy - 6), "Home", fill="#111827", font=label_font)
+    for lat, lon, stop, store_number in points:
+        x, y = project(lat, lon)
+        draw.ellipse([(x - 10, y - 10), (x + 10, y + 10)], fill="#ef4444", outline="white", width=2)
+        label = str(stop or "")
+        draw.text((x - 4, y - 5), label, fill="white", font=label_font)
+        draw.text((x + 12, y - 6), store_number, fill="#0f172a", font=label_font)
+    draw.text((18, height - 24), "Generated route image: numbered stops are zoomed to this technician/month.", fill="#475569", font=label_font)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
 def draft_with_route_order(draft, route_type):
     if draft.empty:
         return draft
@@ -956,7 +1054,7 @@ def pmt_export_views(draft, route_filter="Both Route Options"):
     export_df["_month_sort"] = pd.to_datetime(export_df["month_start"], errors="coerce")
     export_df = export_df.sort_values(["_month_sort", "technician", "sequence_number", "store_number"])
     schedule_view = export_df[
-        ["technician", "month", "sequence_number", "store_number", "address", "city", "state", "zip", "status"]
+        ["technician", "month", "sequence_number", "store_number", "address", "city", "state", "zip"]
     ].rename(
         columns={
             "technician": "Technician",
@@ -967,7 +1065,6 @@ def pmt_export_views(draft, route_filter="Both Route Options"):
             "city": "City",
             "state": "State",
             "zip": "ZIP",
-            "status": "Status",
         }
     )
     route_view = route_table_view(route_options_for_draft(export_df, route_filter))
@@ -988,9 +1085,15 @@ def safe_sheet_name(value, used):
 
 def pmt_schedule_workbook_bytes(draft, route_filter="Both Route Options"):
     schedule_view, route_view = pmt_export_views(draft, route_filter)
+    map_draft = route_map_source_for_export(draft, route_filter)
     buffer = io.BytesIO()
     used_sheets = set()
+    image_streams = []
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        try:
+            from openpyxl.drawing.image import Image as OpenpyxlImage
+        except ImportError:
+            OpenpyxlImage = None
         if schedule_view.empty:
             schedule_view.to_excel(writer, index=False, sheet_name="Schedule")
         else:
@@ -998,7 +1101,34 @@ def pmt_schedule_workbook_bytes(draft, route_filter="Both Route Options"):
             month_sort["_month_sort"] = pd.to_datetime(month_sort["month_start"], errors="coerce")
             for month in month_sort.sort_values("_month_sort")["month"].tolist():
                 month_df = schedule_view[schedule_view["Month"] == month]
-                month_df.to_excel(writer, index=False, sheet_name=safe_sheet_name(str(month).split()[0], used_sheets))
+                sheet_name = safe_sheet_name(str(month).split()[0], used_sheets)
+                month_df.to_excel(writer, index=False, sheet_name=sheet_name)
+                sheet = writer.sheets[sheet_name]
+                for column_letter, width in {
+                    "A": 22, "B": 16, "C": 12, "D": 18, "E": 32, "F": 18, "G": 10, "H": 12,
+                    "J": 16, "K": 16, "L": 16, "M": 16, "N": 16, "O": 16, "P": 16, "Q": 16,
+                    "R": 16, "S": 16, "T": 16, "U": 16, "V": 16, "W": 16, "X": 16, "Y": 16, "Z": 16,
+                }.items():
+                    sheet.column_dimensions[column_letter].width = width
+                sheet["J1"] = "Route Map Screenshots"
+                if OpenpyxlImage is None:
+                    sheet["J2"] = "Install Pillow to include route map images in Excel exports."
+                    continue
+                map_month_df = map_draft[map_draft["month"] == month].copy() if not map_draft.empty else pd.DataFrame()
+                image_row = 2
+                for tech in sorted(map_month_df["technician"].dropna().unique().tolist()) if not map_month_df.empty else []:
+                    tech_route = map_month_df[map_month_df["technician"] == tech].copy()
+                    image_stream = pmt_route_map_png(tech_route, f"{tech} - {month}")
+                    if image_stream is None:
+                        sheet[f"J{image_row}"] = "Route map image unavailable."
+                        image_row += 3
+                        continue
+                    image_streams.append(image_stream)
+                    image = OpenpyxlImage(image_stream)
+                    image.width = 620
+                    image.height = 360
+                    sheet.add_image(image, f"J{image_row}")
+                    image_row += 22
         if route_filter == "Both Route Options" and not route_view.empty:
             for route_type in [HOME_ROUTE, NEXT_ROUTE]:
                 route_sheet = route_view[route_view["Route Type"] == route_type]
@@ -1010,6 +1140,7 @@ def pmt_schedule_workbook_bytes(draft, route_filter="Both Route Options"):
 
 def build_pmt_schedule_pdf(draft, filename, title, technician=None, route_filter="Both Route Options"):
     schedule_view, route_view = pmt_export_views(draft, route_filter)
+    map_draft = route_map_source_for_export(draft, route_filter)
     path = REPORT_DIR / filename
     doc = SimpleDocTemplate(str(path), pagesize=landscape(letter), rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24)
     styles = getSampleStyleSheet()
@@ -1032,10 +1163,10 @@ def build_pmt_schedule_pdf(draft, filename, title, technician=None, route_filter
             for month in tech_schedule["Month"].drop_duplicates().tolist():
                 group = tech_schedule[tech_schedule["Month"] == month]
                 story.append(Paragraph(f"{tech} - {month}", section_style))
-                rows = [["Stop", "Store/Site", "Address", "City", "State", "Status"]]
+                rows = [["Stop", "Store/Site", "Address", "City", "State"]]
                 for _, row in group.iterrows():
-                    rows.append([row["Stop Number"], row["Store/Site Number"], Paragraph(str(row["Address"] or ""), small), row["City"], row["State"], row["Status"]])
-                table = Table(rows, repeatRows=1, colWidths=[36, 62, 250, 92, 42, 72])
+                    rows.append([row["Stop Number"], row["Store/Site Number"], Paragraph(str(row["Address"] or ""), small), row["City"], row["State"]])
+                table = Table(rows, repeatRows=1, colWidths=[36, 62, 310, 110, 42])
                 table.setStyle(TableStyle([
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -1046,6 +1177,11 @@ def build_pmt_schedule_pdf(draft, filename, title, technician=None, route_filter
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ]))
                 story.append(table)
+                map_group = map_draft[(map_draft["technician"] == tech) & (map_draft["month"] == month)].copy() if not map_draft.empty else pd.DataFrame()
+                route_image = pmt_route_map_png(map_group, f"{tech} - {month}", width=900, height=430)
+                if route_image is not None:
+                    story.append(Spacer(1, 6))
+                    story.append(ReportLabImage(route_image, width=520, height=248))
                 story.append(Spacer(1, 8))
         story.append(PageBreak())
         story.append(Paragraph("Recommended Route Options", styles["Heading1"]))
@@ -2053,11 +2189,13 @@ def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
     base["proposed_change"] = "No change"
 
     transferable = base["schedule_item_id"].fillna(-1).astype(int).isin(selected_ids) & base["assigned_employee_id"].notna()
+    receiving_rebalances = {}
     base.loc[transferable, "new_employee_id"] = base.loc[transferable, "assigned_employee_id"]
     base.loc[transferable, "new_technician"] = base.loc[transferable, "assigned_technician"]
     base.loc[transferable, "new_home_latitude"] = base.loc[transferable, "assigned_home_latitude"]
     base.loc[transferable, "new_home_longitude"] = base.loc[transferable, "assigned_home_longitude"]
     base.loc[transferable, "proposed_change"] = "Transfer to current assigned PMT"
+    effective_date = scalar_date(scan.get("diagnostics", {}).get("effective_date")) or date.today()
     for index, row in base.loc[transferable].iterrows():
         old_date = row.get("old_schedule_date")
         assigned_id = row.get("assigned_employee_id")
@@ -2067,6 +2205,66 @@ def build_pmt_reconciliation_compare_preview(scan, selected_item_ids):
             base.at[index, "new_month_start"] = month_start(new_date)
             base.at[index, "new_month"] = month_label(month_start(new_date))
             base.at[index, "proposed_change"] = "Transfer to current assigned PMT and carry forward to current month"
+        if pd.notna(assigned_id):
+            rebalance_key = int(assigned_id)
+            rebalance_start = max(month_start(base.at[index, "new_schedule_date"]), month_start(effective_date))
+            receiving_rebalances[rebalance_key] = min(receiving_rebalances.get(rebalance_key, rebalance_start), rebalance_start)
+
+    monthly_targets = {}
+    if receiving_rebalances:
+        target_ids = sorted(receiving_rebalances.keys())
+        placeholders = ", ".join([f":employee_id_{idx}" for idx, _ in enumerate(target_ids)])
+        target_params = {f"employee_id_{idx}": employee_id for idx, employee_id in enumerate(target_ids)}
+        target_rows = safe_query(
+            f"""
+            select id as employee_id, coalesce(monthly_pmt_store_target, 10) as monthly_target
+            from employees
+            where id in ({placeholders})
+            """,
+            target_params,
+            use_cache=False,
+        )
+        if not target_rows.empty:
+            monthly_targets = target_rows.set_index("employee_id")["monthly_target"].fillna(10).astype(int).to_dict()
+
+    for employee_id, start_month_value in receiving_rebalances.items():
+        monthly_target = max(1, int(monthly_targets.get(employee_id, 10) or 10))
+        mask = (
+            base["new_employee_id"].notna()
+            & (base["new_employee_id"].astype("Int64") == int(employee_id))
+            & base["new_month_start"].notna()
+            & (base["new_month_start"] >= start_month_value)
+        )
+        tech_rows = base.loc[mask].copy()
+        if tech_rows.empty:
+            continue
+        home_lat = to_float(tech_rows["new_home_latitude"].dropna().iloc[0]) if tech_rows["new_home_latitude"].notna().any() else None
+        home_lon = to_float(tech_rows["new_home_longitude"].dropna().iloc[0]) if tech_rows["new_home_longitude"].notna().any() else None
+
+        def rebalance_key(row):
+            lat = to_float(row.get("latitude"))
+            lon = to_float(row.get("longitude"))
+            distance = haversine_miles(home_lat, home_lon, lat, lon) if home_lat is not None and home_lon is not None and lat is not None and lon is not None else 999999
+            old_date = row.get("old_schedule_date") or date.max
+            carry_forward = old_date < start_month_value
+            return (0 if carry_forward else 1, distance, clean(row.get("store_number")), old_date, int(row.get("old_sequence_number") or 0))
+
+        cursor_month = start_month_value
+        sequence_number = 1
+        for index in sorted(tech_rows.index.tolist(), key=lambda idx: rebalance_key(tech_rows.loc[idx])):
+            if sequence_number > monthly_target:
+                cursor_month = add_months(cursor_month, 1)
+                sequence_number = 1
+            original_month = base.at[index, "new_month_start"]
+            original_sequence = int(base.at[index, "new_sequence_number"] or 0)
+            base.at[index, "new_schedule_date"] = first_workday(cursor_month, employee_id=int(employee_id))
+            base.at[index, "new_month_start"] = cursor_month
+            base.at[index, "new_month"] = month_label(cursor_month)
+            base.at[index, "new_sequence_number"] = sequence_number
+            if original_month != cursor_month or original_sequence != sequence_number:
+                old_change = clean(base.at[index, "proposed_change"])
+                base.at[index, "proposed_change"] = "Receiving PMT schedule rebalanced" if old_change == "No change" else f"{old_change}; receiving PMT schedule rebalanced"
+            sequence_number += 1
 
     touched_pairs = set()
     for _, row in base.loc[transferable].iterrows():
@@ -2469,7 +2667,9 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
     transferred = 0
     superseded = 0
     resequenced_rows = 0
+    rebalanced_rows = 0
     touched_months = set()
+    receiving_rebalances = {}
     with session_scope("PMT schedule reconciliation transfer") as session:
         snapshots_created = create_pmt_reconciliation_snapshots(session, selected_ids, reason)
         team_cache = {}
@@ -2530,10 +2730,17 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
             transferred += 1
             touched_months.add((old_employee_id, old_month_value, item.pmt_schedule_run_id))
             touched_months.add((assigned_employee_id, month_start(target_schedule_date), item.pmt_schedule_run_id))
+            rebalance_start = max(month_start(target_schedule_date), month_start(effective_date))
+            rebalance_key = (assigned_employee_id, item.pmt_schedule_run_id)
+            receiving_rebalances[rebalance_key] = min(receiving_rebalances.get(rebalance_key, rebalance_start), rebalance_start)
         for employee_id, month_value, run_id in touched_months:
-            resequenced_rows += resequence_pmt_month(session, run_id, employee_id, month_value)
-    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced; {snapshots_created} snapshot run(s) created. Effective {effective_date}. {reason}")
-    return {"transferred": transferred, "superseded": superseded, "resequenced_rows": resequenced_rows, "snapshots_created": snapshots_created}
+            if (int(employee_id), run_id) not in receiving_rebalances:
+                resequenced_rows += resequence_pmt_month(session, run_id, employee_id, month_value)
+        for (employee_id, run_id), start_month_value in receiving_rebalances.items():
+            result = rebalance_pmt_employee_future_schedule(session, run_id, employee_id, start_month_value, reason)
+            rebalanced_rows += int(result.get("items", 0))
+    log_action("pmt schedule reconciliation applied", "schedule_items", description=f"{transferred} transferred; {superseded} superseded; {resequenced_rows} resequenced; {rebalanced_rows} receiving-tech rows rebalanced; {snapshots_created} snapshot run(s) created. Effective {effective_date}. {reason}")
+    return {"transferred": transferred, "superseded": superseded, "resequenced_rows": resequenced_rows, "rebalanced_rows": rebalanced_rows, "snapshots_created": snapshots_created}
 
 
 def resequence_pmt_month(session, run_id, employee_id, month_start_value):
@@ -2569,6 +2776,90 @@ def resequence_pmt_month(session, run_id, employee_id, month_start_value):
     for index, item in enumerate(sorted(items, key=route_sort_key), start=1):
         item.sequence_number = index
     return len(items)
+
+
+def rebalance_pmt_employee_future_schedule(session, run_id, employee_id, start_month_value, reason=""):
+    if run_id is None or employee_id is None or start_month_value is None:
+        return {"items": 0, "months": 0}
+    run = session.get(PMTScheduleRun, int(run_id))
+    employee = session.get(Employee, int(employee_id))
+    start_value = month_start(start_month_value)
+    if run and run.cycle_start:
+        start_value = max(start_value, month_start(run.cycle_start))
+    monthly_target = int(getattr(employee, "monthly_pmt_store_target", None) or getattr(run, "default_monthly_target", None) or 10)
+    monthly_target = max(1, monthly_target)
+    cycle_end = getattr(run, "cycle_end", None)
+    items_query = (
+        select(ScheduleItem)
+        .where(
+            ScheduleItem.pmt_schedule_run_id == int(run_id),
+            ScheduleItem.employee_id == int(employee_id),
+            func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
+            func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+            ScheduleItem.schedule_date >= start_value,
+        )
+        .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.store_id, ScheduleItem.id)
+    )
+    if cycle_end:
+        items_query = items_query.where(ScheduleItem.schedule_date <= cycle_end)
+    items = session.scalars(items_query).all()
+    if not items:
+        return {"items": 0, "months": 0}
+    if cycle_end:
+        months_available = 1
+        cursor = start_value
+        while add_months(cursor, 1) <= month_start(cycle_end):
+            months_available += 1
+            cursor = add_months(cursor, 1)
+        monthly_target = max(monthly_target, (len(items) + months_available - 1) // months_available)
+    home_lat = to_float(getattr(employee, "home_latitude", None)) if employee else None
+    home_lon = to_float(getattr(employee, "home_longitude", None)) if employee else None
+    store_cache = {}
+
+    def item_store(item):
+        if item.store_id not in store_cache:
+            store_cache[item.store_id] = session.get(Store, int(item.store_id)) if item.store_id else None
+        return store_cache[item.store_id]
+
+    def rebalance_sort_key(item):
+        store = item_store(item)
+        store_lat = to_float(getattr(store, "latitude", None)) if store else None
+        store_lon = to_float(getattr(store, "longitude", None)) if store else None
+        distance = haversine_miles(home_lat, home_lon, store_lat, store_lon) if home_lat is not None and home_lon is not None and store_lat is not None and store_lon is not None else 999999
+        original_date = item.original_schedule_date or item.schedule_date
+        carry_forward = original_date < start_value
+        return (0 if carry_forward else 1, distance, clean(getattr(store, "store_number", "")) if store else "", original_date, item.sequence_number or 0, item.id)
+
+    cursor_month = start_value
+    sequence_number = 1
+    touched_months = set()
+    schedule_mode = clean(getattr(run, "schedule_mode", "")) if run else ""
+    for item in sorted(items, key=rebalance_sort_key):
+        if sequence_number > monthly_target:
+            cursor_month = add_months(cursor_month, 1)
+            sequence_number = 1
+        if cycle_end and cursor_month > month_start(cycle_end):
+            cursor_month = month_start(cycle_end)
+        new_date = first_workday(cursor_month, employee_id=int(employee_id))
+        if schedule_mode == "Monthly schedule with daily stops":
+            new_date = first_workday(cursor_month + timedelta(days=(sequence_number - 1)), employee_id=int(employee_id))
+        old_month = month_start(item.schedule_date)
+        if item.original_schedule_date is None:
+            item.original_schedule_date = item.schedule_date
+        item.schedule_date = new_date
+        item.sequence_number = sequence_number
+        item.cycle_label = month_label(cursor_month)
+        item.schedule_source = "PMT Assignment Reconciliation Rebalanced"
+        note_parts = [
+            clean(item.completion_notes),
+            f"Rebalanced affected PMT future schedule from {start_value} using monthly target {monthly_target}.",
+            clean(reason),
+        ]
+        item.completion_notes = " | ".join([part for part in note_parts if part])
+        touched_months.add(old_month)
+        touched_months.add(cursor_month)
+        sequence_number += 1
+    return {"items": len(items), "months": len(touched_months)}
 
 
 def resolve_pmt_conflicts_keep_assigned(run_id, store_ids, notes=""):
@@ -5332,7 +5623,8 @@ with tab_reconcile:
                     result = apply_pmt_reconciliation_transfers(selected_item_ids, reconciliation_effective_date, reconciliation_reason)
                     st.success(
                         f"Reconciliation applied. Transferred {result['transferred']} row(s); "
-                        f"superseded {result['superseded']} duplicate row(s); resequenced {result.get('resequenced_rows', 0)} route row(s); "
+                        f"superseded {result['superseded']} duplicate row(s); resequenced {result.get('resequenced_rows', 0)} source route row(s); "
+                        f"rebalanced {result.get('rebalanced_rows', 0)} receiving-PMT future row(s); "
                         f"created {result.get('snapshots_created', 0)} old-schedule snapshot run(s)."
                     )
                     st.rerun()
@@ -5914,6 +6206,56 @@ with tab_manage:
                 if rec["scheduled_no_longer_assigned_count"]:
                     explanation += f" {rec['scheduled_no_longer_assigned_count']} store(s) remain scheduled under {selected_tech_name} but are no longer assigned to this PMT."
                 st.info(explanation)
+                with st.expander("Rebalance This PMT's Future Schedule", expanded=False):
+                    st.caption(
+                        "Use this to repair an already-applied reconciliation where the receiving PMT's stores landed unevenly across months. "
+                        "Only this selected PMT's active unfinished rows are changed; completed rows and other PMTs stay untouched."
+                    )
+                    rebalance_month_options = manage_month_options(run_items)
+                    rebalance_default = month_start(date.today())
+                    if selected_month != "All months":
+                        rebalance_default = selected_month
+                    if rebalance_default not in rebalance_month_options:
+                        rebalance_month_options.append(rebalance_default)
+                        rebalance_month_options = ["All months"] + sorted([value for value in rebalance_month_options if value != "All months"])
+                    repair_cols = st.columns([0.35, 0.45, 0.2])
+                    rebalance_start_month = repair_cols[0].selectbox(
+                        "Start month",
+                        rebalance_month_options,
+                        index=rebalance_month_options.index(rebalance_default) if rebalance_default in rebalance_month_options else 0,
+                        format_func=lambda value: value if value == "All months" else month_label(value),
+                        key=f"pmt_manage_rebalance_start_{selected_run}_{selected_employee}",
+                    )
+                    if rebalance_start_month == "All months":
+                        rebalance_start_month = month_start(date.today())
+                    rebalance_reason = repair_cols[1].text_input(
+                        "Reason",
+                        value="Repair receiving PMT schedule balance after territory reconciliation.",
+                        key=f"pmt_manage_rebalance_reason_{selected_run}_{selected_employee}",
+                    )
+                    confirm_rebalance = repair_cols[2].checkbox(
+                        "Confirm",
+                        key=f"pmt_manage_rebalance_confirm_{selected_run}_{selected_employee}",
+                    )
+                    if st.button(
+                        "Rebalance Selected PMT From Start Month Forward",
+                        type="secondary",
+                        disabled=not confirm_rebalance,
+                        key=f"pmt_manage_rebalance_button_{selected_run}_{selected_employee}",
+                    ):
+                        with session_scope("PMT selected technician future rebalance") as session:
+                            result = rebalance_pmt_employee_future_schedule(
+                                session,
+                                selected_run,
+                                selected_employee,
+                                rebalance_start_month,
+                                rebalance_reason,
+                            )
+                        st.success(
+                            f"Rebalanced {result.get('items', 0)} active unfinished row(s) for {selected_tech_name} "
+                            f"from {month_label(month_start(rebalance_start_month))} forward."
+                        )
+                        st.rerun()
                 if rec["completed_count"]:
                     completed_rows = rec["tech_completed"].copy()
                     completed_dates = pd.to_datetime(completed_rows.get("schedule_date"), errors="coerce")
