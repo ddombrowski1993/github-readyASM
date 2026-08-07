@@ -4543,14 +4543,22 @@ def pmt_publish_conflicts(preview, start_month, months):
 
 
 
-tab_build, tab_carryover, tab_fix, tab_reconcile, tab_manage, tab_export = st.tabs([
+tab_build, tab_carryover, tab_manage_fix, tab_export = st.tabs([
     "📋  Build Schedule",
     "📊  Carryover & Backlog",
-    "🛠️  Fix Schedule",
-    "🔁  Reconciliation",
-    "⚙️  Manage Schedule",
+    "🛠️  Manage & Fix Schedule",
     "📥  Export",
 ])
+
+with tab_manage_fix:
+    tab_health, tab_reconcile, tab_rebuild, tab_manage, tab_preview, tab_history = st.tabs([
+        "Overview & Health",
+        "Territory Reconciliation",
+        "Rebuild / Balance",
+        "Manual Edit",
+        "Preview Changes",
+        "History & Revisions",
+    ])
 
 with tab_build:
     section_header("Build Step 1: Choose Assignment Source", "Use assignments already saved in the app, or upload a PMT assigned-store file. Employee home addresses come from Employees by default.", "blue", focus_key="pmt_focus_step", focus_value=1)
@@ -4880,7 +4888,7 @@ with tab_build:
             save_cols[1].caption("This saves store ownership only. It does not create schedule dates, route stops, or a manageable schedule run.")
             if uploaded_schedule_date_col or uploaded_schedule_month_col:
                 st.markdown("**This upload also looks like a schedule**")
-                st.caption("Use this section when the file already has schedule dates or schedule months and you want it to appear in Manage Schedule.")
+                st.caption("Use this section when the file already has schedule dates or schedule months and you want it to appear in Manage & Fix Schedule.")
                 with st.expander("Import this upload as an existing PMT schedule", expanded=True):
                     schedule_options = [""] + original_columns
                     sc1, sc2, sc3 = st.columns(3)
@@ -4936,7 +4944,7 @@ with tab_build:
                             try:
                                 with st.spinner(f"Creating PMT schedule run with {len(inline_preview):,} item(s)..."):
                                     result = import_existing_pmt_schedule(inline_preview, inline_run_name)
-                                st.success(f"Imported PMT schedule run #{result['run_id']} with {result['created']} schedule item(s). Open Manage Schedule to review and edit it.")
+                                st.success(f"Imported PMT schedule run #{result['run_id']} with {result['created']} schedule item(s). Open Manage & Fix Schedule -> Manual Edit to review and edit it.")
                             except Exception as exc:
                                 st.error(f"PMT schedule import failed: {exc}")
                                 st.stop()
@@ -5753,10 +5761,10 @@ with tab_carryover:
         export_carryover.download_button("Export PMT Carryover / Not Scheduled", data=excel_bytes(pmt_carryover), file_name="pmt_carryover_not_scheduled.xlsx")
 
 
-with tab_fix:
+with tab_health:
     section_header(
-        "Schedule Repair Assistant",
-        "Use this when a PMT schedule looks wrong and you are not sure whether to use Reconciliation, Manage Schedule, or Export.",
+        "Overview & Schedule Health",
+        "Start here when a PMT schedule looks wrong. This view tells you which repair tab to use.",
         "orange",
     )
     st.info(
@@ -5826,21 +5834,63 @@ with tab_fix:
             metric_cols[4].metric("Scheduled Not Assigned", wrong_count)
             metric_cols[5].metric("Assigned Elsewhere", elsewhere_count)
 
+            team_health_rows = []
+            for _, tech_row in repair_tech_options.iterrows():
+                tech_employee_id = scalar_int(tech_row.get("employee_id"), 0)
+                if not tech_employee_id:
+                    continue
+                tech_rec = technician_schedule_reconciliation(repair_run_items, tech_employee_id, "All months")
+                tech_assigned = int(tech_rec.get("assigned_count", 0))
+                tech_active = int(tech_rec.get("active_count", 0))
+                tech_missing = int(tech_rec.get("assigned_not_scheduled_count", 0))
+                tech_wrong = int(tech_rec.get("scheduled_no_longer_assigned_count", 0))
+                tech_elsewhere = int(tech_rec.get("assigned_scheduled_elsewhere_count", 0))
+                if tech_wrong or tech_elsewhere:
+                    recommendation = "Territory Reconciliation Required"
+                elif tech_missing or tech_active < tech_assigned:
+                    recommendation = "Rebuild / Balance Required"
+                else:
+                    recommendation = "Protected - No Changes Needed"
+                team_health_rows.append(
+                    {
+                        "Technician": tech_row.get("technician"),
+                        "Current Assigned Stores": tech_assigned,
+                        "Future Scheduled Stores": tech_active,
+                        "Completed": int(tech_rec.get("completed_count", 0)),
+                        "Missing From Schedule": tech_missing,
+                        "Scheduled Not Assigned": tech_wrong,
+                        "Assigned Elsewhere": tech_elsewhere,
+                        "Monthly Target": 10,
+                        "Recommended Action": recommendation,
+                    }
+                )
+            team_health = pd.DataFrame(team_health_rows)
+            if not team_health.empty:
+                needs_review = team_health[team_health["Recommended Action"] != "Protected - No Changes Needed"]
+                if needs_review.empty:
+                    st.success("Schedule Health: GREEN - schedule looks healthy. All reviewed PMTs are protected.")
+                elif (team_health["Recommended Action"] == "Territory Reconciliation Required").any():
+                    st.error(f"Schedule Health: RED - territory reconciliation required for {len(needs_review)} PMT(s).")
+                else:
+                    st.warning(f"Schedule Health: YELLOW - {len(needs_review)} PMT(s) need rebuild/balance review.")
+                st.markdown("**PMT Schedule Health**")
+                st.dataframe(team_health, use_container_width=True, hide_index=True)
+
             if problem_choice == "I just need the corrected Excel/PDF export":
                 st.success("Go to the Export tab after repairs are complete. Use Published PMT Schedule Run, then download Full Team Excel or PDF.")
                 st.caption("If the count above still looks wrong, repair the schedule before exporting.")
             elif problem_choice == "Territories changed and schedules do not match assignments":
                 st.warning(
-                    "Use Reconciliation when assignments just changed and old schedule rows are still under the wrong PMTs. "
+                    "Use Territory Reconciliation when assignments just changed and old schedule rows are still under the wrong PMTs. "
                     "Set the effective date, set monthly target, run the scan, select the conflict rows, and apply."
                 )
                 st.markdown(
                     """
                     **Quick rule**
 
-                    Use `Reconciliation` when stores moved between PMTs and you need old PMT rows superseded and affected PMTs rebuilt.
+                    Use `Territory Reconciliation` when stores moved between PMTs and you need old PMT rows superseded and affected PMTs rebuilt.
 
-                    Use the rebuild box below when reconciliation was already applied but one PMT, like Anthony, still has too few stores.
+                    Use `Rebuild / Balance` when reconciliation was already applied but one PMT, like Anthony, still has too few stores.
                     """
                 )
             elif problem_choice == "A store is on the wrong PMT or duplicated":
@@ -5848,7 +5898,7 @@ with tab_fix:
                 if repair_conflicts.empty:
                     st.success("No duplicate or wrong-PMT active rows were found in this schedule run.")
                 else:
-                    st.error(f"{distinct_store_count(repair_conflicts)} store conflict(s) were found. Open Manage Schedule -> Review and Resolve Schedule Conflicts for this run.")
+                    st.error(f"{distinct_store_count(repair_conflicts)} store conflict(s) were found. Open Manual Edit -> Review and Resolve Schedule Conflicts for this run.")
                     st.dataframe(
                         repair_conflicts[["store_number", "assigned_technician", "technician", "month", "schedule_date", "status", "conflict_type"]],
                         use_container_width=True,
@@ -5859,71 +5909,133 @@ with tab_fix:
                 "A PMT has too few stores or uneven months",
                 "Territories changed and schedules do not match assignments",
             ]:
-                st.markdown("**Direct Fix: Rebuild This PMT From Current Assignments**")
-                st.caption(
-                    "This is the Anthony-type fix. It pulls every store currently assigned to this PMT in Areas and Maps, schedules up to the monthly target, "
-                    "and puts overflow into Not Scheduled. Completed rows and other PMTs are not changed."
-                )
-                start_options = manage_month_options(repair_run_items)
-                default_start = month_start(date.today())
-                if default_start not in start_options:
-                    start_options.append(default_start)
-                    start_options = ["All months"] + sorted([value for value in start_options if value != "All months"])
-                rebuild_cols = st.columns([0.28, 0.22, 0.34, 0.16])
-                fix_start_month = rebuild_cols[0].selectbox(
-                    "Start month",
-                    start_options,
-                    index=start_options.index(default_start) if default_start in start_options else 0,
-                    format_func=lambda value: value if value == "All months" else month_label(value),
-                    key="pmt_fix_rebuild_start_month",
-                )
-                if fix_start_month == "All months":
-                    fix_start_month = default_start
-                fix_monthly_target = rebuild_cols[1].number_input(
-                    "Monthly target",
-                    min_value=1,
-                    max_value=50,
-                    value=10,
-                    step=1,
-                    key="pmt_fix_rebuild_monthly_target",
-                )
-                fix_reason = rebuild_cols[2].text_input(
-                    "Reason",
-                    value="Repair PMT schedule from current Areas and Maps assignments.",
-                    key="pmt_fix_rebuild_reason",
-                )
-                fix_confirm = rebuild_cols[3].checkbox("Confirm", key="pmt_fix_rebuild_confirm")
-                expected_capacity = int(fix_monthly_target) * max(1, ((repair_cycle_end.year - fix_start_month.year) * 12 + repair_cycle_end.month - fix_start_month.month + 1) if repair_cycle_end else 6)
-                st.caption(
-                    f"Expected result for {repair_tech_name}: current assigned {assigned_count}; target {int(fix_monthly_target)} per month; "
-                    f"capacity from {month_label(month_start(fix_start_month))}: about {expected_capacity} store(s)."
-                )
-                if st.button(
-                    "Fix This PMT Schedule Now",
-                    type="primary",
-                    disabled=not fix_confirm,
-                    key="pmt_fix_rebuild_apply",
-                ):
-                    with session_scope("PMT repair assistant rebuild from assignments") as session:
-                        result = rebuild_pmt_employee_from_current_assignments(
-                            session,
-                            repair_run_id,
-                            repair_employee_id,
-                            fix_start_month,
-                            fix_monthly_target,
-                            fix_reason,
-                        )
-                    st.success(
-                        f"Rebuilt {result.get('scheduled', 0)} of {result.get('assigned', 0)} current assigned store(s) for {repair_tech_name}. "
-                        f"Overflow/not scheduled: {result.get('overflow', 0)}. Created {result.get('created', 0)}, updated {result.get('updated', 0)}, superseded {result.get('superseded', 0)}."
+                if missing_count or active_count < assigned_count:
+                    st.warning(f"{repair_tech_name} has {missing_count} assigned store(s) missing from the active future schedule.")
+                    st.markdown("**Recommended:** open `Rebuild / Balance`.")
+                if wrong_count or elsewhere_count:
+                    st.warning(f"{repair_tech_name} has territory/schedule ownership mismatch rows.")
+                    st.markdown("**Recommended:** open `Territory Reconciliation` if territories changed, or `Manual Edit` for a one-off correction.")
+
+
+with tab_rebuild:
+    section_header(
+        "Rebuild / Balance PMT Schedule",
+        "Use this when one technician owns the correct stores but their future schedule is incomplete, uneven, or needs rebuilt from current Areas and Maps assignments.",
+        "orange",
+    )
+    rebuild_runs = safe_query(
+        """
+        select r.id, r.run_name, r.created_at, r.cycle_start, r.cycle_end, r.months, r.technician_count,
+               r.store_count, r.unscheduled_count, r.status
+        from pmt_schedule_runs r
+        where coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot')
+        order by r.created_at desc, r.id desc
+        """,
+        use_cache=False,
+    )
+    if rebuild_runs.empty:
+        st.warning("No current PMT schedule runs are available to rebuild.")
+    else:
+        rebuild_select_cols = st.columns([0.45, 0.35, 0.2])
+        rebuild_run_id = rebuild_select_cols[0].selectbox(
+            "Current active schedule run",
+            rebuild_runs["id"].tolist(),
+            format_func=lambda value: f"#{value} - {rebuild_runs.set_index('id').loc[value, 'run_name']}",
+            key="pmt_rebuild_run",
+        )
+        rebuild_run_row = rebuild_runs.set_index("id").loc[rebuild_run_id]
+        rebuild_run_items = pmt_manage_run_items(rebuild_run_id)
+        rebuild_cycle_start = scalar_date(rebuild_run_row.get("cycle_start"))
+        rebuild_cycle_end = scalar_date(rebuild_run_row.get("cycle_end"))
+        rebuild_run_items, _rebuild_outside_items = split_run_items_by_period(rebuild_run_items, rebuild_cycle_start, rebuild_cycle_end)
+        rebuild_tech_options = (
+            rebuild_run_items[["employee_id", "technician"]].dropna(subset=["employee_id"]).drop_duplicates()
+            if not rebuild_run_items.empty and {"employee_id", "technician"}.issubset(rebuild_run_items.columns)
+            else pd.DataFrame(columns=["employee_id", "technician"])
+        )
+        all_rebuild_pmts = active_pmt_employee_summary()[["employee_id", "technician_name"]].rename(columns={"technician_name": "technician"})
+        rebuild_tech_options = pd.concat([rebuild_tech_options, all_rebuild_pmts], ignore_index=True).dropna(subset=["employee_id"]).drop_duplicates("employee_id").sort_values("technician")
+        if rebuild_tech_options.empty:
+            st.warning("No active PMT technicians are available.")
+        else:
+            rebuild_employee_id = rebuild_select_cols[1].selectbox(
+                "PMT technician",
+                rebuild_tech_options["employee_id"].astype(int).tolist(),
+                format_func=lambda value: rebuild_tech_options.set_index("employee_id").loc[value, "technician"],
+                key="pmt_rebuild_employee",
+            )
+            rebuild_tech_name = rebuild_tech_options.set_index("employee_id").loc[rebuild_employee_id, "technician"]
+            rebuild_start_options = manage_month_options(rebuild_run_items)
+            rebuild_default_start = month_start(date.today())
+            if rebuild_default_start not in rebuild_start_options:
+                rebuild_start_options.append(rebuild_default_start)
+                rebuild_start_options = ["All months"] + sorted([value for value in rebuild_start_options if value != "All months"])
+            rebuild_start_month = rebuild_select_cols[2].selectbox(
+                "Start month",
+                rebuild_start_options,
+                index=rebuild_start_options.index(rebuild_default_start) if rebuild_default_start in rebuild_start_options else 0,
+                format_func=lambda value: value if value == "All months" else month_label(value),
+                key="pmt_rebuild_start_month",
+            )
+            if rebuild_start_month == "All months":
+                rebuild_start_month = rebuild_default_start
+            rebuild_rec = technician_schedule_reconciliation(rebuild_run_items, rebuild_employee_id, "All months")
+            rebuild_metric_cols = st.columns(6)
+            rebuild_metric_cols[0].metric("Current Assigned", int(rebuild_rec.get("assigned_count", 0)))
+            rebuild_metric_cols[1].metric("Future Scheduled", int(rebuild_rec.get("active_count", 0)))
+            rebuild_metric_cols[2].metric("Completed", int(rebuild_rec.get("completed_count", 0)))
+            rebuild_metric_cols[3].metric("Missing", int(rebuild_rec.get("assigned_not_scheduled_count", 0)))
+            rebuild_metric_cols[4].metric("Scheduled Not Assigned", int(rebuild_rec.get("scheduled_no_longer_assigned_count", 0)))
+            rebuild_metric_cols[5].metric("Assigned Elsewhere", int(rebuild_rec.get("assigned_scheduled_elsewhere_count", 0)))
+            rebuild_controls = st.columns([0.18, 0.32, 0.34, 0.16])
+            rebuild_monthly_target = rebuild_controls[0].number_input(
+                "Monthly target",
+                min_value=1,
+                max_value=50,
+                value=10,
+                step=1,
+                key="pmt_rebuild_monthly_target",
+            )
+            available_months = max(1, ((rebuild_cycle_end.year - rebuild_start_month.year) * 12 + rebuild_cycle_end.month - rebuild_start_month.month + 1) if rebuild_cycle_end else 6)
+            expected_capacity = int(rebuild_monthly_target) * available_months
+            assigned_now = int(rebuild_rec.get("assigned_count", 0))
+            expected_scheduled = min(assigned_now, expected_capacity)
+            expected_overflow = max(0, assigned_now - expected_capacity)
+            rebuild_controls[1].caption(
+                f"Expected distribution: {expected_scheduled} scheduled, {expected_overflow} overflow/not scheduled across {available_months} month(s)."
+            )
+            rebuild_reason = rebuild_controls[2].text_input(
+                "Reason",
+                value="Repair PMT schedule from current Areas and Maps assignments.",
+                key="pmt_rebuild_reason",
+            )
+            rebuild_confirm = rebuild_controls[3].checkbox("Confirm", key="pmt_rebuild_confirm")
+            if st.button(
+                "Apply Rebuilt Schedule",
+                type="primary",
+                disabled=not rebuild_confirm,
+                key="pmt_rebuild_apply",
+            ):
+                with session_scope("PMT rebuild/balance from current assignments") as session:
+                    result = rebuild_pmt_employee_from_current_assignments(
+                        session,
+                        rebuild_run_id,
+                        rebuild_employee_id,
+                        rebuild_start_month,
+                        rebuild_monthly_target,
+                        rebuild_reason,
                     )
-                    st.rerun()
+                st.success(
+                    f"Rebuilt {result.get('scheduled', 0)} of {result.get('assigned', 0)} current assigned store(s) for {rebuild_tech_name}. "
+                    f"Overflow/not scheduled: {result.get('overflow', 0)}. Created {result.get('created', 0)}, updated {result.get('updated', 0)}, superseded {result.get('superseded', 0)}."
+                )
+                st.rerun()
 
 
 with tab_reconcile:
     section_header(
-        "PMT Assignment & Schedule Reconciliation",
-        "Compare current PMT store ownership from Areas and Maps against existing future PMT schedules. Only checked future unfinished conflicts are changed.",
+        "Territory Reconciliation",
+        "Use this when PMT store ownership changed and existing future schedules need to align with current Areas and Maps assignments. Affected PMTs are rebuilt from current assignments; protected PMTs are not changed.",
         "yellow",
     )
     st.caption("Use this after a PMT quits, a new PMT is hired, or territories are realigned. Completed historical rows are preserved, and unaffected technicians are protected.")
@@ -6300,6 +6412,11 @@ with tab_reconcile:
 
 
 with tab_manage:
+    section_header(
+        "Manual Schedule Edit",
+        "Use this when you know exactly which schedule item needs to change: add, remove, move, reorder, reschedule, or update status/notes. One-off edits do not rebuild another PMT unless explicitly selected.",
+        "blue",
+    )
     if st.session_state.get("pmt_reconciliation_manage_notice"):
         st.success(st.session_state.pop("pmt_reconciliation_manage_notice"))
     with st.expander("Optional: Import an Existing PMT Schedule", expanded=False):
@@ -6525,7 +6642,7 @@ with tab_manage:
         elif not history_outside_items.empty:
             with st.expander("Archived or Historical Rows Outside This Schedule Plan", expanded=False):
                 st.caption(
-                    "These rows are not active schedule work and are excluded from Manage Schedule counts, maps, and current exports."
+                    "These rows are not active schedule work and are excluded from Manual Edit counts, maps, and current exports."
                 )
                 outside_view = out_of_period_items[
                     ["schedule_item_id", "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source", "notes"]
@@ -6600,7 +6717,7 @@ with tab_manage:
                 )
                 conflict_notes = st.text_input(
                     "Resolution note",
-                    value="Territory transfer conflict resolved from Manage Schedule.",
+                    value="Territory transfer conflict resolved from Manual Edit.",
                     key=f"pmt_manage_conflict_notes_{selected_run}",
                 )
                 confirm_conflict_resolution = st.checkbox(
@@ -6689,66 +6806,7 @@ with tab_manage:
                 if rec["scheduled_no_longer_assigned_count"]:
                     explanation += f" {rec['scheduled_no_longer_assigned_count']} store(s) remain scheduled under {selected_tech_name} but are no longer assigned to this PMT."
                 st.info(explanation)
-                with st.expander("Rebuild This PMT From Current Assignments", expanded=False):
-                    st.caption(
-                        "Use this to repair an already-applied reconciliation where the receiving PMT only got a few transferred rows. "
-                        "This rebuilds this selected PMT from every store currently assigned in Areas and Maps. Completed rows and other PMTs stay untouched."
-                    )
-                    rebalance_month_options = manage_month_options(run_items)
-                    rebalance_default = month_start(date.today())
-                    if selected_month != "All months":
-                        rebalance_default = selected_month
-                    if rebalance_default not in rebalance_month_options:
-                        rebalance_month_options.append(rebalance_default)
-                        rebalance_month_options = ["All months"] + sorted([value for value in rebalance_month_options if value != "All months"])
-                    repair_cols = st.columns([0.35, 0.45, 0.2])
-                    rebalance_start_month = repair_cols[0].selectbox(
-                        "Start month",
-                        rebalance_month_options,
-                        index=rebalance_month_options.index(rebalance_default) if rebalance_default in rebalance_month_options else 0,
-                        format_func=lambda value: value if value == "All months" else month_label(value),
-                        key=f"pmt_manage_rebalance_start_{selected_run}_{selected_employee}",
-                    )
-                    if rebalance_start_month == "All months":
-                        rebalance_start_month = month_start(date.today())
-                    rebalance_reason = repair_cols[1].text_input(
-                        "Reason",
-                        value="Repair receiving PMT schedule from current assignment list after territory reconciliation.",
-                        key=f"pmt_manage_rebalance_reason_{selected_run}_{selected_employee}",
-                    )
-                    confirm_rebalance = repair_cols[2].checkbox(
-                        "Confirm",
-                        key=f"pmt_manage_rebalance_confirm_{selected_run}_{selected_employee}",
-                    )
-                    rebuild_monthly_target = st.number_input(
-                        "Monthly store target for this rebuild",
-                        min_value=1,
-                        max_value=50,
-                        value=10,
-                        step=1,
-                        key=f"pmt_manage_rebuild_monthly_target_{selected_run}_{selected_employee}",
-                    )
-                    if st.button(
-                        "Rebuild Selected PMT From Current Assignments",
-                        type="secondary",
-                        disabled=not confirm_rebalance,
-                        key=f"pmt_manage_rebalance_button_{selected_run}_{selected_employee}",
-                    ):
-                        with session_scope("PMT selected technician future rebalance") as session:
-                            result = rebuild_pmt_employee_from_current_assignments(
-                                session,
-                                selected_run,
-                                selected_employee,
-                                rebalance_start_month,
-                                rebuild_monthly_target,
-                                rebalance_reason,
-                            )
-                        st.success(
-                            f"Rebuilt {result.get('scheduled', 0)} of {result.get('assigned', 0)} current assigned store(s) for {selected_tech_name} "
-                            f"from {month_label(month_start(rebalance_start_month))} forward at {result.get('monthly_target', rebuild_monthly_target)} per month. "
-                            f"Overflow/not scheduled: {result.get('overflow', 0)}."
-                        )
-                        st.rerun()
+                st.caption("Use the Rebuild / Balance sub-tab if this PMT needs to be rebuilt from current Areas and Maps assignments.")
                 if rec["completed_count"]:
                     completed_rows = rec["tech_completed"].copy()
                     completed_dates = pd.to_datetime(completed_rows.get("schedule_date"), errors="coerce")
@@ -7129,16 +7187,85 @@ with tab_manage:
                         st.rerun()
                     action_cols[2].caption("Use the Carryover & Backlog tab for unfinished-work carryover.")
 
-        with st.expander("Danger Zone - Delete Entire Schedule Run", expanded=False):
-            st.warning("This marks the selected schedule plan as Deleted and removes its PMT schedule rows. This is separate from removing one store from a technician route.")
-            st.write(f"Schedule: {run_row.get('run_name', '')}")
-            st.write(f"Affected rows: {len(run_items)}")
-            confirm_delete_text = st.text_input("Type DELETE to confirm", key=f"pmt_manage_delete_run_text_{selected_run}")
-            confirm_delete_check = st.checkbox("I understand this deletes the entire selected schedule plan.", key=f"pmt_manage_delete_run_check_{selected_run}")
-            if st.button("Delete Entire Schedule Plan", type="secondary", disabled=confirm_delete_text != "DELETE" or not confirm_delete_check, key=f"pmt_manage_delete_run_button_{selected_run}"):
-                deleted = delete_pmt_schedule_run(selected_run)
-                st.success(f"Deleted {deleted} PMT schedule item(s) from {run_row.get('run_name', '')}.")
-                st.rerun()
+            with st.expander("Danger Zone - Delete Entire Schedule Run", expanded=False):
+                st.warning("This marks the selected schedule plan as Deleted and removes its PMT schedule rows. This is separate from removing one store from a technician route.")
+                st.write(f"Schedule: {run_row.get('run_name', '')}")
+                st.write(f"Affected rows: {len(run_items)}")
+                confirm_delete_text = st.text_input("Type DELETE to confirm", key=f"pmt_manage_delete_run_text_{selected_run}")
+                confirm_delete_check = st.checkbox("I understand this deletes the entire selected schedule plan.", key=f"pmt_manage_delete_run_check_{selected_run}")
+                if st.button("Delete Entire Schedule Plan", type="secondary", disabled=confirm_delete_text != "DELETE" or not confirm_delete_check, key=f"pmt_manage_delete_run_button_{selected_run}"):
+                    deleted = delete_pmt_schedule_run(selected_run)
+                    st.success(f"Deleted {deleted} PMT schedule item(s) from {run_row.get('run_name', '')}.")
+                    st.rerun()
+
+
+with tab_preview:
+    section_header(
+        "Before & After Preview",
+        "Review pending reconciliation, rebuild, or manual-edit previews before applying major schedule changes.",
+        "blue",
+    )
+    st.caption("Major repair tools show their own confirmation before applying. This tab collects currently staged previews and explains where to review them.")
+    preview_sources = [
+        ("Manual add/rebuild preview", dataframe_from_session_records("pmt_manage_build_preview")),
+        ("Manual route move preview", dataframe_from_session_records("pmt_manage_reorder_preview")),
+    ]
+    visible_preview = False
+    for preview_name, preview_df in preview_sources:
+        if preview_df.empty:
+            continue
+        visible_preview = True
+        with st.expander(preview_name, expanded=True):
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    if not visible_preview:
+        st.info(
+            "No staged preview is currently waiting. Use Territory Reconciliation for assignment changes, Rebuild / Balance for one PMT rebuilds, or Manual Edit for one-off changes."
+        )
+
+
+with tab_history:
+    section_header(
+        "Schedule History & Revisions",
+        "View current active PMT schedules separately from historical snapshots and revisions.",
+        "gray",
+    )
+    history_runs = safe_query(
+        """
+        select r.id, r.run_name, r.status, r.cycle_start, r.cycle_end, r.months,
+               r.technician_count, r.store_count, r.unscheduled_count, r.created_by, r.created_at, r.notes
+        from pmt_schedule_runs r
+        order by r.created_at desc, r.id desc
+        """,
+        use_cache=False,
+    )
+    if history_runs.empty:
+        st.info("No PMT schedule history is available yet.")
+    else:
+        history_runs = history_runs.copy()
+        history_runs["Schedule Type"] = history_runs["status"].fillna("").astype(str).str.lower().apply(
+            lambda value: "HISTORICAL / SNAPSHOT" if value == "snapshot" else "DELETED" if value == "deleted" else "CURRENT ACTIVE"
+        )
+        active_history = history_runs[history_runs["Schedule Type"] == "CURRENT ACTIVE"].copy()
+        snapshot_history = history_runs[history_runs["Schedule Type"] != "CURRENT ACTIVE"].copy()
+        st.markdown("**Current Active Schedules**")
+        if active_history.empty:
+            st.info("No current active PMT schedules found.")
+        else:
+            st.dataframe(
+                active_history[["id", "run_name", "Schedule Type", "cycle_start", "cycle_end", "technician_count", "store_count", "unscheduled_count", "created_at", "notes"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+        st.markdown("**Historical / Snapshot Schedules**")
+        if snapshot_history.empty:
+            st.info("No historical snapshots found.")
+        else:
+            st.dataframe(
+                snapshot_history[["id", "run_name", "Schedule Type", "cycle_start", "cycle_end", "technician_count", "store_count", "unscheduled_count", "created_at", "notes"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption("Snapshots are kept for audit/history and do not appear in the normal Export schedule selector.")
 
 
 with tab_export:
@@ -7191,7 +7318,7 @@ with tab_export:
             if not export_conflicts.empty:
                 st.error(
                     f"Export blocked: duplicate or wrong-technician active PMT schedule assignments remain for "
-                    f"{distinct_store_count(export_conflicts)} store(s). Open Manage Schedule and resolve the conflicts before exporting."
+                    f"{distinct_store_count(export_conflicts)} store(s). Open Manage & Fix Schedule -> Manual Edit and resolve the conflicts before exporting."
                 )
                 export_conflict_view = export_conflicts[
                     ["store_number", "assigned_technician", "technician", "month", "schedule_date", "sequence_number", "status", "conflict_type"]
