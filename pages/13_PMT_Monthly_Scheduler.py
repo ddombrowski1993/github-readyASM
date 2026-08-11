@@ -1335,6 +1335,7 @@ def published_pmt_run_export_draft(run_id):
         order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
         """,
         {"run_id": int(run_id)},
+        use_cache=False,
     )
     if df.empty:
         return pd.DataFrame()
@@ -1634,6 +1635,7 @@ def pmt_manage_run_items(run_id):
         order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
         """,
         {"run_id": int(run_id)},
+        use_cache=False,
     )
     if df.empty:
         return df
@@ -4139,7 +4141,7 @@ def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, n
 def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes=""):
     preview_df = pd.DataFrame(preview_records or [])
     if preview_df.empty:
-        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0}
+        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0}
     preview_df = preview_df.copy()
     preview_df["store_id"] = pd.to_numeric(preview_df.get("store_id"), errors="coerce")
     preview_df["Proposed Stop"] = pd.to_numeric(preview_df.get("Proposed Stop"), errors="coerce")
@@ -4147,12 +4149,13 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
     sort_columns = [col for col in ["Proposed Date", "Proposed Stop", "store_number"] if col in preview_df.columns]
     preview_df = preview_df.dropna(subset=["store_id"]).sort_values(sort_columns)
     if preview_df.empty:
-        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0}
+        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0}
     saved = 0
     created = 0
     updated = 0
     superseded = 0
     touched_months = set()
+    touched_store_ids = set()
     now = datetime.utcnow()
     with session_scope("Apply PMT manage schedule preview") as session:
         schedule_id = session.scalar(
@@ -4161,10 +4164,13 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
             .order_by(ScheduleItem.schedule_id)
         )
         if schedule_id is None:
-            return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0}
+            return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0}
         for _, row in preview_df.iterrows():
             store_id = int(row["store_id"])
-            proposed_date = pd.to_datetime(row.get("Proposed Date") or row.get("schedule_date"), errors="coerce")
+            touched_store_ids.add(store_id)
+            proposed_date = pd.to_datetime(row.get("Proposed Date"), errors="coerce")
+            if pd.isna(proposed_date):
+                proposed_date = pd.to_datetime(row.get("schedule_date"), errors="coerce")
             schedule_date = proposed_date.date() if pd.notna(proposed_date) else first_workday(date.today(), employee_id=int(employee_id))
             proposed_stop = scalar_int(row.get("Proposed Stop"), 0) or 1
             active_items = session.scalars(
@@ -4225,9 +4231,6 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
                 touched_months.add((item.employee_id, month_start(item.schedule_date)))
                 superseded += 1
             saved += 1
-        resequenced_rows = 0
-        for touched_employee_id, touched_month in touched_months:
-            resequenced_rows += resequence_pmt_month(session, run_id, touched_employee_id, touched_month)
         run = session.get(PMTScheduleRun, int(run_id))
         if run:
             active_store_count = session.scalar(
@@ -4255,13 +4258,39 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
                         int(run.months or 1),
                         ((run.cycle_end.year - run.cycle_start.year) * 12) + run.cycle_end.month - run.cycle_start.month + 1,
                     )
+        session.flush()
+        resequenced_rows = 0
+        for touched_employee_id, touched_month in touched_months:
+            resequenced_rows += resequence_pmt_month(session, run_id, touched_employee_id, touched_month)
+        session.flush()
+        export_visible_rows = 0
+        if touched_store_ids:
+            export_verify_query = select(func.count(ScheduleItem.id)).where(
+                ScheduleItem.pmt_schedule_run_id == int(run_id),
+                ScheduleItem.employee_id == int(employee_id),
+                ScheduleItem.store_id.in_(list(touched_store_ids)),
+                ScheduleItem.work_type == "PMT",
+                ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+            )
+            if run and run.cycle_start:
+                export_verify_query = export_verify_query.where(ScheduleItem.schedule_date >= run.cycle_start)
+            if run and run.cycle_end:
+                export_verify_query = export_verify_query.where(ScheduleItem.schedule_date <= run.cycle_end)
+            export_visible_rows = int(session.scalar(export_verify_query) or 0)
     log_action(
         "pmt manage schedule preview applied",
         "pmt_schedule_runs",
         int(run_id),
         f"Saved {saved} preview store(s); created {created}; updated {updated}; superseded {superseded}.",
     )
-    return {"saved": saved, "superseded": superseded, "created": created, "updated": updated, "resequenced_rows": resequenced_rows}
+    return {
+        "saved": saved,
+        "superseded": superseded,
+        "created": created,
+        "updated": updated,
+        "resequenced_rows": resequenced_rows,
+        "export_visible_rows": export_visible_rows,
+    }
 
 
 def add_assigned_stores_auto_fill_to_pmt_run(run_id, employee_id, store_ids, target_month, fill_end_month, monthly_capacity, notes=""):
@@ -7238,6 +7267,11 @@ with tab_manage:
                 st.caption(
                     "Use this as a fast manual scheduling workspace. The map is for visual routing; enter the store numbers below when you are ready to generate the editable route list."
                 )
+                if st.session_state.get("pmt_map_route_apply_notice"):
+                    notice = st.session_state.pop("pmt_map_route_apply_notice")
+                    st.success(notice.get("message", "Map route applied."))
+                    if notice.get("warning"):
+                        st.warning(notice["warning"])
                 if selected_month == "All months":
                     month_values = [value for value in manage_month_options(run_items) if value != "All months"]
                     if not month_values:
@@ -7463,13 +7497,22 @@ with tab_manage:
                         apply_df["technician"] = selected_tech_name
                         apply_df = distribute_route_across_months(apply_df, apply_start_month, route_monthly_target, selected_employee)
                         result = apply_pmt_manage_build_preview(selected_run, selected_employee, apply_df.to_dict("records"), route_note)
-                        st.success(
+                        st.cache_data.clear()
+                        notice_message = (
                             f"Applied map route: saved {result['saved']} store(s), created {result['created']}, updated {result['updated']}, "
                             f"superseded/transferred {result['superseded']}, resequenced {result['resequenced_rows']} row(s). "
+                            f"Export-visible active rows for {selected_tech_name}: {result.get('export_visible_rows', 0)}. "
                             f"Export from Published PMT Schedule Run #{selected_run} to see this schedule."
                         )
+                        notice_warning = ""
+                        if int(result.get("export_visible_rows", 0)) < int(result.get("saved", 0)):
+                            notice_warning = (
+                                "Some saved rows were not verified as active export rows. Do not export yet; review this schedule run in Manual Edit."
+                            )
+                        st.session_state["pmt_map_route_apply_notice"] = {"message": notice_message, "warning": notice_warning}
                         st.session_state["pmt_last_manual_route_export_run"] = int(selected_run)
                         st.session_state.pop(route_state_key, None)
+                        st.session_state.pop(route_click_queue_key, None)
                         st.session_state.pop(f"{route_state_key}_last_click", None)
                         st.rerun()
 
