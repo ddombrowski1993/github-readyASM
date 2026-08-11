@@ -1,13 +1,14 @@
 from datetime import date, datetime, timedelta
 import io
 import json
+import math
 import re
 import time
 
 import pandas as pd
 import streamlit as st
 import folium
-import streamlit.components.v1 as components
+from folium.plugins import Draw
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="PMT Monthly Scheduler", layout="wide")
@@ -3846,7 +3847,93 @@ def render_pmt_route_builder_map(store_pool, employees_df, route_df, show_assign
     return st_folium(fmap, width=None, height=620, key=key, returned_objects=["last_object_clicked"])
 
 
-def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_layer=True, show_existing_layer=True, component_key="pmt_route_picker"):
+def drawn_route_coordinates(drawings):
+    if not drawings:
+        return []
+    for drawing in drawings:
+        geometry = drawing.get("geometry", {}) if isinstance(drawing, dict) else {}
+        if geometry.get("type") != "LineString":
+            continue
+        coords = geometry.get("coordinates", [])
+        route_coords = []
+        for coord in coords:
+            if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+                lon, lat = coord[0], coord[1]
+                route_coords.append((float(lat), float(lon)))
+        if len(route_coords) >= 2:
+            return route_coords
+    return []
+
+
+def route_line_position(lat, lon, route_coords):
+    if len(route_coords) < 2:
+        return None, None
+    ref_lat = float(route_coords[0][0])
+    miles_per_lat = 69.0
+    miles_per_lon = max(0.1, 69.0 * math.cos(math.radians(ref_lat)))
+    px = float(lon) * miles_per_lon
+    py = float(lat) * miles_per_lat
+    cumulative = 0.0
+    best_position = None
+    best_distance = None
+    for index in range(len(route_coords) - 1):
+        lat1, lon1 = route_coords[index]
+        lat2, lon2 = route_coords[index + 1]
+        x1 = float(lon1) * miles_per_lon
+        y1 = float(lat1) * miles_per_lat
+        x2 = float(lon2) * miles_per_lon
+        y2 = float(lat2) * miles_per_lat
+        dx = x2 - x1
+        dy = y2 - y1
+        segment_length_sq = dx * dx + dy * dy
+        segment_length = segment_length_sq ** 0.5
+        if segment_length_sq == 0:
+            distance = ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
+            position = cumulative
+        else:
+            t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / segment_length_sq))
+            closest_x = x1 + t * dx
+            closest_y = y1 + t * dy
+            distance = ((px - closest_x) ** 2 + (py - closest_y) ** 2) ** 0.5
+            position = cumulative + (t * segment_length)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_position = position
+        cumulative += segment_length
+    return best_position, best_distance
+
+
+def build_route_from_drawn_line(route_pool, drawings, route_date, route_month, selected_tech_name, max_distance_miles=8.0):
+    route_coords = drawn_route_coordinates(drawings)
+    if not route_coords or route_pool.empty:
+        return pd.DataFrame(), []
+    ordered_rows = []
+    skipped_rows = []
+    mapped_pool = route_pool.copy()
+    mapped_pool["latitude"] = pd.to_numeric(mapped_pool.get("latitude"), errors="coerce")
+    mapped_pool["longitude"] = pd.to_numeric(mapped_pool.get("longitude"), errors="coerce")
+    mapped_pool = mapped_pool.dropna(subset=["latitude", "longitude"])
+    for _, row in mapped_pool.iterrows():
+        position, distance = route_line_position(float(row["latitude"]), float(row["longitude"]), route_coords)
+        if position is None or distance is None or float(distance) > float(max_distance_miles):
+            skipped_rows.append(row.to_dict())
+            continue
+        route_row = row.to_dict()
+        route_row["_route_position"] = position
+        route_row["_line_distance_miles"] = round(float(distance), 2)
+        ordered_rows.append(route_row)
+    if not ordered_rows:
+        return pd.DataFrame(), skipped_rows
+    route_df = pd.DataFrame(ordered_rows).sort_values(["_route_position", "store_number"]).reset_index(drop=True)
+    route_df["Proposed Stop"] = range(1, len(route_df) + 1)
+    route_df["Proposed Date"] = route_date
+    route_df["Proposed Month"] = month_label(route_month)
+    route_df["technician"] = selected_tech_name
+    route_df["Manual or Auto-Filled"] = "Drawn route line"
+    return route_df, skipped_rows
+
+
+def render_fast_pmt_route_picker_map(store_pool, employees_df, route_df=None, show_assigned_layer=True, show_existing_layer=True, component_key="pmt_route_picker"):
     mapped_pool = store_pool.copy()
     mapped_pool["latitude"] = pd.to_numeric(mapped_pool.get("latitude"), errors="coerce")
     mapped_pool["longitude"] = pd.to_numeric(mapped_pool.get("longitude"), errors="coerce")
@@ -3902,8 +3989,40 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
             ).add_to(schedule_group)
     assigned_group.add_to(fmap)
     schedule_group.add_to(fmap)
+    proposed = route_df.copy() if route_df is not None else pd.DataFrame()
+    if not proposed.empty:
+        proposed["latitude"] = pd.to_numeric(proposed.get("latitude"), errors="coerce")
+        proposed["longitude"] = pd.to_numeric(proposed.get("longitude"), errors="coerce")
+        proposed = proposed.dropna(subset=["latitude", "longitude"]).sort_values(["Proposed Stop", "store_number"])
+        route_points = proposed[["latitude", "longitude"]].astype(float).values.tolist()
+        if len(route_points) >= 2:
+            folium.PolyLine(route_points, color="#dc2626", weight=5, opacity=0.82, tooltip="Generated route").add_to(fmap)
+        for _, row in proposed.iterrows():
+            folium.Marker(
+                [float(row["latitude"]), float(row["longitude"])],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="background:#dc2626;color:white;border:2px solid white;border-radius:999px;
+                    width:28px;height:28px;line-height:24px;text-align:center;font-size:13px;font-weight:900;
+                    box-shadow:0 1px 5px rgba(0,0,0,.4);">{scalar_int(row.get('Proposed Stop'), 0)}</div>
+                    """
+                ),
+                tooltip=f"Stop {scalar_int(row.get('Proposed Stop'), 0)}: Store {row.get('store_number', '')}",
+            ).add_to(fmap)
+    Draw(
+        export=False,
+        draw_options={
+            "polyline": {"shapeOptions": {"color": "#dc2626", "weight": 5}},
+            "polygon": False,
+            "rectangle": False,
+            "circle": False,
+            "marker": False,
+            "circlemarker": False,
+        },
+        edit_options={"edit": True, "remove": True},
+    ).add_to(fmap)
     folium.LayerControl(collapsed=False).add_to(fmap)
-    components.html(fmap.get_root().render(), height=660, scrolling=False)
+    return st_folium(fmap, width=None, height=660, key=component_key, returned_objects=["all_drawings"])
 
 
 def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, notes=""):
@@ -7140,44 +7259,46 @@ with tab_manage:
                     employee_layers = employee_layers[
                         pd.to_numeric(employee_layers["employee_id"], errors="coerce").fillna(-1).astype(int).isin(route_employee_ids)
                     ].copy()
-                render_fast_pmt_route_picker_map(
+                route_df_for_map = pd.DataFrame(st.session_state.get(route_state_key, []))
+                map_result = render_fast_pmt_route_picker_map(
                     route_pool,
                     employee_layers,
+                    route_df=route_df_for_map,
                     show_assigned_layer=show_assigned_layer,
                     show_existing_layer=show_existing_layer,
                     component_key=route_component_key,
                 )
-                st.caption("Use the map as the visual guide. Select stores below in route order, then generate the numbered route list.")
-                route_options_df = route_pool.copy()
-                route_options_df["route_option"] = route_options_df.apply(
-                    lambda row: f"{row.get('store_number', '')} - {row.get('city', '')}, {row.get('state', '')} | Assigned: {clean(row.get('assigned_technician', '')) or clean(row.get('technician', '')) or 'Unassigned'}",
-                    axis=1,
+                st.caption("Draw one line through the stores in route order. The start of the line becomes stop 1, and the end becomes the last stop.")
+                draw_cols = st.columns([0.24, 0.26, 0.5])
+                max_line_distance = draw_cols[0].number_input(
+                    "Line match distance",
+                    min_value=1.0,
+                    max_value=30.0,
+                    value=8.0,
+                    step=1.0,
+                    help="Stores this many miles from the drawn line can be included. Lower this if it grabs stores you did not intend.",
+                    key=f"pmt_draw_route_max_distance_{selected_run}_{selected_employee}_{route_month}",
                 )
-                route_option_lookup = route_options_df.set_index("route_option")
-                selected_route_options = st.multiselect(
-                    "Pick stores in stop order",
-                    route_options_df["route_option"].tolist(),
-                    key=f"pmt_map_route_order_select_{selected_run}_{selected_employee}_{route_month}",
-                    help="Click stores in this selector in the same order you want the route. Use the map above to decide the order.",
-                )
-                if st.button("Generate / Refresh Route List", type="primary", key=f"pmt_map_generate_route_list_{selected_run}_{selected_employee}_{route_month}"):
-                    route_lookup_rows = []
-                    for option in selected_route_options:
-                        if option not in route_option_lookup.index:
-                            continue
-                        picked = route_option_lookup.loc[option]
-                        if isinstance(picked, pd.DataFrame):
-                            picked = picked.iloc[0]
-                        picked = picked.to_dict()
-                        picked["Proposed Stop"] = len(route_lookup_rows) + 1
-                        picked["Proposed Date"] = route_date
-                        picked["Proposed Month"] = month_label(route_month)
-                        picked["technician"] = selected_tech_name
-                        picked["Manual or Auto-Filled"] = "Manual map-guided selected"
-                        route_lookup_rows.append(picked)
-                    st.session_state[route_state_key] = route_lookup_rows
-                    st.session_state[route_click_queue_key] = route_lookup_rows
-                    st.rerun()
+                if draw_cols[1].button("Generate Route From Drawn Line", type="primary", key=f"pmt_draw_route_generate_{selected_run}_{selected_employee}_{route_month}"):
+                    drawings = (map_result or {}).get("all_drawings") if isinstance(map_result, dict) else []
+                    generated_route, skipped_rows = build_route_from_drawn_line(
+                        route_pool,
+                        drawings,
+                        route_date,
+                        route_month,
+                        selected_tech_name,
+                        max_distance_miles=float(max_line_distance),
+                    )
+                    if generated_route.empty:
+                        st.warning("No stores matched the drawn line. Draw a line closer to the store dots or increase Line match distance.")
+                    else:
+                        st.session_state[route_state_key] = generated_route.to_dict("records")
+                        st.session_state[route_click_queue_key] = generated_route.to_dict("records")
+                        st.session_state[f"{route_state_key}_notice"] = f"Generated {len(generated_route)} route stop(s) from the drawn line."
+                        st.rerun()
+                draw_cols[2].caption("Use the polyline tool on the left side of the map. Click along the route, then double-click/end the line. After the line appears, generate the route list.")
+                if st.session_state.get(f"{route_state_key}_notice"):
+                    st.success(st.session_state.pop(f"{route_state_key}_notice"))
 
                 route_df = pd.DataFrame(st.session_state.get(route_state_key, []))
                 if route_df.empty:
