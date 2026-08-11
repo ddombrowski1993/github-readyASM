@@ -1144,6 +1144,12 @@ def pmt_export_views(draft, route_filter="Both Route Options"):
 def schedule_month_counts(df, technician_column="technician", month_column="month", store_column="store_id", technician=None):
     if df.empty or month_column not in df.columns:
         return {}
+    if list(df.columns).count(month_column) != 1:
+        return {}
+    if store_column in df.columns and list(df.columns).count(store_column) != 1:
+        return {}
+    if technician and technician_column in df.columns and list(df.columns).count(technician_column) != 1:
+        return {}
     scoped = df.copy()
     if technician and technician_column in scoped.columns:
         scoped = scoped[scoped[technician_column].fillna("").astype(str) == str(technician)].copy()
@@ -7923,8 +7929,8 @@ with tab_manage:
                         preview_check["store_id"] = preview_check["store_id"].astype(int)
                         preview_month_col = "Proposed Month" if "Proposed Month" in preview_check.columns else "month"
                         preview_counts = schedule_month_counts(
-                            preview_check.rename(columns={preview_month_col: "month"}),
-                            month_column="month",
+                            preview_check,
+                            month_column=preview_month_col,
                             store_column="store_id",
                         )
                         fresh_run_rows = pmt_manage_run_items(selected_run)
