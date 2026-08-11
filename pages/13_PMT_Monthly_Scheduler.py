@@ -3855,6 +3855,8 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
         st.info("No mapped stores found for the selected PMT layer.")
         return
     fmap = folium.Map(location=[float(mapped_pool["latitude"].mean()), float(mapped_pool["longitude"].mean())], zoom_start=9, tiles="OpenStreetMap")
+    map_name = fmap.get_name()
+    click_scripts = []
     if employees_df is not None and not employees_df.empty:
         employees_df = employees_df.copy()
         employees_df["home_latitude"] = pd.to_numeric(employees_df.get("home_latitude"), errors="coerce")
@@ -3877,9 +3879,9 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
         {row.get('city', '')}, {row.get('state', '')}<br>
         Assigned PMT: {assigned_name}<br>
         Scheduled PMT: {scheduled_name or 'Not active in selected schedule'}<br>
-        Fast mode: use this map to identify stores, then enter the store numbers below.
+        Fast mode: click this store to add it to the route.
         """
-        folium.CircleMarker(
+        marker = folium.CircleMarker(
             [float(row["latitude"]), float(row["longitude"])],
             radius=8,
             color="#ffffff",
@@ -3890,6 +3892,15 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
             popup=folium.Popup(popup, max_width=340),
             tooltip=f"Store {row.get('store_number', '')} | Assigned: {assigned_name}",
         ).add_to(assigned_group)
+        payload = {
+            "store_id": scalar_int(row.get("store_id"), 0),
+            "store_number": clean(row.get("store_number", "")),
+            "city": clean(row.get("city", "")),
+            "state": clean(row.get("state", "")),
+            "lat": float(row["latitude"]),
+            "lng": float(row["longitude"]),
+        }
+        click_scripts.append(f"{marker.get_name()}.on('click', function() {{ addRouteStore({json.dumps(payload)}); }});")
         if scheduled_name:
             folium.CircleMarker(
                 [float(row["latitude"]), float(row["longitude"])],
@@ -3903,6 +3914,88 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
     assigned_group.add_to(fmap)
     schedule_group.add_to(fmap)
     folium.LayerControl(collapsed=False).add_to(fmap)
+    route_key_json = json.dumps(component_key)
+    route_script = f"""
+    <script>
+    var routeStores = [];
+    var routeNumberMarkers = [];
+    var routeLine = null;
+    var routeKey = {route_key_json};
+
+    function refreshRouteDisplay() {{
+        routeNumberMarkers.forEach(function(marker) {{ {map_name}.removeLayer(marker); }});
+        routeNumberMarkers = [];
+        if (routeLine) {{
+            {map_name}.removeLayer(routeLine);
+            routeLine = null;
+        }}
+        var points = [];
+        routeStores.forEach(function(store, index) {{
+            points.push([store.lat, store.lng]);
+            var numberIcon = L.divIcon({{
+                className: "pmt-route-number-icon",
+                html: '<div style="background:#dc2626;color:white;border:2px solid white;border-radius:999px;width:28px;height:28px;line-height:24px;text-align:center;font-size:13px;font-weight:900;box-shadow:0 1px 5px rgba(0,0,0,.4);">' + (index + 1) + '</div>',
+                iconSize: [28, 28],
+                iconAnchor: [14, 14]
+            }});
+            var marker = L.marker([store.lat, store.lng], {{
+                icon: numberIcon,
+                interactive: false
+            }}).addTo({map_name});
+            routeNumberMarkers.push(marker);
+        }});
+        if (points.length > 1) {{
+            routeLine = L.polyline(points, {{color:'#dc2626', weight:5, opacity:0.82}}).addTo({map_name});
+        }}
+        var count = document.getElementById('pmtRouteCount');
+        if (count) count.textContent = routeStores.length + ' selected';
+    }}
+
+    function addRouteStore(store) {{
+        if (routeStores.some(function(existing) {{ return existing.store_id === store.store_id; }})) return;
+        routeStores.push(store);
+        refreshRouteDisplay();
+    }}
+
+    function undoRouteStore() {{
+        routeStores.pop();
+        refreshRouteDisplay();
+    }}
+
+    function clearRouteStores() {{
+        routeStores = [];
+        refreshRouteDisplay();
+    }}
+
+    function finishRouteStores() {{
+        var route = routeStores.map(function(store) {{ return store.store_number; }}).join(',');
+        var url = new URL(window.parent.location.href);
+        url.searchParams.set('pmt_route_builder_key', routeKey);
+        url.searchParams.set('pmt_route_builder_route', route);
+        window.parent.location.href = url.toString();
+    }}
+
+    var routeControl = L.control({{position: 'bottomleft'}});
+    routeControl.onAdd = function() {{
+        var div = L.DomUtil.create('div', 'pmt-route-control');
+        div.style.background = 'white';
+        div.style.border = '1px solid #cbd5e1';
+        div.style.borderRadius = '6px';
+        div.style.padding = '6px';
+        div.style.boxShadow = '0 3px 12px rgba(15,23,42,.18)';
+        div.innerHTML = '<div id="pmtRouteCount" style="font-weight:800;margin-bottom:5px;">0 selected</div>' +
+            '<button type="button" onclick="finishRouteStores()" style="margin-right:4px;font-weight:700;">Done - Build Route List</button>' +
+            '<button type="button" onclick="undoRouteStore()" style="margin-right:4px;">Undo</button>' +
+            '<button type="button" onclick="clearRouteStores()">Clear</button>';
+        L.DomEvent.disableClickPropagation(div);
+        return div;
+    }};
+    routeControl.addTo({map_name});
+
+    {chr(10).join(click_scripts)}
+    </script>
+    """
+    fmap.get_root().script.add_child(folium.Element(route_script))
     components.html(fmap.get_root().render(), height=660, scrolling=False)
 
 
@@ -7109,9 +7202,49 @@ with tab_manage:
                 route_pool = pmt_route_builder_store_pool(run_items, route_employee_ids, route_month, run_id=selected_run)
                 route_state_key = f"pmt_manual_map_route_{selected_run}_{selected_employee}_{route_month}"
                 route_click_queue_key = f"{route_state_key}_click_queue"
+                route_component_key = f"pmt_route_builder_map_{selected_run}_{selected_employee}_{route_month}"
                 route_records = st.session_state.get(route_state_key, [])
                 queued_route_records = st.session_state.get(route_click_queue_key, [])
                 route_df = pd.DataFrame(route_records)
+
+                query_route_text = ""
+                try:
+                    if st.query_params.get("pmt_route_builder_key") == route_component_key:
+                        query_route_text = clean(st.query_params.get("pmt_route_builder_route", ""))
+                except Exception:
+                    query_route_text = ""
+                route_query_processed_key = f"{route_state_key}_processed_query_route"
+                if query_route_text and st.session_state.get(route_query_processed_key) != query_route_text:
+                    route_tokens = [token for token in re.split(r"[\s,;|]+", query_route_text) if token]
+                    route_lookup_rows = []
+                    route_pool_lookup = route_pool.copy()
+                    route_pool_lookup["_store_keys"] = route_pool_lookup["store_number"].astype(str).apply(lambda value: set(store_number_keys(value)))
+                    used_store_ids = set()
+                    missing_tokens = []
+                    for token in route_tokens:
+                        token_keys = set(store_number_keys(token))
+                        matches = route_pool_lookup[
+                            route_pool_lookup["_store_keys"].apply(lambda values: bool(values & token_keys))
+                            & ~route_pool_lookup["store_id"].astype(int).isin(used_store_ids)
+                        ].copy()
+                        if matches.empty:
+                            missing_tokens.append(token)
+                            continue
+                        picked = matches.iloc[0].to_dict()
+                        picked["Proposed Stop"] = len(route_lookup_rows) + 1
+                        picked["Proposed Date"] = route_date
+                        picked["Proposed Month"] = month_label(route_month)
+                        picked["technician"] = selected_tech_name
+                        picked["Manual or Auto-Filled"] = "Map click selected"
+                        route_lookup_rows.append(picked)
+                        used_store_ids.add(int(picked["store_id"]))
+                    st.session_state[route_state_key] = route_lookup_rows
+                    st.session_state[route_click_queue_key] = route_lookup_rows
+                    st.session_state[route_query_processed_key] = query_route_text
+                    route_records = route_lookup_rows
+                    route_df = pd.DataFrame(route_records)
+                    if missing_tokens:
+                        st.warning(f"These selected stores were not found on the selected map layer: {', '.join(missing_tokens[:20])}")
 
                 command_cols = st.columns(4)
                 if command_cols[0].button("Load Existing Route", key=f"pmt_map_load_existing_{selected_run}_{selected_employee}_{route_month}"):
@@ -7130,6 +7263,7 @@ with tab_manage:
                     st.session_state.pop(route_state_key, None)
                     st.session_state.pop(route_click_queue_key, None)
                     st.session_state.pop(f"{route_state_key}_last_click", None)
+                    st.session_state.pop(route_query_processed_key, None)
                     st.rerun()
                 command_cols[2].metric("Generated Stops", len(route_records))
                 command_cols[3].metric("Map Stores", len(route_pool))
@@ -7144,44 +7278,9 @@ with tab_manage:
                     employee_layers,
                     show_assigned_layer=show_assigned_layer,
                     show_existing_layer=show_existing_layer,
-                    component_key=f"pmt_route_builder_map_{selected_run}_{selected_employee}_{route_month}",
+                    component_key=route_component_key,
                 )
-                st.caption("Use the map to plan the route, then enter the store numbers in order below and generate the editable route list.")
-                pasted_route_text = st.text_area(
-                    "Route store numbers in stop order",
-                    placeholder="One store per line, or separated by commas/spaces",
-                    height=110,
-                    key=f"pmt_map_route_paste_{selected_run}_{selected_employee}_{route_month}",
-                )
-                if st.button("Generate / Refresh Route List", type="primary", key=f"pmt_map_generate_route_list_{selected_run}_{selected_employee}_{route_month}"):
-                    pasted_tokens = [token for token in re.split(r"[\s,;|]+", clean(pasted_route_text)) if token]
-                    route_lookup_rows = []
-                    route_pool_lookup = route_pool.copy()
-                    route_pool_lookup["_store_keys"] = route_pool_lookup["store_number"].astype(str).apply(lambda value: set(store_number_keys(value)))
-                    used_store_ids = set()
-                    missing_tokens = []
-                    for token in pasted_tokens:
-                        token_keys = set(store_number_keys(token))
-                        matches = route_pool_lookup[
-                            route_pool_lookup["_store_keys"].apply(lambda values: bool(values & token_keys))
-                            & ~route_pool_lookup["store_id"].astype(int).isin(used_store_ids)
-                        ].copy()
-                        if matches.empty:
-                            missing_tokens.append(token)
-                            continue
-                        picked = matches.iloc[0].to_dict()
-                        picked["Proposed Stop"] = len(route_lookup_rows) + 1
-                        picked["Proposed Date"] = route_date
-                        picked["Proposed Month"] = month_label(route_month)
-                        picked["technician"] = selected_tech_name
-                        picked["Manual or Auto-Filled"] = "Fast map selected"
-                        route_lookup_rows.append(picked)
-                        used_store_ids.add(int(picked["store_id"]))
-                    st.session_state[route_state_key] = route_lookup_rows
-                    st.session_state[route_click_queue_key] = route_lookup_rows
-                    if missing_tokens:
-                        st.warning(f"These pasted stores were not found on the selected map layer: {', '.join(missing_tokens[:20])}")
-                    st.rerun()
+                st.caption("Click store dots on the map. The map will show 1, 2, 3, 4 as you click. When finished, click `Done - Build Route List` in the map.")
 
                 route_df = pd.DataFrame(st.session_state.get(route_state_key, []))
                 if route_df.empty:
