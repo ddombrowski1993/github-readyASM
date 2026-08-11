@@ -1107,6 +1107,9 @@ def pmt_export_views(draft, route_filter="Both Route Options"):
         export_df = draft_with_route_order(export_df, route_filter)
     export_df["_month_sort"] = pd.to_datetime(export_df["month_start"], errors="coerce")
     export_df = export_df.sort_values(["_month_sort", "technician", "sequence_number", "store_number"])
+    export_df["sequence_number"] = (
+        export_df.groupby(["employee_id", "month"], dropna=False).cumcount() + 1
+    )
     schedule_view = export_df[
         ["technician", "month", "sequence_number", "store_number", "address", "city", "state", "zip"]
     ].rename(
@@ -1151,6 +1154,8 @@ def pmt_schedule_workbook_bytes(draft, route_filter="Both Route Options"):
         if schedule_view.empty:
             schedule_view.to_excel(writer, index=False, sheet_name="Schedule")
         else:
+            full_team_sheet = safe_sheet_name("Full Team", used_sheets)
+            schedule_view.to_excel(writer, index=False, sheet_name=full_team_sheet)
             month_sort = draft[["month", "month_start"]].drop_duplicates().copy()
             month_sort["_month_sort"] = pd.to_datetime(month_sort["month_start"], errors="coerce")
             for month in month_sort.sort_values("_month_sort")["month"].tolist():
@@ -2861,21 +2866,7 @@ def resequence_pmt_month(session, run_id, employee_id, month_start_value):
         )
         .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.store_id, ScheduleItem.id)
     ).all()
-    employee = session.get(Employee, int(employee_id))
-    home_lat = to_float(getattr(employee, "home_latitude", None)) if employee else None
-    home_lon = to_float(getattr(employee, "home_longitude", None)) if employee else None
-
-    def route_sort_key(item):
-        store = session.get(Store, int(item.store_id)) if item.store_id else None
-        store_lat = to_float(getattr(store, "latitude", None)) if store else None
-        store_lon = to_float(getattr(store, "longitude", None)) if store else None
-        if home_lat is not None and home_lon is not None and store_lat is not None and store_lon is not None:
-            distance = haversine_miles(home_lat, home_lon, store_lat, store_lon)
-        else:
-            distance = 999999
-        return (distance, clean(getattr(store, "store_number", "")) if store else "", item.schedule_date, item.sequence_number or 0, item.id)
-
-    for index, item in enumerate(sorted(items, key=route_sort_key), start=1):
+    for index, item in enumerate(items, start=1):
         item.sequence_number = index
     return len(items)
 
