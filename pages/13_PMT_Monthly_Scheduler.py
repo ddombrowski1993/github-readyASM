@@ -3723,7 +3723,7 @@ def assigned_pmt_store_candidates(employee_id, run_id=None, include_scheduled=Fa
     return df
 
 
-def pmt_route_builder_store_pool(run_items, employee_ids, selected_month="All months", run_id=None):
+def pmt_route_builder_store_pool(run_items, employee_ids, selected_month="All months", run_id=None, selected_month_end=None):
     employee_ids = [int(employee_id) for employee_id in employee_ids if scalar_int(employee_id, 0)]
     if not employee_ids:
         return pd.DataFrame()
@@ -3741,7 +3741,13 @@ def pmt_route_builder_store_pool(run_items, employee_ids, selected_month="All mo
         scheduled = run_items[pmt_active_item_mask(run_items)].copy()
         scheduled = scheduled[pd.to_numeric(scheduled.get("employee_id"), errors="coerce").fillna(-1).astype(int).isin(employee_ids)].copy()
         if selected_month != "All months" and "month_start" in scheduled.columns:
-            scheduled = scheduled[scheduled["month_start"] == selected_month].copy()
+            if selected_month_end is None:
+                scheduled = scheduled[scheduled["month_start"] == selected_month].copy()
+            else:
+                scheduled = scheduled[
+                    (scheduled["month_start"] >= selected_month)
+                    & (scheduled["month_start"] <= selected_month_end)
+                ].copy()
         if not scheduled.empty:
             scheduled = scheduled.rename(columns={"employee_id": "scheduled_employee_id", "technician": "scheduled_technician"})
             scheduled["assigned_employee_id"] = pd.to_numeric(scheduled.get("assigned_pmt_employee_id"), errors="coerce")
@@ -7286,21 +7292,37 @@ with tab_manage:
                     st.success(notice.get("message", "Map route applied."))
                     if notice.get("warning"):
                         st.warning(notice["warning"])
+                schedule_month_values = schedule_run_month_options(run_items, run_cycle_start, run_cycle_end)
+                if not schedule_month_values:
+                    schedule_month_values = [month_start(date.today())]
                 if selected_month == "All months":
-                    month_values = ["All schedule months"] + schedule_run_month_options(run_items, run_cycle_start, run_cycle_end)
-                    if not month_values:
-                        month_values = ["All schedule months", month_start(date.today())]
-                    route_month = st.selectbox(
-                        "Map / existing schedule month",
-                        month_values,
+                    map_month_cols = st.columns([0.22, 0.22, 0.56])
+                    map_start_month = map_month_cols[0].selectbox(
+                        "Map start month",
+                        schedule_month_values,
                         index=0,
-                        format_func=lambda value: value if isinstance(value, str) else month_label(value),
-                        help="This controls what existing schedule rows appear on the map. Choose one month, or All schedule months to see the whole selected schedule run. It does not control where newly saved work starts.",
-                        key=f"pmt_map_route_month_{selected_run}_{selected_employee}",
+                        format_func=month_label,
+                        help="First existing schedule month to show on the map.",
+                        key=f"pmt_map_route_start_month_{selected_run}_{selected_employee}",
+                    )
+                    valid_end_month_values = [value for value in schedule_month_values if value >= map_start_month]
+                    map_end_month = map_month_cols[1].selectbox(
+                        "Map end month",
+                        valid_end_month_values,
+                        index=len(valid_end_month_values) - 1,
+                        format_func=month_label,
+                        help="Last existing schedule month to show on the map.",
+                        key=f"pmt_map_route_end_month_{selected_run}_{selected_employee}_{map_start_month}",
+                    )
+                    map_month_cols[2].caption(
+                        f"Map is showing existing schedule rows from {month_label(map_start_month)} through {month_label(map_end_month)}. "
+                        "This does not control where newly saved work starts."
                     )
                 else:
-                    route_month = selected_month
-                    st.caption(f"Map / existing schedule month: {month_label(route_month)}")
+                    map_start_month = selected_month
+                    map_end_month = selected_month
+                    st.caption(f"Map month range: {month_label(map_start_month)} through {month_label(map_end_month)}")
+                map_month_key = f"{map_start_month}_{map_end_month}"
                 layer_cols = st.columns([0.42, 0.18, 0.18, 0.22])
                 extra_employee_options = [
                     int(value)
@@ -7311,18 +7333,17 @@ with tab_manage:
                     "Add PMT layers",
                     extra_employee_options,
                     format_func=lambda value: tech_options.set_index("employee_id").loc[value, "technician"],
-                    key=f"pmt_map_route_extra_pmts_{selected_run}_{selected_employee}_{route_month}",
+                    key=f"pmt_map_route_extra_pmts_{selected_run}_{selected_employee}_{map_month_key}",
                 )
-                show_assigned_layer = layer_cols[1].checkbox("Assigned layer", value=True, key=f"pmt_map_route_assigned_layer_{selected_run}_{selected_employee}_{route_month}")
-                show_existing_layer = layer_cols[2].checkbox("Existing route layer", value=True, key=f"pmt_map_route_existing_layer_{selected_run}_{selected_employee}_{route_month}")
+                show_assigned_layer = layer_cols[1].checkbox("Assigned layer", value=True, key=f"pmt_map_route_assigned_layer_{selected_run}_{selected_employee}_{map_month_key}")
+                show_existing_layer = layer_cols[2].checkbox("Existing route layer", value=True, key=f"pmt_map_route_existing_layer_{selected_run}_{selected_employee}_{map_month_key}")
                 current_schedule_month = month_start(date.today())
-                route_month_for_start = current_schedule_month if route_month == "All schedule months" else route_month
-                if route_month_for_start < current_schedule_month:
+                if map_start_month < current_schedule_month:
                     st.warning(
-                        f"{month_label(route_month_for_start)} is in the past. New map-built route work will start no earlier than {month_label(current_schedule_month)}."
+                        f"{month_label(map_start_month)} is in the past. New map-built route work will start no earlier than {month_label(current_schedule_month)}."
                     )
                 schedule_end_month = month_start(run_cycle_end) if run_cycle_end else add_months(current_schedule_month, 11)
-                start_month_floor = max(route_month_for_start, current_schedule_month)
+                start_month_floor = max(map_start_month, current_schedule_month)
                 if schedule_end_month < start_month_floor:
                     schedule_end_month = start_month_floor
                 placement_month_options = []
@@ -7336,7 +7357,7 @@ with tab_manage:
                     index=0,
                     format_func=month_label,
                     help="This controls the first month that the new saved route will be added to the schedule. Past months are not allowed for new work.",
-                    key=f"pmt_map_route_apply_start_month_{selected_run}_{selected_employee}_{route_month}",
+                    key=f"pmt_map_route_apply_start_month_{selected_run}_{selected_employee}_{map_month_key}",
                 )
                 placement_cols = st.columns([0.22, 0.28, 0.5])
                 route_monthly_target = placement_cols[0].number_input(
@@ -7345,7 +7366,7 @@ with tab_manage:
                     max_value=50,
                     value=10,
                     step=1,
-                    key=f"pmt_map_route_monthly_target_{selected_run}_{selected_employee}_{route_month}",
+                    key=f"pmt_map_route_monthly_target_{selected_run}_{selected_employee}_{map_month_key}",
                 )
                 route_date = first_workday(apply_start_month, employee_id=int(selected_employee))
                 placement_cols[1].metric("First route date", route_date.strftime("%m/%d/%Y"))
@@ -7354,10 +7375,10 @@ with tab_manage:
                     "The drawn line controls order; this setting controls which month each stop lands in."
                 )
                 route_employee_ids = [int(selected_employee)] + [int(value) for value in extra_layer_employee_ids]
-                route_pool = pmt_route_builder_store_pool(run_items, route_employee_ids, route_month, run_id=selected_run)
-                route_state_key = f"pmt_manual_map_route_{selected_run}_{selected_employee}_{route_month}"
+                route_pool = pmt_route_builder_store_pool(run_items, route_employee_ids, map_start_month, run_id=selected_run, selected_month_end=map_end_month)
+                route_state_key = f"pmt_manual_map_route_{selected_run}_{selected_employee}_{map_month_key}"
                 route_click_queue_key = f"{route_state_key}_click_queue"
-                route_component_key = f"pmt_route_builder_map_{selected_run}_{selected_employee}_{route_month}"
+                route_component_key = f"pmt_route_builder_map_{selected_run}_{selected_employee}_{map_month_key}"
                 route_records = st.session_state.get(route_state_key, [])
                 queued_route_records = st.session_state.get(route_click_queue_key, [])
                 route_df = pd.DataFrame(route_records)
@@ -7367,13 +7388,17 @@ with tab_manage:
                     "Generating from the map only creates a preview list. Use the Apply button below to save it into this selected schedule."
                 )
                 st.caption(
-                    f"`Map / existing schedule month` is what you are viewing: {route_month if isinstance(route_month, str) else month_label(route_month)}. "
+                    f"`Map start/end month` is what you are viewing: {month_label(map_start_month)} through {month_label(map_end_month)}. "
                     f"`New schedule starts` is where the saved work will be placed: {month_label(apply_start_month)}."
                 )
 
                 command_cols = st.columns(4)
-                if command_cols[0].button("Load Existing Route", key=f"pmt_map_load_existing_{selected_run}_{selected_employee}_{route_month}"):
-                    existing_route = filter_manage_scope(run_items, selected_employee, route_month, "Active").sort_values(["schedule_date", "sequence_number", "store_number"]).copy()
+                if command_cols[0].button("Load Existing Route", key=f"pmt_map_load_existing_{selected_run}_{selected_employee}_{map_month_key}"):
+                    existing_route = filter_manage_scope(run_items, selected_employee, "All months", "Active")
+                    existing_route = existing_route[
+                        (existing_route["month_start"] >= map_start_month)
+                        & (existing_route["month_start"] <= map_end_month)
+                    ].sort_values(["schedule_date", "sequence_number", "store_number"]).copy()
                     if existing_route.empty:
                         st.info("No existing active route was found for this PMT/month.")
                     else:
@@ -7384,7 +7409,7 @@ with tab_manage:
                         st.session_state[route_state_key] = existing_route.to_dict("records")
                         st.session_state[route_click_queue_key] = existing_route.to_dict("records")
                         st.rerun()
-                if command_cols[1].button("Clear Proposed Route", key=f"pmt_map_clear_route_{selected_run}_{selected_employee}_{route_month}"):
+                if command_cols[1].button("Clear Proposed Route", key=f"pmt_map_clear_route_{selected_run}_{selected_employee}_{map_month_key}"):
                     st.session_state.pop(route_state_key, None)
                     st.session_state.pop(route_click_queue_key, None)
                     st.session_state.pop(f"{route_state_key}_last_click", None)
@@ -7415,9 +7440,9 @@ with tab_manage:
                     value=8.0,
                     step=1.0,
                     help="Stores this many miles from the drawn line can be included. Lower this if it grabs stores you did not intend.",
-                    key=f"pmt_draw_route_max_distance_{selected_run}_{selected_employee}_{route_month}",
+                    key=f"pmt_draw_route_max_distance_{selected_run}_{selected_employee}_{map_month_key}",
                 )
-                if draw_cols[1].button("Generate Route From Drawn Line", type="primary", key=f"pmt_draw_route_generate_{selected_run}_{selected_employee}_{route_month}"):
+                if draw_cols[1].button("Generate Route From Drawn Line", type="primary", key=f"pmt_draw_route_generate_{selected_run}_{selected_employee}_{map_month_key}"):
                     drawings = (map_result or {}).get("all_drawings") if isinstance(map_result, dict) else []
                     generated_route, skipped_rows = build_route_from_drawn_line(
                         route_pool,
@@ -7485,10 +7510,10 @@ with tab_manage:
                             "scheduled_date": st.column_config.DateColumn("Current Scheduled Date"),
                             "distance_from_home": st.column_config.NumberColumn("Miles From Home", format="%.1f"),
                         },
-                        key=f"pmt_map_route_editor_{selected_run}_{selected_employee}_{route_month}",
+                        key=f"pmt_map_route_editor_{selected_run}_{selected_employee}_{map_month_key}",
                     )
                     update_cols = st.columns([0.22, 0.26, 0.32, 0.2])
-                    if update_cols[0].button("Update Route List", key=f"pmt_map_update_route_list_{selected_run}_{selected_employee}_{route_month}"):
+                    if update_cols[0].button("Update Route List", key=f"pmt_map_update_route_list_{selected_run}_{selected_employee}_{map_month_key}"):
                         edited_ids = edited_route.loc[~edited_route["Remove"].astype(bool), "store_id"].dropna().astype(int).tolist()
                         edited_stops = edited_route.loc[~edited_route["Remove"].astype(bool), ["store_id", "Route Order"]].copy()
                         stop_lookup = dict(zip(edited_stops["store_id"].astype(int), pd.to_numeric(edited_stops["Route Order"], errors="coerce").fillna(9999).astype(int)))
@@ -7502,17 +7527,17 @@ with tab_manage:
                     route_note = update_cols[1].text_input(
                         "Apply note",
                         value="Manual map route builder schedule update.",
-                        key=f"pmt_map_route_note_{selected_run}_{selected_employee}_{route_month}",
+                        key=f"pmt_map_route_note_{selected_run}_{selected_employee}_{map_month_key}",
                     )
                     apply_confirm = update_cols[2].checkbox(
                         f"I reviewed this route and want to save it to schedule #{selected_run} for {selected_tech_name}.",
-                        key=f"pmt_map_route_apply_confirm_{selected_run}_{selected_employee}_{route_month}",
+                        key=f"pmt_map_route_apply_confirm_{selected_run}_{selected_employee}_{map_month_key}",
                     )
                     if update_cols[3].button(
                         f"Apply to Schedule #{selected_run}",
                         type="primary",
                         disabled=not apply_confirm,
-                        key=f"pmt_map_route_apply_{selected_run}_{selected_employee}_{route_month}",
+                        key=f"pmt_map_route_apply_{selected_run}_{selected_employee}_{map_month_key}",
                     ):
                         apply_df = route_df.drop(columns=["Remove"], errors="ignore").copy()
                         apply_df["technician"] = selected_tech_name
