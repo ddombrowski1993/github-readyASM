@@ -4043,21 +4043,30 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, route_df=None, sh
     if not proposed.empty:
         proposed["latitude"] = pd.to_numeric(proposed.get("latitude"), errors="coerce")
         proposed["longitude"] = pd.to_numeric(proposed.get("longitude"), errors="coerce")
-        proposed = proposed.dropna(subset=["latitude", "longitude"]).sort_values(["Proposed Stop", "store_number"])
+        if "Route Order" in proposed.columns:
+            proposed["Route Order"] = pd.to_numeric(proposed["Route Order"], errors="coerce")
+        else:
+            proposed["Route Order"] = pd.Series(range(1, len(proposed) + 1), index=proposed.index)
+        proposed["Route Order"] = proposed["Route Order"].where(
+            proposed["Route Order"].notna(),
+            pd.Series(range(1, len(proposed) + 1), index=proposed.index),
+        ).astype(int)
+        proposed = proposed.dropna(subset=["latitude", "longitude"]).sort_values(["Route Order", "store_number"])
         route_points = proposed[["latitude", "longitude"]].astype(float).values.tolist()
         if len(route_points) >= 2:
             folium.PolyLine(route_points, color="#dc2626", weight=5, opacity=0.82, tooltip="Generated route").add_to(fmap)
         for _, row in proposed.iterrows():
+            route_order = scalar_int(row.get("Route Order"), 0)
             folium.Marker(
                 [float(row["latitude"]), float(row["longitude"])],
                 icon=folium.DivIcon(
                     html=f"""
                     <div style="background:#dc2626;color:white;border:2px solid white;border-radius:999px;
                     width:28px;height:28px;line-height:24px;text-align:center;font-size:13px;font-weight:900;
-                    box-shadow:0 1px 5px rgba(0,0,0,.4);">{scalar_int(row.get('Proposed Stop'), 0)}</div>
+                    box-shadow:0 1px 5px rgba(0,0,0,.4);">{route_order}</div>
                     """
                 ),
-                tooltip=f"Stop {scalar_int(row.get('Proposed Stop'), 0)}: Store {row.get('store_number', '')}",
+                tooltip=f"Route Stop {route_order}: Store {row.get('store_number', '')}",
             ).add_to(fmap)
     Draw(
         export=False,
@@ -7488,6 +7497,7 @@ with tab_manage:
                     month_distribution = route_df["Proposed Month"].value_counts(sort=False).to_dict() if "Proposed Month" in route_df.columns else {}
                     if month_distribution:
                         st.caption("Preview monthly distribution: " + " | ".join(f"{month}: {count}" for month, count in month_distribution.items()))
+                    st.caption("Map numbers use `Route Order` for the full route. `Stop #` resets inside each scheduled month for the export.")
                     route_editor_cols = [
                         "Remove", "Route Order", "Proposed Month", "Proposed Date", "Proposed Stop", "store_id", "store_number", "city", "state",
                         "assigned_technician", "scheduled_technician", "scheduled_date", "distance_from_home", "Manual or Auto-Filled",
