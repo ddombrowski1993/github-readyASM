@@ -3855,7 +3855,6 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
         st.info("No mapped stores found for the selected PMT layer.")
         return
     fmap = folium.Map(location=[float(mapped_pool["latitude"].mean()), float(mapped_pool["longitude"].mean())], zoom_start=9, tiles="OpenStreetMap")
-    click_scripts = []
     if employees_df is not None and not employees_df.empty:
         employees_df = employees_df.copy()
         employees_df["home_latitude"] = pd.to_numeric(employees_df.get("home_latitude"), errors="coerce")
@@ -3872,23 +3871,15 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
     for _, row in mapped_pool.iterrows():
         assigned_name = clean(row.get("assigned_technician", "")) or clean(row.get("technician", "")) or "Unassigned"
         scheduled_name = clean(row.get("scheduled_technician", "")) or ""
-        store_payload = {
-            "store_id": scalar_int(row.get("store_id"), 0),
-            "store_number": clean(row.get("store_number", "")),
-            "city": clean(row.get("city", "")),
-            "state": clean(row.get("state", "")),
-            "assigned_technician": assigned_name,
-            "scheduled_technician": scheduled_name,
-        }
         popup = f"""
         <b>Store {row.get('store_number', '')}</b><br>
         {row.get('address', '')}<br>
         {row.get('city', '')}, {row.get('state', '')}<br>
         Assigned PMT: {assigned_name}<br>
         Scheduled PMT: {scheduled_name or 'Not active in selected schedule'}<br>
-        Fast mode: click to add this store to the route list inside the map.
+        Fast mode: use this map to identify stores, then enter the store numbers below.
         """
-        marker = folium.CircleMarker(
+        folium.CircleMarker(
             [float(row["latitude"]), float(row["longitude"])],
             radius=8,
             color="#ffffff",
@@ -3899,7 +3890,6 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
             popup=folium.Popup(popup, max_width=340),
             tooltip=f"Store {row.get('store_number', '')} | Assigned: {assigned_name}",
         ).add_to(assigned_group)
-        click_scripts.append(f"{marker.get_name()}.on('click', function() {{ addRouteStore({json.dumps(store_payload)}); }});")
         if scheduled_name:
             folium.CircleMarker(
                 [float(row["latitude"]), float(row["longitude"])],
@@ -3913,58 +3903,6 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
     assigned_group.add_to(fmap)
     schedule_group.add_to(fmap)
     folium.LayerControl(collapsed=False).add_to(fmap)
-    safe_key = key(component_key)
-    panel_html = f"""
-    <div id="{safe_key}_route_panel" style="
-        position:absolute; top:12px; right:12px; z-index:9999; width:320px; max-height:560px;
-        background:white; border:1px solid #cbd5e1; border-radius:8px; box-shadow:0 8px 24px rgba(15,23,42,.18);
-        padding:10px; font-family:Arial, sans-serif; font-size:13px;">
-        <div style="font-weight:800; font-size:14px; margin-bottom:6px;">Fast Route Click List</div>
-        <div style="color:#475569; margin-bottom:8px;">Click stores on the map. No page reload happens until you paste the final route below the map.</div>
-        <ol id="{safe_key}_route_list" style="margin:0 0 8px 22px; padding:0; max-height:220px; overflow:auto;"></ol>
-        <textarea id="{safe_key}_route_text" style="width:100%; height:88px; box-sizing:border-box; font-size:12px;" placeholder="Store numbers appear here when you click stores"></textarea>
-        <div style="display:flex; gap:6px; margin-top:8px;">
-            <button type="button" onclick="copyRouteText()" style="flex:1; padding:6px; font-weight:700;">Done / Copy Route</button>
-            <button type="button" onclick="clearRouteStores()" style="padding:6px;">Clear</button>
-        </div>
-    </div>
-    """
-    script = f"""
-    <script>
-    var routeStores = [];
-    function refreshRoutePanel() {{
-        var list = document.getElementById("{safe_key}_route_list");
-        var text = document.getElementById("{safe_key}_route_text");
-        if (!list || !text) return;
-        list.innerHTML = "";
-        routeStores.forEach(function(store, index) {{
-            var item = document.createElement("li");
-            item.textContent = store.store_number + " - " + store.city + ", " + store.state;
-            list.appendChild(item);
-        }});
-        text.value = routeStores.map(function(store) {{ return store.store_number; }}).join("\\n");
-    }}
-    function addRouteStore(store) {{
-        if (routeStores.some(function(existing) {{ return existing.store_id === store.store_id; }})) return;
-        routeStores.push(store);
-        refreshRoutePanel();
-    }}
-    function clearRouteStores() {{
-        routeStores = [];
-        refreshRoutePanel();
-    }}
-    function copyRouteText() {{
-        refreshRoutePanel();
-        var text = document.getElementById("{safe_key}_route_text");
-        text.focus();
-        text.select();
-        try {{ document.execCommand("copy"); }} catch (err) {{}}
-    }}
-    {chr(10).join(click_scripts)}
-    </script>
-    """
-    fmap.get_root().html.add_child(folium.Element(panel_html))
-    fmap.get_root().script.add_child(folium.Element(script))
     components.html(fmap.get_root().render(), height=660, scrolling=False)
 
 
@@ -7132,7 +7070,7 @@ with tab_manage:
             with map_builder_tab:
                 st.markdown("**Click-To-Build Route Map**")
                 st.caption(
-                    "Use this as a fast manual scheduling workspace. Click store dots inside the map without waiting for the page to reload, then copy the finished route into the box below."
+                    "Use this as a fast manual scheduling workspace. The map is for visual routing; enter the store numbers below when you are ready to generate the editable route list."
                 )
                 if selected_month == "All months":
                     month_values = [value for value in manage_month_options(run_items) if value != "All months"]
@@ -7208,14 +7146,14 @@ with tab_manage:
                     show_existing_layer=show_existing_layer,
                     component_key=f"pmt_route_builder_map_{selected_run}_{selected_employee}_{route_month}",
                 )
-                st.caption("After clicking stores in the map, click Done / Copy Route in the map panel, paste the store numbers below, then generate the editable route list.")
+                st.caption("Use the map to plan the route, then enter the store numbers in order below and generate the editable route list.")
                 pasted_route_text = st.text_area(
-                    "Paste route store numbers from the map",
+                    "Route store numbers in stop order",
                     placeholder="One store per line, or separated by commas/spaces",
                     height=110,
                     key=f"pmt_map_route_paste_{selected_run}_{selected_employee}_{route_month}",
                 )
-                if st.button("Generate / Refresh Route List From Pasted Route", type="primary", key=f"pmt_map_generate_route_list_{selected_run}_{selected_employee}_{route_month}"):
+                if st.button("Generate / Refresh Route List", type="primary", key=f"pmt_map_generate_route_list_{selected_run}_{selected_employee}_{route_month}"):
                     pasted_tokens = [token for token in re.split(r"[\s,;|]+", clean(pasted_route_text)) if token]
                     route_lookup_rows = []
                     route_pool_lookup = route_pool.copy()
@@ -7247,7 +7185,7 @@ with tab_manage:
 
                 route_df = pd.DataFrame(st.session_state.get(route_state_key, []))
                 if route_df.empty:
-                    st.info("Click store dots in the map panel, click Done / Copy Route in the map, paste the route into the box, then generate the editable list.")
+                    st.info("Use the map as your visual guide, enter store numbers in route order, then generate the editable list.")
                 else:
                     route_df = route_df.copy()
                     route_df["Remove"] = False
