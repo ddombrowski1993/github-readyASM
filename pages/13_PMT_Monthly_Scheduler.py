@@ -3916,7 +3916,6 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
     folium.LayerControl(collapsed=False).add_to(fmap)
     route_key_json = json.dumps(component_key)
     route_script = f"""
-    <script>
     var routeStores = [];
     var routeNumberMarkers = [];
     var routeLine = null;
@@ -3993,7 +3992,6 @@ def render_fast_pmt_route_picker_map(store_pool, employees_df, show_assigned_lay
     routeControl.addTo({map_name});
 
     {chr(10).join(click_scripts)}
-    </script>
     """
     fmap.get_root().script.add_child(folium.Element(route_script))
     components.html(fmap.get_root().render(), height=660, scrolling=False)
