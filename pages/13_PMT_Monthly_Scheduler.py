@@ -7287,15 +7287,15 @@ with tab_manage:
                     if notice.get("warning"):
                         st.warning(notice["warning"])
                 if selected_month == "All months":
-                    month_values = schedule_run_month_options(run_items, run_cycle_start, run_cycle_end)
+                    month_values = ["All schedule months"] + schedule_run_month_options(run_items, run_cycle_start, run_cycle_end)
                     if not month_values:
-                        month_values = [month_start(date.today())]
+                        month_values = ["All schedule months", month_start(date.today())]
                     route_month = st.selectbox(
                         "Map / existing schedule month",
                         month_values,
                         index=0,
-                        format_func=month_label,
-                        help="This controls what month of the selected schedule plan appears on the map. It should match the schedule run months, such as July through December. It does not control where newly saved work starts.",
+                        format_func=lambda value: value if isinstance(value, str) else month_label(value),
+                        help="This controls what existing schedule rows appear on the map. Choose one month, or All schedule months to see the whole selected schedule run. It does not control where newly saved work starts.",
                         key=f"pmt_map_route_month_{selected_run}_{selected_employee}",
                     )
                 else:
@@ -7316,12 +7316,13 @@ with tab_manage:
                 show_assigned_layer = layer_cols[1].checkbox("Assigned layer", value=True, key=f"pmt_map_route_assigned_layer_{selected_run}_{selected_employee}_{route_month}")
                 show_existing_layer = layer_cols[2].checkbox("Existing route layer", value=True, key=f"pmt_map_route_existing_layer_{selected_run}_{selected_employee}_{route_month}")
                 current_schedule_month = month_start(date.today())
-                if route_month < current_schedule_month:
+                route_month_for_start = current_schedule_month if route_month == "All schedule months" else route_month
+                if route_month_for_start < current_schedule_month:
                     st.warning(
-                        f"{month_label(route_month)} is in the past. New map-built route work will start no earlier than {month_label(current_schedule_month)}."
+                        f"{month_label(route_month_for_start)} is in the past. New map-built route work will start no earlier than {month_label(current_schedule_month)}."
                     )
                 schedule_end_month = month_start(run_cycle_end) if run_cycle_end else add_months(current_schedule_month, 11)
-                start_month_floor = max(route_month, current_schedule_month)
+                start_month_floor = max(route_month_for_start, current_schedule_month)
                 if schedule_end_month < start_month_floor:
                     schedule_end_month = start_month_floor
                 placement_month_options = []
@@ -7366,7 +7367,7 @@ with tab_manage:
                     "Generating from the map only creates a preview list. Use the Apply button below to save it into this selected schedule."
                 )
                 st.caption(
-                    f"`Map / existing schedule month` is what you are viewing: {month_label(route_month)}. "
+                    f"`Map / existing schedule month` is what you are viewing: {route_month if isinstance(route_month, str) else month_label(route_month)}. "
                     f"`New schedule starts` is where the saved work will be placed: {month_label(apply_start_month)}."
                 )
 
