@@ -7232,6 +7232,11 @@ with tab_manage:
                 route_records = st.session_state.get(route_state_key, [])
                 queued_route_records = st.session_state.get(route_click_queue_key, [])
                 route_df = pd.DataFrame(route_records)
+                st.info(
+                    f"Target schedule: #{selected_run} - {run_row.get('run_name', '')} | "
+                    f"PMT: {selected_tech_name} | Month: {month_label(route_month)} | Route date: {route_date}. "
+                    "Generating from the map only creates a preview list. Use the Apply button below to save it into this selected schedule."
+                )
 
                 command_cols = st.columns(4)
                 if command_cols[0].button("Load Existing Route", key=f"pmt_map_load_existing_{selected_run}_{selected_employee}_{route_month}"):
@@ -7304,6 +7309,9 @@ with tab_manage:
                 if route_df.empty:
                     st.info("Use the map as your visual guide, enter store numbers in route order, then generate the editable list.")
                 else:
+                    st.warning(
+                        f"This is a preview route for schedule #{selected_run}. It is not saved to the schedule until you check the confirmation box and click Apply to Schedule #{selected_run}."
+                    )
                     route_df = route_df.copy()
                     route_df["Remove"] = False
                     if "Proposed Stop" in route_df.columns:
@@ -7352,11 +7360,11 @@ with tab_manage:
                         key=f"pmt_map_route_note_{selected_run}_{selected_employee}_{route_month}",
                     )
                     apply_confirm = update_cols[2].checkbox(
-                        "I reviewed this map-built route and want to apply it.",
+                        f"I reviewed this route and want to save it to schedule #{selected_run} for {selected_tech_name}.",
                         key=f"pmt_map_route_apply_confirm_{selected_run}_{selected_employee}_{route_month}",
                     )
                     if update_cols[3].button(
-                        "Apply Map Route",
+                        f"Apply to Schedule #{selected_run}",
                         type="primary",
                         disabled=not apply_confirm,
                         key=f"pmt_map_route_apply_{selected_run}_{selected_employee}_{route_month}",
