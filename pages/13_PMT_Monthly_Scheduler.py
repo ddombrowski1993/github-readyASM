@@ -7358,6 +7358,46 @@ with tab_manage:
                     st.success(notice.get("message", "Map route applied."))
                     if notice.get("warning"):
                         st.warning(notice["warning"])
+                    notice_run_id = scalar_int(notice.get("run_id"), 0)
+                    notice_employee_id = scalar_int(notice.get("employee_id"), 0)
+                    notice_tech_name = clean(notice.get("technician", ""))
+                    if notice_run_id:
+                        notice_export = published_pmt_run_export_draft(notice_run_id)
+                        if notice_export.empty:
+                            st.error(f"Schedule run #{notice_run_id} has no active export rows. The route did not save to the export dataset.")
+                        else:
+                            st.markdown(f"**Direct Export From Saved Run #{notice_run_id}**")
+                            count_cols = ["technician", "month"]
+                            if "month_start" in notice_export.columns:
+                                count_cols.append("month_start")
+                            count_check = notice_export.groupby(count_cols, dropna=False)["store_id"].nunique().reset_index(name="Stores in Export")
+                            if "month_start" in count_check.columns:
+                                count_check = count_check.sort_values(["technician", "month_start"]).drop(columns=["month_start"])
+                            else:
+                                count_check = count_check.sort_values(["technician", "month"])
+                            st.dataframe(count_check, use_container_width=True, hide_index=True)
+                            direct_cols = st.columns(2)
+                            direct_cols[0].download_button(
+                                "Download Full Team Excel From This Saved Run",
+                                data=pmt_schedule_workbook_bytes(notice_export, "Both Route Options"),
+                                file_name=f"pmt_full_team_schedule_run_{notice_run_id}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"pmt_direct_full_export_{notice_run_id}_{notice_employee_id}",
+                            )
+                            if notice_employee_id and "employee_id" in notice_export.columns:
+                                individual_export = notice_export[pd.to_numeric(notice_export["employee_id"], errors="coerce").fillna(-1).astype(int) == int(notice_employee_id)].copy()
+                            elif notice_tech_name:
+                                individual_export = notice_export[notice_export["technician"].fillna("").astype(str).eq(notice_tech_name)].copy()
+                            else:
+                                individual_export = pd.DataFrame()
+                            direct_cols[1].download_button(
+                                f"Download {notice_tech_name or 'PMT'} Excel From This Saved Run",
+                                data=pmt_schedule_workbook_bytes(individual_export, "Both Route Options"),
+                                file_name=f"pmt_schedule_{key(notice_tech_name) or notice_employee_id or 'technician'}_run_{notice_run_id}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                disabled=individual_export.empty,
+                                key=f"pmt_direct_individual_export_{notice_run_id}_{notice_employee_id}",
+                            )
                 schedule_month_values = schedule_run_month_options(run_items, run_cycle_start, run_cycle_end)
                 if not schedule_month_values:
                     schedule_month_values = [month_start(date.today())]
@@ -7628,7 +7668,13 @@ with tab_manage:
                             notice_warning = (
                                 "The saved database month counts do not match the preview. Do not export yet; review this schedule run in Manual Edit."
                             )
-                        st.session_state["pmt_map_route_apply_notice"] = {"message": notice_message, "warning": notice_warning}
+                        st.session_state["pmt_map_route_apply_notice"] = {
+                            "message": notice_message,
+                            "warning": notice_warning,
+                            "run_id": int(selected_run),
+                            "employee_id": int(selected_employee),
+                            "technician": selected_tech_name,
+                        }
                         st.session_state["pmt_last_manual_route_export_run"] = int(selected_run)
                         st.session_state.pop(route_state_key, None)
                         st.session_state.pop(route_click_queue_key, None)
