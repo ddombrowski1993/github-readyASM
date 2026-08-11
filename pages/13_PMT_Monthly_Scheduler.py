@@ -4143,7 +4143,9 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
     preview_df = preview_df.copy()
     preview_df["store_id"] = pd.to_numeric(preview_df.get("store_id"), errors="coerce")
     preview_df["Proposed Stop"] = pd.to_numeric(preview_df.get("Proposed Stop"), errors="coerce")
-    preview_df = preview_df.dropna(subset=["store_id"]).sort_values(["Proposed Stop", "store_number"])
+    preview_df["Proposed Date"] = pd.to_datetime(preview_df.get("Proposed Date"), errors="coerce")
+    sort_columns = [col for col in ["Proposed Date", "Proposed Stop", "store_number"] if col in preview_df.columns]
+    preview_df = preview_df.dropna(subset=["store_id"]).sort_values(sort_columns)
     if preview_df.empty:
         return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0}
     saved = 0
@@ -4236,6 +4238,23 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
                 )
             )
             run.store_count = int(active_store_count or 0)
+            saved_dates = [
+                item_date
+                for item_date in preview_df["Proposed Date"].dropna().dt.date.tolist()
+                if item_date is not None
+            ]
+            if saved_dates:
+                earliest_saved = min(saved_dates)
+                latest_saved = max(saved_dates)
+                if run.cycle_start is None or earliest_saved < run.cycle_start:
+                    run.cycle_start = earliest_saved
+                if run.cycle_end is None or latest_saved > run.cycle_end:
+                    run.cycle_end = latest_saved
+                if run.cycle_start and run.cycle_end:
+                    run.months = max(
+                        int(run.months or 1),
+                        ((run.cycle_end.year - run.cycle_start.year) * 12) + run.cycle_end.month - run.cycle_start.month + 1,
+                    )
     log_action(
         "pmt manage schedule preview applied",
         "pmt_schedule_runs",
@@ -7446,8 +7465,10 @@ with tab_manage:
                         result = apply_pmt_manage_build_preview(selected_run, selected_employee, apply_df.to_dict("records"), route_note)
                         st.success(
                             f"Applied map route: saved {result['saved']} store(s), created {result['created']}, updated {result['updated']}, "
-                            f"superseded/transferred {result['superseded']}, resequenced {result['resequenced_rows']} row(s)."
+                            f"superseded/transferred {result['superseded']}, resequenced {result['resequenced_rows']} row(s). "
+                            f"Export from Published PMT Schedule Run #{selected_run} to see this schedule."
                         )
+                        st.session_state["pmt_last_manual_route_export_run"] = int(selected_run)
                         st.session_state.pop(route_state_key, None)
                         st.session_state.pop(f"{route_state_key}_last_click", None)
                         st.rerun()
@@ -7861,6 +7882,11 @@ with tab_history:
 
 with tab_export:
     section_header("Export Step 1: Export PMT Schedule", "Download full-team or individual PMT schedules from the current draft or a published PMT schedule run.", "green")
+    if st.session_state.get("pmt_last_manual_route_export_run"):
+        st.info(
+            f"Last manual map route was saved to schedule run #{st.session_state['pmt_last_manual_route_export_run']}. "
+            "Choose that run below when exporting."
+        )
     latest_export_draft = pd.DataFrame(st.session_state.get("pmt_schedule_draft", []))
     _export_runs = safe_query(
         """
