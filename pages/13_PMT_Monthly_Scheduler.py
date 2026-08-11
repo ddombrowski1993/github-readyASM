@@ -4,6 +4,8 @@ import json
 import math
 import re
 import time
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import pandas as pd
 import streamlit as st
@@ -22,6 +24,7 @@ from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, 
 from sqlalchemy import func, insert, select
 
 from src.database import active_employees, log_action, safe_query, session_scope
+from src.auth import configured_database_url, current_account_schema, get_effective_account_context, is_postgresql_url, is_sqlite_url
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.exports import download_table, excel_bytes
 from src.geocoding import build_address, geocode_address, local_coordinate_estimate
@@ -786,10 +789,13 @@ def home_distance_route(stores_df, start_lat, start_lon, limit=None):
 
 HOME_ROUTE = "Home-Based Route"
 NEXT_ROUTE = "Next-Closest Store Route"
-ROUTE_EXPORT_OPTIONS = ["Home-Based Route", "Next-Closest Store Route", "Both Route Options"]
+SAVED_ROUTE = "Saved Schedule Order"
+ROUTE_EXPORT_OPTIONS = [SAVED_ROUTE, "Home-Based Route", "Next-Closest Store Route", "Both Route Options"]
 
 
 def route_notes(route_type):
+    if route_type == SAVED_ROUTE:
+        return "Uses the stop order saved on the schedule."
     if route_type == HOME_ROUTE:
         return "Best if the PMT starts from home each day and works one store per day."
     return "Best if the PMT finishes one store and drives directly to the next closest store."
@@ -826,7 +832,12 @@ def build_route_rows_for_group(group, route_type):
     group = route_source_columns(group)
     home_lat, home_lon = home_coordinates_for_group(group)
     has_store_coordinates = group[["latitude", "longitude"]].notna().all().all() if {"latitude", "longitude"}.issubset(group.columns) else False
-    if route_type == NEXT_ROUTE and home_lat is not None and home_lon is not None and has_store_coordinates:
+    if route_type == SAVED_ROUTE:
+        ordered_rows = [
+            row.copy()
+            for _, row in group.sort_values(["sequence_number", "store_number"], ascending=[True, True]).iterrows()
+        ]
+    elif route_type == NEXT_ROUTE and home_lat is not None and home_lon is not None and has_store_coordinates:
         ordered_rows = nearest_neighbor_route(group, home_lat, home_lon)
     elif route_type == HOME_ROUTE and home_lat is not None and home_lon is not None and has_store_coordinates:
         ordered_rows = home_distance_route(group, home_lat, home_lon) if home_lat is not None and home_lon is not None else [
@@ -929,6 +940,8 @@ def route_table_view(routes):
 def route_map_source_for_export(draft, route_filter):
     if draft.empty:
         return draft
+    if route_filter == SAVED_ROUTE:
+        return draft.copy()
     if route_filter in (HOME_ROUTE, NEXT_ROUTE):
         return draft_with_route_order(draft.copy(), route_filter)
     return draft_with_route_order(draft.copy(), HOME_ROUTE)
@@ -1313,20 +1326,30 @@ def render_pmt_export_controls(export_draft, key_prefix):
         "Route export option",
         ROUTE_EXPORT_OPTIONS,
         horizontal=True,
-        index=2,
+        index=0,
         key=f"{key_prefix}_route_export_option",
     )
-    full_excel, full_pdf = st.columns(2)
+    export_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_name = key(key_prefix) or "pmt_export"
+    full_excel, full_pdf, raw_export = st.columns(3)
     full_excel.download_button(
         "Full Team Excel",
         data=pmt_schedule_workbook_bytes(export_draft, route_filter),
-        file_name="pmt_full_team_schedule.xlsx",
+        file_name=f"pmt_full_team_schedule_{export_name}_{export_stamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"{key_prefix}_full_team_excel",
     )
     if full_pdf.button("Build Full Team PDF", key=f"{key_prefix}_full_team_pdf_button"):
-        path = build_pmt_schedule_pdf(export_draft, "pmt_full_team_schedule.pdf", "PMT Full Team Schedule", route_filter=route_filter)
-        st.download_button("Download Full Team PDF", data=pdf_bytes(path), file_name="pmt_full_team_schedule.pdf", key=f"{key_prefix}_full_team_pdf_download")
+        pdf_file = f"pmt_full_team_schedule_{export_name}_{export_stamp}.pdf"
+        path = build_pmt_schedule_pdf(export_draft, pdf_file, "PMT Full Team Schedule", route_filter=route_filter)
+        st.download_button("Download Full Team PDF", data=pdf_bytes(path), file_name=pdf_file, key=f"{key_prefix}_full_team_pdf_download")
+    raw_export.download_button(
+        "Raw Export Rows",
+        data=excel_bytes(export_draft),
+        file_name=f"pmt_raw_export_rows_{export_name}_{export_stamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"{key_prefix}_raw_export_rows",
+    )
     tech_options = sorted(export_draft["technician"].dropna().unique().tolist())
     if not tech_options:
         st.info("No technician names are available for individual exports.")
@@ -1337,13 +1360,14 @@ def render_pmt_export_controls(export_draft, key_prefix):
     ind_excel.download_button(
         "Individual Excel",
         data=pmt_schedule_workbook_bytes(individual, route_filter),
-        file_name=f"pmt_schedule_{key(selected_export_tech) or 'technician'}.xlsx",
+        file_name=f"pmt_schedule_{key(selected_export_tech) or 'technician'}_{export_name}_{export_stamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"{key_prefix}_individual_excel",
     )
     if ind_pdf.button("Build Individual PDF", key=f"{key_prefix}_individual_pdf_button"):
-        path = build_pmt_schedule_pdf(individual, f"pmt_schedule_{key(selected_export_tech) or 'technician'}.pdf", "PMT Individual Schedule", selected_export_tech, route_filter)
-        st.download_button("Download Individual PDF", data=pdf_bytes(path), file_name=f"pmt_schedule_{key(selected_export_tech) or 'technician'}.pdf", key=f"{key_prefix}_individual_pdf_download")
+        pdf_file = f"pmt_schedule_{key(selected_export_tech) or 'technician'}_{export_name}_{export_stamp}.pdf"
+        path = build_pmt_schedule_pdf(individual, pdf_file, "PMT Individual Schedule", selected_export_tech, route_filter)
+        st.download_button("Download Individual PDF", data=pdf_bytes(path), file_name=pdf_file, key=f"{key_prefix}_individual_pdf_download")
 
 
 def published_pmt_run_export_draft(run_id):
@@ -1407,6 +1431,141 @@ def published_pmt_run_export_draft(run_id):
                 previous_distances[idx] = None
     df["miles_from_previous_stop"] = df.index.map(previous_distances)
     return df
+
+
+def runtime_database_summary():
+    database_url = configured_database_url()
+    if not database_url:
+        db_summary = {"type": "not configured", "host": "", "database": "", "schema": current_account_schema() or ""}
+    elif is_postgresql_url(database_url):
+        parts = urlsplit(database_url)
+        db_summary = {
+            "type": "PostgreSQL",
+            "host": parts.hostname or "",
+            "database": (parts.path or "").lstrip("/"),
+            "schema": current_account_schema() or "",
+        }
+    elif is_sqlite_url(database_url):
+        db_summary = {"type": "SQLite", "host": "local file", "database": database_url.split("///")[-1], "schema": ""}
+    else:
+        db_summary = {"type": "unknown", "host": "", "database": "", "schema": current_account_schema() or ""}
+    context = get_effective_account_context()
+    db_summary.update(
+        {
+            "workspace_user_id": context.get("effective_user_id"),
+            "workspace_slug": context.get("effective_account_slug"),
+            "workspace_label": context.get("effective_account_label"),
+        }
+    )
+    return db_summary
+
+
+def pmt_employee_pipeline_diagnostic(employee_search, run_id):
+    search = f"%{clean(employee_search).lower()}%"
+    employee_matches = safe_query(
+        """
+        select id as employee_id, full_name, active, employee_number, email
+        from employees
+        where lower(coalesce(full_name, '')) like :search
+           or lower(coalesce(email, '')) like :search
+           or lower(coalesce(employee_number, '')) like :search
+        order by active desc, full_name
+        """,
+        {"search": search},
+        use_cache=False,
+    )
+    if employee_matches.empty:
+        return {
+            "employee_matches": employee_matches,
+            "stage_counts": pd.DataFrame(),
+            "assigned": pd.DataFrame(),
+            "saved_active": pd.DataFrame(),
+            "export_rows": pd.DataFrame(),
+            "full_team_schedule_view": pd.DataFrame(),
+            "individual_schedule_view": pd.DataFrame(),
+            "store_trace": pd.DataFrame(),
+            "selected_employee": None,
+        }
+
+    selected_employee = employee_matches.iloc[0].copy()
+    employee_id = int(selected_employee["employee_id"])
+    assigned = safe_query(
+        """
+        select s.id as store_id, s.store_number, s.city, s.state, s.active,
+               s.assigned_pmt_employee_id, e.full_name as assigned_pmt
+        from stores s
+        left join employees e on e.id = s.assigned_pmt_employee_id
+        where s.active = true
+          and s.assigned_pmt_employee_id = :employee_id
+        order by s.store_number
+        """,
+        {"employee_id": employee_id},
+        use_cache=False,
+    )
+    saved_rows = pmt_manage_run_items(run_id)
+    if saved_rows.empty:
+        employee_saved = pd.DataFrame()
+        saved_active = pd.DataFrame()
+    else:
+        employee_saved = saved_rows[pd.to_numeric(saved_rows["employee_id"], errors="coerce").fillna(-1).astype(int) == employee_id].copy()
+        saved_active = employee_saved[pmt_active_item_mask(employee_saved)].copy() if not employee_saved.empty else pd.DataFrame()
+
+    export_rows = published_pmt_run_export_draft(run_id)
+    if export_rows.empty:
+        individual_export = pd.DataFrame()
+        full_team_schedule_view = pd.DataFrame()
+        individual_schedule_view = pd.DataFrame()
+    else:
+        individual_export = export_rows[pd.to_numeric(export_rows["employee_id"], errors="coerce").fillna(-1).astype(int) == employee_id].copy()
+        full_team_schedule_view, _ = pmt_export_views(export_rows, SAVED_ROUTE)
+        individual_schedule_view, _ = pmt_export_views(individual_export, SAVED_ROUTE)
+
+    def unique_store_count(df):
+        return distinct_store_count(df) if not df.empty else 0
+
+    def schedule_view_store_count(df):
+        if df.empty or "Store/Site Number" not in df.columns:
+            return 0
+        return int(df["Store/Site Number"].dropna().astype(str).nunique())
+
+    full_team_employee_rows = (
+        full_team_schedule_view[full_team_schedule_view["Technician"].fillna("").astype(str) == str(selected_employee["full_name"])]
+        if not full_team_schedule_view.empty and "Technician" in full_team_schedule_view.columns
+        else pd.DataFrame()
+    )
+    stage_counts = pd.DataFrame(
+        [
+            {"Stage": "A Current Areas and Maps Assigned Stores", "Anthony Stores": unique_store_count(assigned)},
+            {"Stage": "B Rebuild Candidate Stores", "Anthony Stores": unique_store_count(assigned)},
+            {"Stage": "C Proposed Schedule Stores", "Anthony Stores": "not available unless preview is open"},
+            {"Stage": "D Active Schedule Rows Saved to Database", "Anthony Stores": unique_store_count(saved_active)},
+            {"Stage": "E Active Export Rows from Selected Run", "Anthony Stores": unique_store_count(individual_export)},
+            {"Stage": "F Individual Export Unique Stores", "Anthony Stores": schedule_view_store_count(individual_schedule_view)},
+            {"Stage": "G Full Team Export Anthony Unique Stores", "Anthony Stores": schedule_view_store_count(full_team_employee_rows)},
+        ]
+    )
+
+    assigned_trace = assigned[["store_id", "store_number", "assigned_pmt"]].copy() if not assigned.empty else pd.DataFrame(columns=["store_id", "store_number", "assigned_pmt"])
+    saved_trace = saved_active[
+        ["store_id", "schedule_item_id", "schedule_date", "sequence_number", "status", "technician"]
+    ].copy() if not saved_active.empty else pd.DataFrame(columns=["store_id", "schedule_item_id", "schedule_date", "sequence_number", "status", "technician"])
+    export_trace = individual_export[["store_id", "schedule_date", "sequence_number", "status", "technician"]].copy() if not individual_export.empty else pd.DataFrame(columns=["store_id", "schedule_date", "sequence_number", "status", "technician"])
+    store_trace = assigned_trace.merge(saved_trace, on="store_id", how="left", suffixes=("", "_saved"))
+    store_trace = store_trace.merge(export_trace, on="store_id", how="left", suffixes=("", "_export"))
+    store_trace["In Saved Active DB Rows"] = store_trace["schedule_item_id"].notna() if "schedule_item_id" in store_trace.columns else False
+    store_trace["In Export Query"] = store_trace["schedule_date_export"].notna() if "schedule_date_export" in store_trace.columns else False
+
+    return {
+        "employee_matches": employee_matches,
+        "stage_counts": stage_counts,
+        "assigned": assigned,
+        "saved_active": saved_active,
+        "export_rows": individual_export,
+        "full_team_schedule_view": full_team_schedule_view,
+        "individual_schedule_view": individual_schedule_view,
+        "store_trace": store_trace,
+        "selected_employee": selected_employee,
+    }
 
 
 def pmt_carryover_report():
@@ -5021,6 +5180,8 @@ def pmt_publish_conflicts(preview, start_month, months):
 
 
 
+st.caption("PMT Scheduler build: manual-route-export-fix-2026-08-11")
+
 tab_build, tab_carryover, tab_manage_fix, tab_export = st.tabs([
     "📋  Build Schedule",
     "📊  Carryover & Backlog",
@@ -7068,6 +7229,56 @@ with tab_manage:
             f"This section is showing schedule run #{selected_run} only. Current active PMT assignments across all technicians: "
             f"{current_assigned_store_count:,} stores."
         )
+        with st.expander("Read-Only PMT Data Flow Diagnostic", expanded=False):
+            st.caption(
+                "Use this to trace one PMT through: current assignments -> selected run DB rows -> export query -> individual export -> full-team export. "
+                "This section does not save or change anything."
+            )
+            runtime_cols = st.columns(4)
+            runtime_cols[0].metric("Canonical App", str(Path(__file__).resolve().parents[1]))
+            runtime_cols[1].metric("PMT File", str(Path(__file__).resolve()))
+            runtime_cols[2].metric("Build Marker", "manual-route-export-fix-2026-08-11")
+            runtime_cols[3].metric("Selected Run", f"#{selected_run}")
+            db_summary = runtime_database_summary()
+            st.dataframe(pd.DataFrame([db_summary]), use_container_width=True, hide_index=True)
+            diag_cols = st.columns([0.35, 0.65])
+            diag_employee_search = diag_cols[0].text_input(
+                "Employee to trace",
+                value="Anthony",
+                key=f"pmt_pipeline_diag_employee_{selected_run}",
+            )
+            diag = pmt_employee_pipeline_diagnostic(diag_employee_search, selected_run)
+            if diag["employee_matches"].empty:
+                st.error(
+                    f"No employee matched `{diag_employee_search}` in the database/workspace this app is currently using. "
+                    "If Anthony should exist here, this is the wrong database or workspace."
+                )
+            else:
+                selected_employee_diag = diag["selected_employee"]
+                diag_cols[1].info(
+                    f"Tracing employee_id={int(selected_employee_diag['employee_id'])}: {selected_employee_diag['full_name']}"
+                )
+                st.markdown("**Stage Counts**")
+                st.dataframe(diag["stage_counts"], use_container_width=True, hide_index=True)
+                if not diag["stage_counts"].empty:
+                    numeric_counts = pd.to_numeric(diag["stage_counts"]["Anthony Stores"], errors="coerce")
+                    if numeric_counts.notna().any() and numeric_counts.dropna().nunique() > 1:
+                        st.error("VALIDATION FAILED - the counts drop between stages. The first lower count shows where records are disappearing.")
+                    elif numeric_counts.notna().any():
+                        st.success("The numeric stage counts match for the selected run/export dataset.")
+                detail_tabs = st.tabs(["Store Trace", "Assigned Stores", "Saved Active DB Rows", "Export Query Rows", "Full Team Export Source", "Individual Export Source"])
+                with detail_tabs[0]:
+                    st.dataframe(diag["store_trace"], use_container_width=True, hide_index=True)
+                with detail_tabs[1]:
+                    st.dataframe(diag["assigned"], use_container_width=True, hide_index=True)
+                with detail_tabs[2]:
+                    st.dataframe(diag["saved_active"], use_container_width=True, hide_index=True)
+                with detail_tabs[3]:
+                    st.dataframe(diag["export_rows"], use_container_width=True, hide_index=True)
+                with detail_tabs[4]:
+                    st.dataframe(diag["full_team_schedule_view"], use_container_width=True, hide_index=True)
+                with detail_tabs[5]:
+                    st.dataframe(diag["individual_schedule_view"], use_container_width=True, hide_index=True)
         if current_assigned_store_count and run_counts["active_rows"] < current_assigned_store_count * 0.5:
             st.warning(
                 f"The selected schedule plan only has {run_counts['active_rows']:,} active row(s), but current PMT assignments contain "
@@ -7370,7 +7581,7 @@ with tab_manage:
                             direct_cols = st.columns(2)
                             direct_cols[0].download_button(
                                 "Download Full Team Excel From This Saved Run",
-                                data=pmt_schedule_workbook_bytes(notice_export, "Both Route Options"),
+                                data=pmt_schedule_workbook_bytes(notice_export, SAVED_ROUTE),
                                 file_name=f"pmt_full_team_schedule_run_{notice_run_id}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key=f"pmt_direct_full_export_{notice_run_id}_{notice_employee_id}",
@@ -7383,7 +7594,7 @@ with tab_manage:
                                 individual_export = pd.DataFrame()
                             direct_cols[1].download_button(
                                 f"Download {notice_tech_name or 'PMT'} Excel From This Saved Run",
-                                data=pmt_schedule_workbook_bytes(individual_export, "Both Route Options"),
+                                data=pmt_schedule_workbook_bytes(individual_export, SAVED_ROUTE),
                                 file_name=f"pmt_schedule_{key(notice_tech_name) or notice_employee_id or 'technician'}_run_{notice_run_id}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 disabled=individual_export.empty,
