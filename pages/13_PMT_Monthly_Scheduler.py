@@ -3926,11 +3926,39 @@ def build_route_from_drawn_line(route_pool, drawings, route_date, route_month, s
         return pd.DataFrame(), skipped_rows
     route_df = pd.DataFrame(ordered_rows).sort_values(["_route_position", "store_number"]).reset_index(drop=True)
     route_df["Proposed Stop"] = range(1, len(route_df) + 1)
+    route_df["Route Order"] = range(1, len(route_df) + 1)
     route_df["Proposed Date"] = route_date
     route_df["Proposed Month"] = month_label(route_month)
     route_df["technician"] = selected_tech_name
     route_df["Manual or Auto-Filled"] = "Drawn route line"
     return route_df, skipped_rows
+
+
+def distribute_route_across_months(route_df, start_month, monthly_target, employee_id):
+    if route_df.empty:
+        return route_df.copy()
+    start_month = month_start(start_month)
+    monthly_target = max(1, int(monthly_target))
+    distributed = route_df.copy()
+    if "Route Order" in distributed.columns:
+        distributed["Route Order"] = pd.to_numeric(distributed["Route Order"], errors="coerce")
+        sort_cols = ["Route Order", "Proposed Stop", "store_number"]
+    else:
+        sort_cols = ["Proposed Stop", "store_number"]
+    distributed = distributed.sort_values([col for col in sort_cols if col in distributed.columns]).reset_index(drop=True)
+    proposed_dates = []
+    proposed_months = []
+    proposed_stops = []
+    for index in range(len(distributed)):
+        schedule_month = add_months(start_month, index // monthly_target)
+        proposed_dates.append(first_workday(schedule_month, employee_id=int(employee_id)))
+        proposed_months.append(month_label(schedule_month))
+        proposed_stops.append((index % monthly_target) + 1)
+    distributed["Route Order"] = range(1, len(distributed) + 1)
+    distributed["Proposed Date"] = proposed_dates
+    distributed["Proposed Month"] = proposed_months
+    distributed["Proposed Stop"] = proposed_stops
+    return distributed
 
 
 def render_fast_pmt_route_picker_map(store_pool, employees_df, route_df=None, show_assigned_layer=True, show_existing_layer=True, component_key="pmt_route_picker"):
@@ -7219,10 +7247,41 @@ with tab_manage:
                 )
                 show_assigned_layer = layer_cols[1].checkbox("Assigned layer", value=True, key=f"pmt_map_route_assigned_layer_{selected_run}_{selected_employee}_{route_month}")
                 show_existing_layer = layer_cols[2].checkbox("Existing route layer", value=True, key=f"pmt_map_route_existing_layer_{selected_run}_{selected_employee}_{route_month}")
-                route_date = layer_cols[3].date_input(
-                    "Route date",
-                    value=first_workday(route_month, employee_id=int(selected_employee)),
-                    key=f"pmt_map_route_date_{selected_run}_{selected_employee}_{route_month}",
+                current_schedule_month = month_start(date.today())
+                if route_month < current_schedule_month:
+                    st.warning(
+                        f"{month_label(route_month)} is in the past. New map-built route work will start no earlier than {month_label(current_schedule_month)}."
+                    )
+                schedule_end_month = month_start(run_cycle_end) if run_cycle_end else add_months(current_schedule_month, 11)
+                start_month_floor = max(route_month, current_schedule_month)
+                if schedule_end_month < start_month_floor:
+                    schedule_end_month = start_month_floor
+                placement_month_options = []
+                cursor_month = start_month_floor
+                while cursor_month <= schedule_end_month:
+                    placement_month_options.append(cursor_month)
+                    cursor_month = add_months(cursor_month, 1)
+                apply_start_month = layer_cols[3].selectbox(
+                    "Schedule start",
+                    placement_month_options,
+                    index=0,
+                    format_func=month_label,
+                    key=f"pmt_map_route_apply_start_month_{selected_run}_{selected_employee}_{route_month}",
+                )
+                placement_cols = st.columns([0.22, 0.28, 0.5])
+                route_monthly_target = placement_cols[0].number_input(
+                    "Stores per month",
+                    min_value=1,
+                    max_value=50,
+                    value=10,
+                    step=1,
+                    key=f"pmt_map_route_monthly_target_{selected_run}_{selected_employee}_{route_month}",
+                )
+                route_date = first_workday(apply_start_month, employee_id=int(selected_employee))
+                placement_cols[1].metric("First route date", route_date.strftime("%m/%d/%Y"))
+                placement_cols[2].caption(
+                    f"Schedule placement uses {int(route_monthly_target)} store(s) per month starting {month_label(apply_start_month)}. "
+                    "The drawn line controls order; this setting controls which month each stop lands in."
                 )
                 route_employee_ids = [int(selected_employee)] + [int(value) for value in extra_layer_employee_ids]
                 route_pool = pmt_route_builder_store_pool(run_items, route_employee_ids, route_month, run_id=selected_run)
@@ -7234,7 +7293,7 @@ with tab_manage:
                 route_df = pd.DataFrame(route_records)
                 st.info(
                     f"Target schedule: #{selected_run} - {run_row.get('run_name', '')} | "
-                    f"PMT: {selected_tech_name} | Month: {month_label(route_month)} | Route date: {route_date}. "
+                    f"PMT: {selected_tech_name} | Schedule start: {month_label(apply_start_month)} | Stores/month: {int(route_monthly_target)}. "
                     "Generating from the map only creates a preview list. Use the Apply button below to save it into this selected schedule."
                 )
 
@@ -7245,8 +7304,8 @@ with tab_manage:
                         st.info("No existing active route was found for this PMT/month.")
                     else:
                         existing_route["Proposed Stop"] = range(1, len(existing_route) + 1)
-                        existing_route["Proposed Date"] = route_date
-                        existing_route["Proposed Month"] = month_label(route_month)
+                        existing_route["Route Order"] = range(1, len(existing_route) + 1)
+                        existing_route = distribute_route_across_months(existing_route, apply_start_month, route_monthly_target, selected_employee)
                         existing_route["Manual or Auto-Filled"] = "Loaded existing route"
                         st.session_state[route_state_key] = existing_route.to_dict("records")
                         st.session_state[route_click_queue_key] = existing_route.to_dict("records")
@@ -7290,13 +7349,14 @@ with tab_manage:
                         route_pool,
                         drawings,
                         route_date,
-                        route_month,
+                        apply_start_month,
                         selected_tech_name,
                         max_distance_miles=float(max_line_distance),
                     )
                     if generated_route.empty:
                         st.warning("No stores matched the drawn line. Draw a line closer to the store dots or increase Line match distance.")
                     else:
+                        generated_route = distribute_route_across_months(generated_route, apply_start_month, route_monthly_target, selected_employee)
                         st.session_state[route_state_key] = generated_route.to_dict("records")
                         st.session_state[route_click_queue_key] = generated_route.to_dict("records")
                         st.session_state[f"{route_state_key}_notice"] = f"Generated {len(generated_route)} route stop(s) from the drawn line."
@@ -7307,30 +7367,42 @@ with tab_manage:
 
                 route_df = pd.DataFrame(st.session_state.get(route_state_key, []))
                 if route_df.empty:
-                    st.info("Use the map as your visual guide, enter store numbers in route order, then generate the editable list.")
+                    st.info("Draw a route line through the stores, then click Generate Route From Drawn Line to create the editable list.")
                 else:
                     st.warning(
                         f"This is a preview route for schedule #{selected_run}. It is not saved to the schedule until you check the confirmation box and click Apply to Schedule #{selected_run}."
                     )
                     route_df = route_df.copy()
                     route_df["Remove"] = False
+                    if "Route Order" in route_df.columns:
+                        route_df["Route Order"] = pd.to_numeric(route_df["Route Order"], errors="coerce")
+                    else:
+                        route_df["Route Order"] = pd.Series(range(1, len(route_df) + 1), index=route_df.index)
                     if "Proposed Stop" in route_df.columns:
                         route_df["Proposed Stop"] = pd.to_numeric(route_df["Proposed Stop"], errors="coerce")
                     else:
                         route_df["Proposed Stop"] = pd.NA
+                    route_df["Route Order"] = route_df["Route Order"].where(route_df["Route Order"].notna(), pd.Series(range(1, len(route_df) + 1), index=route_df.index)).astype(int)
                     route_df["Proposed Stop"] = route_df["Proposed Stop"].where(route_df["Proposed Stop"].notna(), pd.Series(range(1, len(route_df) + 1), index=route_df.index)).astype(int)
-                    route_df = route_df.sort_values(["Proposed Stop", "store_number"]).reset_index(drop=True)
+                    route_df = distribute_route_across_months(route_df, apply_start_month, route_monthly_target, selected_employee)
+                    route_df = route_df.sort_values(["Route Order", "store_number"]).reset_index(drop=True)
+                    month_distribution = route_df["Proposed Month"].value_counts(sort=False).to_dict() if "Proposed Month" in route_df.columns else {}
+                    if month_distribution:
+                        st.caption("Preview monthly distribution: " + " | ".join(f"{month}: {count}" for month, count in month_distribution.items()))
                     route_editor_cols = [
-                        "Remove", "Proposed Stop", "store_id", "store_number", "city", "state",
+                        "Remove", "Route Order", "Proposed Month", "Proposed Date", "Proposed Stop", "store_id", "store_number", "city", "state",
                         "assigned_technician", "scheduled_technician", "scheduled_date", "distance_from_home", "Manual or Auto-Filled",
                     ]
                     edited_route = st.data_editor(
                         route_df[[col for col in route_editor_cols if col in route_df.columns]],
                         use_container_width=True,
                         hide_index=True,
-                        disabled=["store_id", "store_number", "city", "state", "assigned_technician", "scheduled_technician", "scheduled_date", "distance_from_home", "Manual or Auto-Filled"],
+                        disabled=["Proposed Month", "Proposed Date", "Proposed Stop", "store_id", "store_number", "city", "state", "assigned_technician", "scheduled_technician", "scheduled_date", "distance_from_home", "Manual or Auto-Filled"],
                         column_config={
                             "Remove": st.column_config.CheckboxColumn("Remove"),
+                            "Route Order": st.column_config.NumberColumn("Overall Order", min_value=1, step=1),
+                            "Proposed Month": st.column_config.TextColumn("Month"),
+                            "Proposed Date": st.column_config.DateColumn("Date"),
                             "Proposed Stop": st.column_config.NumberColumn("Stop #", min_value=1, step=1),
                             "store_id": None,
                             "store_number": st.column_config.TextColumn("Store"),
@@ -7344,14 +7416,13 @@ with tab_manage:
                     update_cols = st.columns([0.22, 0.26, 0.32, 0.2])
                     if update_cols[0].button("Update Route List", key=f"pmt_map_update_route_list_{selected_run}_{selected_employee}_{route_month}"):
                         edited_ids = edited_route.loc[~edited_route["Remove"].astype(bool), "store_id"].dropna().astype(int).tolist()
-                        edited_stops = edited_route.loc[~edited_route["Remove"].astype(bool), ["store_id", "Proposed Stop"]].copy()
-                        stop_lookup = dict(zip(edited_stops["store_id"].astype(int), pd.to_numeric(edited_stops["Proposed Stop"], errors="coerce").fillna(9999).astype(int)))
+                        edited_stops = edited_route.loc[~edited_route["Remove"].astype(bool), ["store_id", "Route Order"]].copy()
+                        stop_lookup = dict(zip(edited_stops["store_id"].astype(int), pd.to_numeric(edited_stops["Route Order"], errors="coerce").fillna(9999).astype(int)))
                         updated_route = route_df[pd.to_numeric(route_df["store_id"], errors="coerce").fillna(-1).astype(int).isin(edited_ids)].copy()
-                        updated_route["Proposed Stop"] = updated_route["store_id"].astype(int).map(stop_lookup)
-                        updated_route = updated_route.sort_values(["Proposed Stop", "store_number"]).reset_index(drop=True)
-                        updated_route["Proposed Stop"] = range(1, len(updated_route) + 1)
-                        updated_route["Proposed Date"] = route_date
-                        updated_route["Proposed Month"] = month_label(route_month)
+                        updated_route["Route Order"] = updated_route["store_id"].astype(int).map(stop_lookup)
+                        updated_route = updated_route.sort_values(["Route Order", "store_number"]).reset_index(drop=True)
+                        updated_route["Route Order"] = range(1, len(updated_route) + 1)
+                        updated_route = distribute_route_across_months(updated_route, apply_start_month, route_monthly_target, selected_employee)
                         st.session_state[route_state_key] = updated_route.drop(columns=["Remove"], errors="ignore").to_dict("records")
                         st.rerun()
                     route_note = update_cols[1].text_input(
@@ -7370,11 +7441,8 @@ with tab_manage:
                         key=f"pmt_map_route_apply_{selected_run}_{selected_employee}_{route_month}",
                     ):
                         apply_df = route_df.drop(columns=["Remove"], errors="ignore").copy()
-                        apply_df["Proposed Date"] = route_date
-                        apply_df["Proposed Month"] = month_label(route_month)
                         apply_df["technician"] = selected_tech_name
-                        apply_df = apply_df.sort_values(["Proposed Stop", "store_number"]).reset_index(drop=True)
-                        apply_df["Proposed Stop"] = range(1, len(apply_df) + 1)
+                        apply_df = distribute_route_across_months(apply_df, apply_start_month, route_monthly_target, selected_employee)
                         result = apply_pmt_manage_build_preview(selected_run, selected_employee, apply_df.to_dict("records"), route_note)
                         st.success(
                             f"Applied map route: saved {result['saved']} store(s), created {result['created']}, updated {result['updated']}, "
