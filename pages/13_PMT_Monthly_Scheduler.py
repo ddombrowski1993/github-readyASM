@@ -1141,6 +1141,73 @@ def pmt_export_views(draft, route_filter="Both Route Options"):
     return schedule_view, route_view
 
 
+def schedule_month_counts(df, technician_column="technician", month_column="month", store_column="store_id", technician=None):
+    if df.empty or month_column not in df.columns:
+        return {}
+    scoped = df.copy()
+    if technician and technician_column in scoped.columns:
+        scoped = scoped[scoped[technician_column].fillna("").astype(str) == str(technician)].copy()
+    if scoped.empty:
+        return {}
+    count_column = store_column if store_column in scoped.columns else None
+    if count_column:
+        counts = scoped.groupby(month_column, dropna=False)[count_column].nunique()
+    else:
+        counts = scoped.groupby(month_column, dropna=False).size()
+    return {str(month): int(count) for month, count in counts.items()}
+
+
+def schedule_view_month_counts(df, technician=None):
+    return schedule_month_counts(
+        df,
+        technician_column="Technician",
+        month_column="Month",
+        store_column="Store/Site Number",
+        technician=technician,
+    )
+
+
+def generated_workbook_month_counts(workbook_bytes, technician):
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return pd.DataFrame([{"Month": "Workbook check unavailable", "Stores": "openpyxl is not installed"}])
+    try:
+        workbook = load_workbook(io.BytesIO(workbook_bytes), read_only=True, data_only=True)
+    except Exception as exc:
+        return pd.DataFrame([{"Month": "Workbook read failed", "Stores": str(exc)}])
+    rows = []
+    for sheet_name in workbook.sheetnames:
+        if sheet_name in {"Recommended Routes", HOME_ROUTE[:31], NEXT_ROUTE[:31]}:
+            continue
+        sheet = workbook[sheet_name]
+        values = list(sheet.iter_rows(values_only=True))
+        if not values:
+            continue
+        headers = [str(value or "").strip() for value in values[0]]
+        if "Technician" not in headers or "Store/Site Number" not in headers:
+            continue
+        tech_idx = headers.index("Technician")
+        store_idx = headers.index("Store/Site Number")
+        month_idx = headers.index("Month") if "Month" in headers else None
+        stores = set()
+        month_name = None
+        for row in values[1:]:
+            if not row or len(row) <= max(tech_idx, store_idx):
+                continue
+            if str(row[tech_idx] or "").strip() != str(technician):
+                continue
+            store_number = str(row[store_idx] or "").strip()
+            if not store_number:
+                continue
+            stores.add(store_number)
+            if month_idx is not None and len(row) > month_idx:
+                month_name = str(row[month_idx] or "").strip() or month_name
+        if stores:
+            rows.append({"Sheet": sheet_name, "Month": month_name or sheet_name, "Stores": len(stores)})
+    return pd.DataFrame(rows)
+
+
 def safe_sheet_name(value, used):
     base = re.sub(r"[\[\]:*?/\\]", "", str(value))[:31] or "Sheet"
     sheet = base
@@ -1554,10 +1621,44 @@ def pmt_employee_pipeline_diagnostic(employee_search, run_id):
     store_trace = store_trace.merge(export_trace, on="store_id", how="left", suffixes=("", "_export"))
     store_trace["In Saved Active DB Rows"] = store_trace["schedule_item_id"].notna() if "schedule_item_id" in store_trace.columns else False
     store_trace["In Export Query"] = store_trace["schedule_date_export"].notna() if "schedule_date_export" in store_trace.columns else False
+    store_trace["Missing Stage"] = store_trace.apply(
+        lambda row: "Missing from saved active DB rows"
+        if not bool(row.get("In Saved Active DB Rows"))
+        else ("Missing from export query" if not bool(row.get("In Export Query")) else ""),
+        axis=1,
+    )
+
+    if not saved_active.empty:
+        db_counts = schedule_month_counts(saved_active)
+    else:
+        db_counts = {}
+    export_dataset_counts = schedule_month_counts(individual_export)
+    individual_view_counts = schedule_view_month_counts(individual_schedule_view, technician=str(selected_employee["full_name"]))
+    full_team_view_counts = schedule_view_month_counts(full_team_employee_rows, technician=str(selected_employee["full_name"]))
+    workbook_counts = generated_workbook_month_counts(
+        pmt_schedule_workbook_bytes(export_rows, SAVED_ROUTE) if not export_rows.empty else b"",
+        str(selected_employee["full_name"]),
+    )
+    workbook_month_counts = (
+        workbook_counts.groupby("Month", dropna=False)["Stores"].max().to_dict()
+        if not workbook_counts.empty and "Stores" in workbook_counts.columns
+        else {}
+    )
+    pipeline_counts = pd.DataFrame(
+        [
+            {"Stage": "Saved DB Active Rows", **db_counts},
+            {"Stage": "Export Dataset", **export_dataset_counts},
+            {"Stage": "Individual Export View", **individual_view_counts},
+            {"Stage": "Full Team Export View", **full_team_view_counts},
+            {"Stage": "Generated XLSX", **{str(key): value for key, value in workbook_month_counts.items()}},
+        ]
+    ).fillna(0)
 
     return {
         "employee_matches": employee_matches,
         "stage_counts": stage_counts,
+        "pipeline_counts": pipeline_counts,
+        "workbook_counts": workbook_counts,
         "assigned": assigned,
         "saved_active": saved_active,
         "export_rows": individual_export,
@@ -7260,24 +7361,42 @@ with tab_manage:
                 )
                 st.markdown("**Stage Counts**")
                 st.dataframe(diag["stage_counts"], use_container_width=True, hide_index=True)
+                st.markdown("**Month Counts By Pipeline Stage**")
+                st.dataframe(diag["pipeline_counts"], use_container_width=True, hide_index=True)
                 if not diag["stage_counts"].empty:
                     numeric_counts = pd.to_numeric(diag["stage_counts"]["Anthony Stores"], errors="coerce")
                     if numeric_counts.notna().any() and numeric_counts.dropna().nunique() > 1:
                         st.error("VALIDATION FAILED - the counts drop between stages. The first lower count shows where records are disappearing.")
                     elif numeric_counts.notna().any():
                         st.success("The numeric stage counts match for the selected run/export dataset.")
-                detail_tabs = st.tabs(["Store Trace", "Assigned Stores", "Saved Active DB Rows", "Export Query Rows", "Full Team Export Source", "Individual Export Source"])
+                detail_tabs = st.tabs([
+                    "Store Trace",
+                    "Missing Stores",
+                    "Assigned Stores",
+                    "Saved Active DB Rows",
+                    "Export Query Rows",
+                    "Generated XLSX Counts",
+                    "Full Team Export Source",
+                    "Individual Export Source",
+                ])
                 with detail_tabs[0]:
                     st.dataframe(diag["store_trace"], use_container_width=True, hide_index=True)
                 with detail_tabs[1]:
-                    st.dataframe(diag["assigned"], use_container_width=True, hide_index=True)
+                    missing_trace = diag["store_trace"][
+                        diag["store_trace"].get("Missing Stage", pd.Series(dtype=str)).fillna("").astype(str).ne("")
+                    ].copy() if not diag["store_trace"].empty else pd.DataFrame()
+                    st.dataframe(missing_trace, use_container_width=True, hide_index=True)
                 with detail_tabs[2]:
-                    st.dataframe(diag["saved_active"], use_container_width=True, hide_index=True)
+                    st.dataframe(diag["assigned"], use_container_width=True, hide_index=True)
                 with detail_tabs[3]:
-                    st.dataframe(diag["export_rows"], use_container_width=True, hide_index=True)
+                    st.dataframe(diag["saved_active"], use_container_width=True, hide_index=True)
                 with detail_tabs[4]:
-                    st.dataframe(diag["full_team_schedule_view"], use_container_width=True, hide_index=True)
+                    st.dataframe(diag["export_rows"], use_container_width=True, hide_index=True)
                 with detail_tabs[5]:
+                    st.dataframe(diag["workbook_counts"], use_container_width=True, hide_index=True)
+                with detail_tabs[6]:
+                    st.dataframe(diag["full_team_schedule_view"], use_container_width=True, hide_index=True)
+                with detail_tabs[7]:
                     st.dataframe(diag["individual_schedule_view"], use_container_width=True, hide_index=True)
         if current_assigned_store_count and run_counts["active_rows"] < current_assigned_store_count * 0.5:
             st.warning(
@@ -7796,6 +7915,56 @@ with tab_manage:
                     month_distribution = route_df["Proposed Month"].value_counts(sort=False).to_dict() if "Proposed Month" in route_df.columns else {}
                     if month_distribution:
                         st.caption("Preview monthly distribution: " + " | ".join(f"{month}: {count}" for month, count in month_distribution.items()))
+                    with st.expander("Preview vs Saved/Export Store Check", expanded=False):
+                        st.caption("Read-only check. This compares the current preview route to the selected run's fresh database/export rows.")
+                        preview_check = route_df.copy()
+                        preview_check["store_id"] = pd.to_numeric(preview_check.get("store_id"), errors="coerce")
+                        preview_check = preview_check.dropna(subset=["store_id"]).copy()
+                        preview_check["store_id"] = preview_check["store_id"].astype(int)
+                        preview_month_col = "Proposed Month" if "Proposed Month" in preview_check.columns else "month"
+                        preview_counts = schedule_month_counts(
+                            preview_check.rename(columns={preview_month_col: "month"}),
+                            month_column="month",
+                            store_column="store_id",
+                        )
+                        fresh_run_rows = pmt_manage_run_items(selected_run)
+                        fresh_employee_rows = fresh_run_rows[
+                            pd.to_numeric(fresh_run_rows.get("employee_id"), errors="coerce").fillna(-1).astype(int) == int(selected_employee)
+                        ].copy() if not fresh_run_rows.empty else pd.DataFrame()
+                        fresh_active_rows = fresh_employee_rows[pmt_active_item_mask(fresh_employee_rows)].copy() if not fresh_employee_rows.empty else pd.DataFrame()
+                        fresh_export_rows = published_pmt_run_export_draft(selected_run)
+                        fresh_employee_export = fresh_export_rows[
+                            pd.to_numeric(fresh_export_rows.get("employee_id"), errors="coerce").fillna(-1).astype(int) == int(selected_employee)
+                        ].copy() if not fresh_export_rows.empty else pd.DataFrame()
+                        saved_counts = schedule_month_counts(fresh_active_rows)
+                        export_counts = schedule_month_counts(fresh_employee_export)
+                        st.dataframe(
+                            pd.DataFrame(
+                                [
+                                    {"Stage": "Current Preview", **preview_counts},
+                                    {"Stage": "Fresh Saved DB Rows", **saved_counts},
+                                    {"Stage": "Fresh Export Dataset", **export_counts},
+                                ]
+                            ).fillna(0),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        preview_ids = set(preview_check["store_id"].dropna().astype(int).tolist())
+                        db_ids = set(fresh_active_rows.get("store_id", pd.Series(dtype=int)).dropna().astype(int).tolist()) if not fresh_active_rows.empty else set()
+                        export_ids = set(fresh_employee_export.get("store_id", pd.Series(dtype=int)).dropna().astype(int).tolist()) if not fresh_employee_export.empty else set()
+                        missing_db_ids = preview_ids - db_ids
+                        missing_export_ids = preview_ids - export_ids
+                        trace_rows = preview_check[["store_id", "store_number", preview_month_col, "Route Order", "Proposed Stop"]].copy()
+                        trace_rows["In Fresh Saved DB"] = trace_rows["store_id"].isin(db_ids)
+                        trace_rows["In Fresh Export"] = trace_rows["store_id"].isin(export_ids)
+                        trace_rows["Missing Reason"] = trace_rows.apply(
+                            lambda row: "Missing from saved DB"
+                            if int(row["store_id"]) in missing_db_ids
+                            else ("Saved but missing from export" if int(row["store_id"]) in missing_export_ids else ""),
+                            axis=1,
+                        )
+                        missing_rows = trace_rows[trace_rows["Missing Reason"].astype(str).ne("")].copy()
+                        st.dataframe(missing_rows, use_container_width=True, hide_index=True)
                     st.caption("Map numbers use `Route Order` for the full route. `Stop #` resets inside each scheduled month for the export.")
                     route_editor_cols = [
                         "Remove", "Route Order", "Proposed Month", "Proposed Date", "Proposed Stop", "store_id", "store_number", "city", "state",
