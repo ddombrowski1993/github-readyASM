@@ -1691,6 +1691,20 @@ def manage_month_options(run_items):
     return ["All months"] + months
 
 
+def schedule_run_month_options(run_items, cycle_start=None, cycle_end=None):
+    months = set()
+    start_month = month_start(cycle_start) if cycle_start else None
+    end_month = month_start(cycle_end) if cycle_end else None
+    if start_month and end_month:
+        cursor = start_month
+        while cursor <= end_month:
+            months.add(cursor)
+            cursor = add_months(cursor, 1)
+    if not run_items.empty and "month_start" in run_items.columns:
+        months.update(run_items["month_start"].dropna().tolist())
+    return sorted(months)
+
+
 def filter_manage_scope(df, employee_id=None, selected_month="All months", status_filter="Active"):
     if df.empty:
         return df.copy()
@@ -7273,7 +7287,7 @@ with tab_manage:
                     if notice.get("warning"):
                         st.warning(notice["warning"])
                 if selected_month == "All months":
-                    month_values = [value for value in manage_month_options(run_items) if value != "All months"]
+                    month_values = schedule_run_month_options(run_items, run_cycle_start, run_cycle_end)
                     if not month_values:
                         month_values = [month_start(date.today())]
                     route_month = st.selectbox(
@@ -7281,7 +7295,7 @@ with tab_manage:
                         month_values,
                         index=0,
                         format_func=month_label,
-                        help="This controls what month of existing schedule rows appears on the map. It does not control where newly saved work starts.",
+                        help="This controls what month of the selected schedule plan appears on the map. It should match the schedule run months, such as July through December. It does not control where newly saved work starts.",
                         key=f"pmt_map_route_month_{selected_run}_{selected_employee}",
                     )
                 else:
