@@ -582,6 +582,7 @@ def active_pmt_employee_summary():
             e.home_zip,
             e.home_latitude,
             e.home_longitude,
+            coalesce(e.monthly_pmt_store_target, 10) as monthly_target,
             count(s.id) as assigned_stores
         from employees e
         left join stores s on s.assigned_pmt_employee_id = e.id and s.active = true
@@ -593,7 +594,7 @@ def active_pmt_employee_summary():
               'preventive maintenance technician',
               'preventative maintenance technician'
           )
-        group by e.id, e.full_name, e.home_address, e.home_city, e.home_state, e.home_zip, e.home_latitude, e.home_longitude
+        group by e.id, e.full_name, e.home_address, e.home_city, e.home_state, e.home_zip, e.home_latitude, e.home_longitude, e.monthly_pmt_store_target
         order by e.full_name
         """
     )
@@ -2063,11 +2064,10 @@ def technician_schedule_reconciliation(run_items, employee_id, selected_month="A
     tech_completed = filter_manage_scope(run_items, employee_id=employee_id, selected_month=selected_month, status_filter="Completed")
     tech_canceled = filter_manage_scope(run_items, employee_id=employee_id, selected_month=selected_month, status_filter="Canceled / Skipped")
     active_any = filter_manage_scope(run_items, selected_month=selected_month, status_filter="Active")
-    completed_any = filter_manage_scope(run_items, selected_month=selected_month, status_filter="Completed")
-    active_store_ids_any = set(active_any["store_id"].dropna().astype(int).tolist()) if not active_any.empty else set()
-    completed_store_ids_any = set(completed_any["store_id"].dropna().astype(int).tolist()) if not completed_any.empty else set()
-    accounted_store_ids_any = active_store_ids_any | completed_store_ids_any
-    assigned_not_scheduled_ids = assigned_ids - accounted_store_ids_any
+    tech_active_store_ids = set(tech_active["store_id"].dropna().astype(int).tolist()) if not tech_active.empty else set()
+    tech_completed_store_ids = set(tech_completed["store_id"].dropna().astype(int).tolist()) if not tech_completed.empty else set()
+    tech_accounted_store_ids = tech_active_store_ids | tech_completed_store_ids
+    assigned_not_scheduled_ids = assigned_ids - tech_accounted_store_ids
     if assigned_df.empty:
         assigned_not_scheduled = pd.DataFrame()
     else:
@@ -2083,6 +2083,7 @@ def technician_schedule_reconciliation(run_items, employee_id, selected_month="A
         "assigned_count": len(assigned_ids),
         "active_count": distinct_store_count(tech_active),
         "completed_count": distinct_store_count(tech_completed),
+        "accounted_count": len(tech_accounted_store_ids & assigned_ids),
         "canceled_count": distinct_store_count(tech_canceled),
         "assigned_not_scheduled_count": len(assigned_not_scheduled_ids),
         "scheduled_no_longer_assigned_count": distinct_store_count(scheduled_no_longer_assigned),
@@ -6671,9 +6672,9 @@ with tab_health:
     repair_runs = safe_query(
         """
         select r.id, r.run_name, r.created_at, r.cycle_start, r.cycle_end, r.months, r.technician_count,
-               r.store_count, r.unscheduled_count, r.status
+               r.store_count, r.unscheduled_count, r.status, coalesce(r.default_monthly_target, 10) as default_monthly_target
         from pmt_schedule_runs r
-        where coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot')
+        where coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot','archived','historical')
         order by r.created_at desc, r.id desc
         """,
         use_cache=False,
@@ -6705,7 +6706,7 @@ with tab_health:
             if not repair_run_items.empty and {"employee_id", "technician"}.issubset(repair_run_items.columns)
             else pd.DataFrame(columns=["employee_id", "technician"])
         )
-        all_repair_pmts = active_pmt_employee_summary()[["employee_id", "technician_name"]].rename(columns={"technician_name": "technician"})
+        all_repair_pmts = active_pmt_employee_summary()[["employee_id", "technician_name", "monthly_target"]].rename(columns={"technician_name": "technician"})
         repair_tech_options = pd.concat([repair_tech_options, all_repair_pmts], ignore_index=True).dropna(subset=["employee_id"]).drop_duplicates("employee_id").sort_values("technician")
         if repair_tech_options.empty:
             st.warning("No active PMT technicians are available.")
@@ -6740,12 +6741,33 @@ with tab_health:
                 tech_rec = technician_schedule_reconciliation(repair_run_items, tech_employee_id, "All months")
                 tech_assigned = int(tech_rec.get("assigned_count", 0))
                 tech_active = int(tech_rec.get("active_count", 0))
+                tech_accounted = int(tech_rec.get("accounted_count", 0))
                 tech_missing = int(tech_rec.get("assigned_not_scheduled_count", 0))
                 tech_wrong = int(tech_rec.get("scheduled_no_longer_assigned_count", 0))
                 tech_elsewhere = int(tech_rec.get("assigned_scheduled_elsewhere_count", 0))
+                run_default_target = scalar_int(repair_run_row.get("default_monthly_target"), 10) or 10
+                tech_target_value = None
+                if "monthly_target" in repair_tech_options.columns:
+                    target_matches = repair_tech_options[
+                        pd.to_numeric(repair_tech_options["employee_id"], errors="coerce").fillna(-1).astype(int) == int(tech_employee_id)
+                    ]
+                    if not target_matches.empty:
+                        tech_target_value = scalar_int(target_matches.iloc[0].get("monthly_target"), 0)
+                monthly_target = max(1, int(tech_target_value or run_default_target or 10))
+                active_rows = tech_rec.get("tech_active", pd.DataFrame())
+                month_counts = (
+                    active_rows.groupby("month")["store_id"].nunique().astype(int).to_dict()
+                    if not active_rows.empty and {"month", "store_id"}.issubset(active_rows.columns)
+                    else {}
+                )
+                over_target_months = {
+                    month_name: count
+                    for month_name, count in month_counts.items()
+                    if int(count) > monthly_target
+                }
                 if tech_wrong or tech_elsewhere:
                     recommendation = "Territory Reconciliation Required"
-                elif tech_missing or tech_active < tech_assigned:
+                elif tech_missing or over_target_months:
                     recommendation = "Rebuild / Balance Required"
                 else:
                     recommendation = "Protected - No Changes Needed"
@@ -6755,10 +6777,12 @@ with tab_health:
                         "Current Assigned Stores": tech_assigned,
                         "Future Scheduled Stores": tech_active,
                         "Completed": int(tech_rec.get("completed_count", 0)),
+                        "Accounted For": tech_accounted,
                         "Missing From Schedule": tech_missing,
                         "Scheduled Not Assigned": tech_wrong,
                         "Assigned Elsewhere": tech_elsewhere,
-                        "Monthly Target": 10,
+                        "Monthly Target": monthly_target,
+                        "Months Over Target": ", ".join(f"{month}: {count}" for month, count in sorted(over_target_months.items())),
                         "Recommended Action": recommendation,
                     }
                 )
