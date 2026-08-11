@@ -1953,10 +1953,36 @@ PMT_ACTIVE_STATUSES = {"scheduled", "needs rescheduled", "rescheduled", "rain de
 PMT_COMPLETED_STATUSES = {"completed", "complete"}
 PMT_CANCELED_STATUSES = {"cancelled", "canceled", "skipped", "deleted", "transferred", "superseded", "archived"}
 PMT_ACTIVE_STATUS_VALUES = ["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]
+PMT_NON_EDITABLE_RUN_STATUSES = {"snapshot", "deleted", "archived", "historical"}
 
 
 def normalize_schedule_status(value):
     return clean(value).lower()
+
+
+def normalize_run_status(value):
+    return clean(value).lower()
+
+
+def is_editable_pmt_run_status(value):
+    return normalize_run_status(value) not in PMT_NON_EDITABLE_RUN_STATUSES
+
+
+def pmt_run_edit_block_message(run):
+    status = clean(getattr(run, "status", "")) or "Current"
+    return (
+        f"Cannot modify historical PMT schedule run #{getattr(run, 'id', '')} ({status}). "
+        "Select the current active schedule or restore the snapshot as a new revision."
+    )
+
+
+def pmt_run_edit_check(session, run_id):
+    run = session.get(PMTScheduleRun, int(run_id)) if run_id is not None else None
+    if not run:
+        return False, "Cannot modify PMT schedule because the selected schedule run was not found."
+    if not is_editable_pmt_run_status(getattr(run, "status", "")):
+        return False, pmt_run_edit_block_message(run)
+    return True, ""
 
 
 def pmt_active_item_mask(df):
@@ -4452,7 +4478,7 @@ def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, n
 def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes=""):
     preview_df = pd.DataFrame(preview_records or [])
     if preview_df.empty:
-        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": {}, "export_month_counts": {}, "employee_month_counts": {}}
+        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": {}, "export_month_counts": {}, "employee_month_counts": {}, "error": ""}
     preview_df = preview_df.copy()
     preview_df["store_id"] = pd.to_numeric(preview_df.get("store_id"), errors="coerce")
     preview_df["Proposed Stop"] = pd.to_numeric(preview_df.get("Proposed Stop"), errors="coerce")
@@ -4461,7 +4487,7 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
     preview_df = preview_df.dropna(subset=["store_id"]).sort_values(sort_columns)
     preview_df = preview_df.drop_duplicates("store_id", keep="first")
     if preview_df.empty:
-        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": {}, "export_month_counts": {}, "employee_month_counts": {}}
+        return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": {}, "export_month_counts": {}, "employee_month_counts": {}, "error": ""}
     expected_month_counts = (
         preview_df.dropna(subset=["Proposed Date"])
         .assign(_month=lambda df: df["Proposed Date"].dt.to_period("M").dt.to_timestamp().apply(lambda value: month_label(value.date())))
@@ -4480,13 +4506,27 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
     employee_month_counts = {}
     now = datetime.utcnow()
     with session_scope("Apply PMT manage schedule preview") as session:
+        editable, block_message = pmt_run_edit_check(session, run_id)
+        if not editable:
+            return {
+                "saved": 0,
+                "superseded": 0,
+                "created": 0,
+                "updated": 0,
+                "resequenced_rows": 0,
+                "export_visible_rows": 0,
+                "expected_month_counts": expected_month_counts,
+                "export_month_counts": {},
+                "employee_month_counts": {},
+                "error": block_message,
+            }
         schedule_id = session.scalar(
             select(ScheduleItem.schedule_id)
             .where(ScheduleItem.pmt_schedule_run_id == int(run_id))
             .order_by(ScheduleItem.schedule_id)
         )
         if schedule_id is None:
-            return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": expected_month_counts, "export_month_counts": {}, "employee_month_counts": {}}
+            return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": expected_month_counts, "export_month_counts": {}, "employee_month_counts": {}, "error": "Cannot modify PMT schedule because no schedule record was found for this run."}
         for _, row in preview_df.iterrows():
             store_id = int(row["store_id"])
             touched_store_ids.add(store_id)
@@ -4633,6 +4673,7 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
         "expected_month_counts": expected_month_counts,
         "export_month_counts": export_month_counts,
         "employee_month_counts": employee_month_counts,
+        "error": "",
     }
 
 
@@ -7251,12 +7292,13 @@ with tab_manage:
         select r.id, r.run_name, r.created_at, r.cycle_start, r.cycle_end, r.months, r.technician_count,
                r.store_count, r.unscheduled_count, r.status
         from pmt_schedule_runs r
-        where coalesce(r.status, '') <> 'Deleted'
+        where coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot','archived','historical')
         order by r.created_at desc, r.id desc
-        """
+        """,
+        use_cache=False,
     )
     if runs.empty:
-        st.info("No PMT schedule plans have been published or imported yet.")
+        st.info("No current active PMT schedule plans are available for manual editing. Historical snapshots are read-only in History & Revisions.")
     else:
         run_live_counts = safe_query(
             """
@@ -7299,13 +7341,22 @@ with tab_manage:
             start_text = month_label(scalar_date(row.get("cycle_start"))) if scalar_date(row.get("cycle_start")) else "No start"
             end_text = month_label(scalar_date(row.get("cycle_end"))) if scalar_date(row.get("cycle_end")) else "No end"
             return (
-                f"#{value} - {row['run_name']} | {start_text} to {end_text} | "
+                f"CURRENT ACTIVE #{value} - {row['run_name']} | {start_text} to {end_text} | "
                 f"{int(row.get('live_active_stores') or 0)} active stores, {int(row.get('live_active_pmts') or 0)} PMTs"
             )
 
+        run_options = runs["id"].astype(int).tolist()
+        previous_selected_run = scalar_int(st.session_state.get("pmt_manage_selected_run"), 0)
+        if previous_selected_run and previous_selected_run not in run_options:
+            st.session_state["pmt_manage_previous_blocked_run"] = previous_selected_run
+            st.session_state["pmt_manage_selected_run"] = run_options[0]
+            st.warning(
+                f"Historical snapshot run #{previous_selected_run} is read-only and cannot be edited. "
+                f"Manual Edit is now targeting current active schedule #{run_options[0]}."
+            )
         selected_run = st.selectbox(
             "Schedule plan",
-            runs["id"].tolist(),
+            run_options,
             format_func=manage_run_label,
             key="pmt_manage_selected_run",
         )
@@ -7812,6 +7863,19 @@ with tab_manage:
                 route_state_key = f"pmt_manual_map_route_{selected_run}_{selected_employee}_{map_month_key}"
                 route_click_queue_key = f"{route_state_key}_click_queue"
                 route_component_key = f"pmt_route_builder_map_{selected_run}_{selected_employee}_{map_month_key}"
+                blocked_preview_run = scalar_int(st.session_state.get("pmt_manage_previous_blocked_run"), 0)
+                if blocked_preview_run and blocked_preview_run != int(selected_run) and not st.session_state.get(route_state_key):
+                    old_route_state_key = f"pmt_manual_map_route_{blocked_preview_run}_{selected_employee}_{map_month_key}"
+                    old_route_click_queue_key = f"{old_route_state_key}_click_queue"
+                    if st.session_state.get(old_route_state_key):
+                        st.session_state[route_state_key] = st.session_state.get(old_route_state_key)
+                        if st.session_state.get(old_route_click_queue_key):
+                            st.session_state[route_click_queue_key] = st.session_state.get(old_route_click_queue_key)
+                        st.session_state.pop("pmt_manage_previous_blocked_run", None)
+                        st.success(
+                            f"Copied the existing route preview from read-only snapshot #{blocked_preview_run} to current active schedule #{selected_run}. "
+                            "The route order and monthly placement were not regenerated."
+                        )
                 route_records = st.session_state.get(route_state_key, [])
                 queued_route_records = st.session_state.get(route_click_queue_key, [])
                 route_df = pd.DataFrame(route_records)
@@ -8028,6 +8092,15 @@ with tab_manage:
                         apply_df = distribute_route_across_months(apply_df, apply_start_month, route_monthly_target, selected_employee)
                         result = apply_pmt_manage_build_preview(selected_run, selected_employee, apply_df.to_dict("records"), route_note)
                         st.cache_data.clear()
+                        if result.get("error"):
+                            st.session_state["pmt_map_route_apply_notice"] = {
+                                "message": "Manual route was not applied.",
+                                "warning": result["error"],
+                                "run_id": int(selected_run),
+                                "employee_id": int(selected_employee),
+                                "technician": selected_tech_name,
+                            }
+                            st.rerun()
                         expected_counts = result.get("expected_month_counts", {})
                         export_counts = result.get("export_month_counts", {})
                         employee_counts = result.get("employee_month_counts", {})
