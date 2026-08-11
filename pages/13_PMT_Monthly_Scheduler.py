@@ -7277,15 +7277,16 @@ with tab_manage:
                     if not month_values:
                         month_values = [month_start(date.today())]
                     route_month = st.selectbox(
-                        "Route month",
+                        "Map / existing schedule month",
                         month_values,
                         index=0,
                         format_func=month_label,
+                        help="This controls what month of existing schedule rows appears on the map. It does not control where newly saved work starts.",
                         key=f"pmt_map_route_month_{selected_run}_{selected_employee}",
                     )
                 else:
                     route_month = selected_month
-                    st.caption(f"Route month: {month_label(route_month)}")
+                    st.caption(f"Map / existing schedule month: {month_label(route_month)}")
                 layer_cols = st.columns([0.42, 0.18, 0.18, 0.22])
                 extra_employee_options = [
                     int(value)
@@ -7315,10 +7316,11 @@ with tab_manage:
                     placement_month_options.append(cursor_month)
                     cursor_month = add_months(cursor_month, 1)
                 apply_start_month = layer_cols[3].selectbox(
-                    "Schedule start",
+                    "New schedule starts",
                     placement_month_options,
                     index=0,
                     format_func=month_label,
+                    help="This controls the first month that the new saved route will be added to the schedule. Past months are not allowed for new work.",
                     key=f"pmt_map_route_apply_start_month_{selected_run}_{selected_employee}_{route_month}",
                 )
                 placement_cols = st.columns([0.22, 0.28, 0.5])
@@ -7348,6 +7350,10 @@ with tab_manage:
                     f"Target schedule: #{selected_run} - {run_row.get('run_name', '')} | "
                     f"PMT: {selected_tech_name} | Schedule start: {month_label(apply_start_month)} | Stores/month: {int(route_monthly_target)}. "
                     "Generating from the map only creates a preview list. Use the Apply button below to save it into this selected schedule."
+                )
+                st.caption(
+                    f"`Map / existing schedule month` is what you are viewing: {month_label(route_month)}. "
+                    f"`New schedule starts` is where the saved work will be placed: {month_label(apply_start_month)}."
                 )
 
                 command_cols = st.columns(4)
