@@ -1985,6 +1985,10 @@ def pmt_run_edit_check(session, run_id):
     return True, ""
 
 
+def active_pmt_status_condition(column):
+    return func.lower(func.trim(func.coalesce(column, "scheduled"))).in_(list(PMT_ACTIVE_STATUSES))
+
+
 def pmt_active_item_mask(df):
     statuses = df.get("status", pd.Series([], dtype=str)).apply(normalize_schedule_status)
     return statuses.isin(PMT_ACTIVE_STATUSES)
@@ -4496,6 +4500,14 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
         .astype(int)
         .to_dict()
     )
+    expected_store_months = {
+        int(row["store_id"]): month_start(pd.to_datetime(row["Proposed Date"]).date())
+        for _, row in preview_df.dropna(subset=["Proposed Date"]).iterrows()
+    }
+    expected_store_dates = {
+        int(row["store_id"]): pd.to_datetime(row["Proposed Date"]).date()
+        for _, row in preview_df.dropna(subset=["Proposed Date"]).iterrows()
+    }
     saved = 0
     created = 0
     updated = 0
@@ -4541,7 +4553,7 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
                     ScheduleItem.pmt_schedule_run_id == int(run_id),
                     ScheduleItem.store_id == int(store_id),
                     ScheduleItem.work_type == "PMT",
-                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                    active_pmt_status_condition(ScheduleItem.status),
                 )
                 .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.id)
             ).all()
@@ -4599,7 +4611,7 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
                 select(func.count(func.distinct(ScheduleItem.store_id))).where(
                     ScheduleItem.pmt_schedule_run_id == int(run_id),
                     ScheduleItem.work_type == "PMT",
-                    ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                    active_pmt_status_condition(ScheduleItem.status),
                 )
             )
             run.store_count = int(active_store_count or 0)
@@ -4625,6 +4637,47 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
         for touched_employee_id, touched_month in touched_months:
             resequenced_rows += resequence_pmt_month(session, run_id, touched_employee_id, touched_month)
         session.flush()
+        validation_items = session.scalars(
+            select(ScheduleItem)
+            .where(
+                ScheduleItem.pmt_schedule_run_id == int(run_id),
+                ScheduleItem.employee_id == int(employee_id),
+                ScheduleItem.store_id.in_(list(expected_store_months.keys())),
+                ScheduleItem.work_type == "PMT",
+                active_pmt_status_condition(ScheduleItem.status),
+            )
+            .order_by(ScheduleItem.store_id, ScheduleItem.schedule_date, ScheduleItem.id)
+        ).all()
+        validation_by_store = {}
+        duplicate_stores = set()
+        for item in validation_items:
+            store_id_value = int(item.store_id)
+            if store_id_value in validation_by_store:
+                duplicate_stores.add(store_id_value)
+            validation_by_store.setdefault(store_id_value, item)
+        validation_failures = []
+        for store_id_value, expected_month in expected_store_months.items():
+            item = validation_by_store.get(store_id_value)
+            if not item:
+                validation_failures.append(f"store_id {store_id_value}: missing active saved row")
+                continue
+            saved_month = month_start(item.schedule_date)
+            if saved_month != expected_month:
+                validation_failures.append(
+                    f"store_id {store_id_value}: preview {month_label(expected_month)} saved {month_label(saved_month)}"
+                )
+            expected_date = expected_store_dates.get(store_id_value)
+            if expected_date and item.schedule_date != expected_date:
+                validation_failures.append(
+                    f"store_id {store_id_value}: preview date {expected_date} saved date {item.schedule_date}"
+                )
+        if duplicate_stores:
+            validation_failures.extend([f"store_id {store_id_value}: duplicate active saved rows" for store_id_value in sorted(duplicate_stores)])
+        if validation_failures:
+            raise RuntimeError(
+                "Manual apply validation failed; saved schedule does not match the route preview. "
+                + " | ".join(validation_failures[:20])
+            )
         export_visible_rows = 0
         if touched_store_ids:
             export_verify_query = select(ScheduleItem).where(
@@ -4632,7 +4685,7 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
                 ScheduleItem.employee_id == int(employee_id),
                 ScheduleItem.store_id.in_(list(touched_store_ids)),
                 ScheduleItem.work_type == "PMT",
-                ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+                active_pmt_status_condition(ScheduleItem.status),
             )
             if run and run.cycle_start:
                 export_verify_query = export_verify_query.where(ScheduleItem.schedule_date >= run.cycle_start)
@@ -4647,7 +4700,7 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
             ScheduleItem.pmt_schedule_run_id == int(run_id),
             ScheduleItem.employee_id == int(employee_id),
             ScheduleItem.work_type == "PMT",
-            ScheduleItem.status.in_(PMT_ACTIVE_STATUS_VALUES),
+            active_pmt_status_condition(ScheduleItem.status),
         )
         if run and run.cycle_start:
             employee_verify_query = employee_verify_query.where(ScheduleItem.schedule_date >= run.cycle_start)
@@ -8087,11 +8140,21 @@ with tab_manage:
                         disabled=not apply_confirm,
                         key=f"pmt_map_route_apply_{selected_run}_{selected_employee}_{map_month_key}",
                     ):
-                        apply_df = route_df.drop(columns=["Remove"], errors="ignore").copy()
-                        apply_df["technician"] = selected_tech_name
-                        apply_df = distribute_route_across_months(apply_df, apply_start_month, route_monthly_target, selected_employee)
-                        result = apply_pmt_manage_build_preview(selected_run, selected_employee, apply_df.to_dict("records"), route_note)
-                        st.cache_data.clear()
+                        try:
+                            apply_df = route_df.drop(columns=["Remove"], errors="ignore").copy()
+                            apply_df["technician"] = selected_tech_name
+                            apply_df = distribute_route_across_months(apply_df, apply_start_month, route_monthly_target, selected_employee)
+                            result = apply_pmt_manage_build_preview(selected_run, selected_employee, apply_df.to_dict("records"), route_note)
+                            st.cache_data.clear()
+                        except Exception as exc:
+                            st.session_state["pmt_map_route_apply_notice"] = {
+                                "message": "Manual route was not applied.",
+                                "warning": str(exc),
+                                "run_id": int(selected_run),
+                                "employee_id": int(selected_employee),
+                                "technician": selected_tech_name,
+                            }
+                            st.rerun()
                         if result.get("error"):
                             st.session_state["pmt_map_route_apply_notice"] = {
                                 "message": "Manual route was not applied.",
