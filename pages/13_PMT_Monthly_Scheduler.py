@@ -7047,7 +7047,9 @@ with tab_manage:
                 route_employee_ids = [int(selected_employee)] + [int(value) for value in extra_layer_employee_ids]
                 route_pool = pmt_route_builder_store_pool(run_items, route_employee_ids, route_month, run_id=selected_run)
                 route_state_key = f"pmt_manual_map_route_{selected_run}_{selected_employee}_{route_month}"
+                route_click_queue_key = f"{route_state_key}_click_queue"
                 route_records = st.session_state.get(route_state_key, [])
+                queued_route_records = st.session_state.get(route_click_queue_key, [])
                 route_df = pd.DataFrame(route_records)
 
                 command_cols = st.columns(4)
@@ -7061,12 +7063,14 @@ with tab_manage:
                         existing_route["Proposed Month"] = month_label(route_month)
                         existing_route["Manual or Auto-Filled"] = "Loaded existing route"
                         st.session_state[route_state_key] = existing_route.to_dict("records")
+                        st.session_state[route_click_queue_key] = existing_route.to_dict("records")
                         st.rerun()
                 if command_cols[1].button("Clear Proposed Route", key=f"pmt_map_clear_route_{selected_run}_{selected_employee}_{route_month}"):
                     st.session_state.pop(route_state_key, None)
+                    st.session_state.pop(route_click_queue_key, None)
                     st.session_state.pop(f"{route_state_key}_last_click", None)
                     st.rerun()
-                command_cols[2].metric("Proposed Stops", len(route_records))
+                command_cols[2].metric("Clicked Stops", len(queued_route_records))
                 command_cols[3].metric("Map Stores", len(route_pool))
 
                 employee_layers = active_pmt_employee_summary()
@@ -7080,7 +7084,7 @@ with tab_manage:
                     route_df,
                     show_assigned_layer=show_assigned_layer,
                     show_existing_layer=show_existing_layer,
-                    key=f"pmt_route_builder_map_{selected_run}_{selected_employee}_{route_month}_{len(route_records)}",
+                    key=f"pmt_route_builder_map_{selected_run}_{selected_employee}_{route_month}",
                 )
                 clicked_store = nearest_route_builder_store(route_pool, map_data.get("last_object_clicked") if isinstance(map_data, dict) else None)
                 if clicked_store is not None:
@@ -7088,23 +7092,38 @@ with tab_manage:
                     last_click_key = f"{route_state_key}_last_click"
                     existing_store_ids = {
                         scalar_int(row.get("store_id"), 0)
-                        for row in route_records
+                        for row in queued_route_records
                     }
                     if st.session_state.get(last_click_key) != click_token and int(clicked_store["store_id"]) not in existing_store_ids:
                         new_row = clicked_store.to_dict()
-                        new_row["Proposed Stop"] = len(route_records) + 1
+                        new_row["Proposed Stop"] = len(queued_route_records) + 1
                         new_row["Proposed Date"] = route_date
                         new_row["Proposed Month"] = month_label(route_month)
                         new_row["technician"] = selected_tech_name
                         new_row["Manual or Auto-Filled"] = "Map selected"
-                        route_records.append(new_row)
-                        st.session_state[route_state_key] = route_records
+                        queued_route_records.append(new_row)
+                        st.session_state[route_click_queue_key] = queued_route_records
                         st.session_state[last_click_key] = click_token
+
+                queued_route_df = pd.DataFrame(st.session_state.get(route_click_queue_key, []))
+                if not queued_route_df.empty:
+                    st.markdown("**Clicked stores waiting to generate**")
+                    queue_view = queued_route_df.copy()
+                    queue_view["Proposed Stop"] = pd.to_numeric(queue_view.get("Proposed Stop"), errors="coerce").fillna(0).astype(int)
+                    queue_cols = ["Proposed Stop", "store_number", "city", "state", "assigned_technician", "scheduled_technician", "scheduled_date"]
+                    st.dataframe(queue_view[[col for col in queue_cols if col in queue_view.columns]], use_container_width=True, hide_index=True)
+                    if st.button("Generate / Refresh Route List From Clicked Stores", type="primary", key=f"pmt_map_generate_route_list_{selected_run}_{selected_employee}_{route_month}"):
+                        generated_route = queued_route_df.copy().sort_values(["Proposed Stop", "store_number"]).reset_index(drop=True)
+                        generated_route["Proposed Stop"] = range(1, len(generated_route) + 1)
+                        generated_route["Proposed Date"] = route_date
+                        generated_route["Proposed Month"] = month_label(route_month)
+                        generated_route["technician"] = selected_tech_name
+                        st.session_state[route_state_key] = generated_route.to_dict("records")
                         st.rerun()
 
                 route_df = pd.DataFrame(st.session_state.get(route_state_key, []))
                 if route_df.empty:
-                    st.info("Click store dots on the map, or load the existing route, to start the proposed route list.")
+                    st.info("Click store dots on the map, then use Generate / Refresh Route List From Clicked Stores when you are ready to edit or apply the route.")
                 else:
                     route_df = route_df.copy()
                     route_df["Remove"] = False
