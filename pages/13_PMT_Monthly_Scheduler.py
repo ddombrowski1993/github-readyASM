@@ -1557,6 +1557,21 @@ def published_pmt_run_export_draft(run_id):
     return get_current_active_pmt_schedule_rows(run_id)
 
 
+def pmt_ordered_month_counts(df, store_column="store_id"):
+    if df.empty or "month_start" not in df.columns or store_column not in df.columns:
+        return {}
+    scoped = df.copy()
+    scoped["_month_sort"] = pd.to_datetime(scoped["month_start"], errors="coerce")
+    counts = (
+        scoped.dropna(subset=["_month_sort"])
+        .groupby("_month_sort")[store_column]
+        .nunique()
+        .sort_index()
+        .astype(int)
+    )
+    return {month_label(month_value.date()): int(count) for month_value, count in counts.items()}
+
+
 def normalize_pmt_schedule_proposal(proposed_rows, employee_id=None):
     proposal = proposed_rows.copy() if isinstance(proposed_rows, pd.DataFrame) else pd.DataFrame(proposed_rows or [])
     if proposal.empty:
@@ -1612,7 +1627,7 @@ def validate_pmt_schedule_proposal(
         duplicate_preview_ids = proposal["store_id"][proposal["store_id"].duplicated()].dropna().astype(int).unique().tolist()
         if duplicate_preview_ids:
             failures.extend([f"store_id {store_id}: duplicate proposed store" for store_id in sorted(duplicate_preview_ids)])
-        month_counts = proposal.groupby("month")["store_id"].nunique().astype(int).to_dict()
+        month_counts = pmt_ordered_month_counts(proposal)
         over_target = {
             month_name: count
             for month_name, count in month_counts.items()
@@ -1691,7 +1706,7 @@ def validate_pmt_schedule_proposal(
         "valid": not failures,
         "failures": failures,
         "warnings": warnings,
-        "month_counts": proposal.groupby("month")["store_id"].nunique().astype(int).to_dict() if not proposal.empty else {},
+        "month_counts": pmt_ordered_month_counts(proposal) if not proposal.empty else {},
         "unique_store_count": int(proposal["store_id"].nunique()) if not proposal.empty else 0,
         "proposal": proposal,
     }
@@ -1744,8 +1759,8 @@ def validate_saved_pmt_schedule_matches_proposal(
             saved_employee_id = scalar_int(saved_row.get("employee_id"), 0)
             if proposed_employee_id and saved_employee_id and proposed_employee_id != saved_employee_id:
                 failures.append(f"store_id {store_id}: proposed employee_id {proposed_employee_id} saved employee_id {saved_employee_id}")
-        saved_month_counts = saved.groupby("month")["store_id"].nunique().astype(int).to_dict() if {"month", "store_id"}.issubset(saved.columns) else {}
-        proposed_month_counts = proposal.groupby("month")["store_id"].nunique().astype(int).to_dict()
+        saved_month_counts = pmt_ordered_month_counts(saved) if {"month_start", "store_id"}.issubset(saved.columns) else {}
+        proposed_month_counts = pmt_ordered_month_counts(proposal)
         if complete_replacement and saved_month_counts != proposed_month_counts:
             failures.append(f"month counts proposed {proposed_month_counts} saved {saved_month_counts}")
         monthly_target = max(1, int(monthly_target or 10))
@@ -1776,7 +1791,7 @@ def validate_saved_pmt_schedule_matches_proposal(
     return {
         "valid": not failures,
         "failures": failures,
-        "saved_month_counts": saved.groupby("month")["store_id"].nunique().astype(int).to_dict() if not saved.empty and {"month", "store_id"}.issubset(saved.columns) else {},
+        "saved_month_counts": pmt_ordered_month_counts(saved) if not saved.empty and {"month_start", "store_id"}.issubset(saved.columns) else {},
         "saved_store_count": distinct_store_count(saved) if not saved.empty else 0,
     }
 
