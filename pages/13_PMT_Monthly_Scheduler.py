@@ -1572,6 +1572,29 @@ def pmt_ordered_month_counts(df, store_column="store_id"):
     return {month_label(month_value.date()): int(count) for month_value, count in counts.items()}
 
 
+def pmt_shared_run_index(run_ids):
+    run_ids = [int(value) for value in run_ids]
+    preferred = scalar_int(
+        st.session_state.get("pmt_current_active_run_id")
+        or st.session_state.get("pmt_last_manual_route_export_run")
+        or st.session_state.get("pmt_manage_selected_run")
+        or st.session_state.get("pmt_fix_run"),
+        0,
+    )
+    return run_ids.index(preferred) if preferred in run_ids else 0
+
+
+def pmt_shared_employee_index(employee_ids):
+    employee_ids = [int(value) for value in employee_ids]
+    preferred = scalar_int(
+        st.session_state.get("pmt_current_employee_id")
+        or st.session_state.get("pmt_last_manual_route_employee_id")
+        or st.session_state.get("pmt_fix_employee"),
+        0,
+    )
+    return employee_ids.index(preferred) if preferred in employee_ids else 0
+
+
 def normalize_pmt_schedule_proposal(proposed_rows, employee_id=None):
     proposal = proposed_rows.copy() if isinstance(proposed_rows, pd.DataFrame) else pd.DataFrame(proposed_rows or [])
     if proposal.empty:
@@ -4899,13 +4922,9 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
     preview_df = preview_df.drop_duplicates("store_id", keep="first")
     if preview_df.empty:
         return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": {}, "export_month_counts": {}, "employee_month_counts": {}, "error": ""}
-    expected_month_counts = (
+    expected_month_counts = pmt_ordered_month_counts(
         preview_df.dropna(subset=["Proposed Date"])
-        .assign(_month=lambda df: df["Proposed Date"].dt.to_period("M").dt.to_timestamp().apply(lambda value: month_label(value.date())))
-        .groupby("_month")["store_id"]
-        .nunique()
-        .astype(int)
-        .to_dict()
+        .assign(month_start=lambda df: df["Proposed Date"].dt.to_period("M").dt.to_timestamp().dt.date)
     )
     expected_store_months = {
         int(row["store_id"]): month_start(pd.to_datetime(row["Proposed Date"]).date())
@@ -7095,8 +7114,10 @@ with tab_health:
             "Schedule run to fix",
             repair_runs["id"].tolist(),
             format_func=lambda value: f"#{value} - {repair_runs.set_index('id').loc[value, 'run_name']}",
+            index=pmt_shared_run_index(repair_runs["id"].tolist()),
             key="pmt_fix_run",
         )
+        st.session_state["pmt_current_active_run_id"] = int(repair_run_id)
         repair_run_row = repair_runs.set_index("id").loc[repair_run_id]
         repair_run_items = get_current_active_pmt_schedule_rows(repair_run_id, include_completed=True)
         repair_cycle_start = scalar_date(repair_run_row.get("cycle_start"))
@@ -7116,10 +7137,17 @@ with tab_health:
                 "PMT to check/fix",
                 repair_tech_options["employee_id"].astype(int).tolist(),
                 format_func=lambda value: repair_tech_options.set_index("employee_id").loc[value, "technician"],
+                index=pmt_shared_employee_index(repair_tech_options["employee_id"].astype(int).tolist()),
                 key="pmt_fix_employee",
             )
+            st.session_state["pmt_current_employee_id"] = int(repair_employee_id)
             repair_tech_name = repair_tech_options.set_index("employee_id").loc[repair_employee_id, "technician"]
             repair_rec = technician_schedule_reconciliation(repair_run_items, repair_employee_id, "All months")
+            repair_active_rows = repair_run_items[pmt_active_item_mask(repair_run_items)].copy() if not repair_run_items.empty else pd.DataFrame()
+            repair_selected_active = repair_active_rows[
+                pd.to_numeric(repair_active_rows.get("employee_id"), errors="coerce").fillna(-1).astype(int) == int(repair_employee_id)
+            ].copy() if not repair_active_rows.empty and "employee_id" in repair_active_rows.columns else pd.DataFrame()
+            repair_active_month_counts = pmt_ordered_month_counts(repair_selected_active)
             assigned_count = int(repair_rec.get("assigned_count", 0))
             active_count = int(repair_rec.get("active_count", 0))
             completed_count = int(repair_rec.get("completed_count", 0))
@@ -7133,6 +7161,10 @@ with tab_health:
             metric_cols[3].metric("Missing From Schedule", missing_count)
             metric_cols[4].metric("Scheduled Not Assigned", wrong_count)
             metric_cols[5].metric("Assigned Elsewhere", elsewhere_count)
+            st.caption(
+                f"Current active saved route for {repair_tech_name} on schedule #{int(repair_run_id)}: "
+                f"{month_count_summary(repair_active_month_counts)}"
+            )
 
             team_health_rows = []
             for _, tech_row in repair_tech_options.iterrows():
@@ -7878,8 +7910,10 @@ with tab_manage:
             "Schedule plan",
             run_options,
             format_func=manage_run_label,
+            index=pmt_shared_run_index(run_options),
             key="pmt_manage_selected_run",
         )
+        st.session_state["pmt_current_active_run_id"] = int(selected_run)
         run_row = run_lookup.loc[selected_run]
         raw_run_items = pmt_manage_run_items(selected_run)
         canonical_run_items = get_current_active_pmt_schedule_rows(selected_run, include_completed=True)
@@ -8192,8 +8226,10 @@ with tab_manage:
                 "PMT Technician",
                 tech_options["employee_id"].astype(int).tolist(),
                 format_func=lambda value: tech_options.set_index("employee_id").loc[value, "technician"],
+                index=pmt_shared_employee_index(tech_options["employee_id"].astype(int).tolist()),
                 key="pmt_manage_context_employee",
             )
+            st.session_state["pmt_current_employee_id"] = int(selected_employee)
             selected_month = context_cols[1].selectbox(
                 "Month",
                 manage_month_options(run_items),
@@ -8709,6 +8745,9 @@ with tab_manage:
                             "technician": selected_tech_name,
                         }
                         st.session_state["pmt_last_manual_route_export_run"] = int(selected_run)
+                        st.session_state["pmt_current_active_run_id"] = int(selected_run)
+                        st.session_state["pmt_last_manual_route_employee_id"] = int(selected_employee)
+                        st.session_state["pmt_current_employee_id"] = int(selected_employee)
                         st.session_state.pop(route_state_key, None)
                         st.session_state.pop(route_click_queue_key, None)
                         st.session_state.pop(f"{route_state_key}_last_click", None)
