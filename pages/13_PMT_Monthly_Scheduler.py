@@ -1596,6 +1596,7 @@ def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=No
         """
         select si.id as schedule_item_id, si.schedule_id, si.pmt_schedule_run_id,
                si.schedule_date, si.sequence_number, si.status, si.completion_notes as notes,
+               si.created_at, si.updated_at,
                e.id as employee_id, e.full_name as technician, e.home_latitude, e.home_longitude,
                s.id as store_id, s.store_number, s.address, s.city, s.state, s.zip,
                s.assigned_pmt_employee_id, owner.full_name as assigned_technician,
@@ -8003,29 +8004,101 @@ with tab_manage:
         st.session_state["pmt_current_active_run_id"] = int(selected_run)
         run_row = run_lookup.loc[selected_run]
         raw_run_items = pmt_manage_run_items(selected_run)
+        canonical_active_run_items = get_current_active_pmt_schedule_rows(selected_run)
         canonical_run_items = get_current_active_pmt_schedule_rows(selected_run, include_completed=True)
         run_cycle_start = scalar_date(run_row.get("cycle_start"))
         run_cycle_end = scalar_date(run_row.get("cycle_end"))
+        active_run_items, _active_outside_items = split_run_items_by_period(canonical_active_run_items, run_cycle_start, run_cycle_end)
         run_items, _canonical_outside_items = split_run_items_by_period(canonical_run_items, run_cycle_start, run_cycle_end)
         _raw_period_items, out_of_period_items = split_run_items_by_period(raw_run_items, run_cycle_start, run_cycle_end)
-        run_counts = run_status_counts(run_items)
-        current_pmt_summary = active_pmt_employee_summary()
+        active_rows_for_summary = active_run_items[pmt_active_item_mask(active_run_items)].copy() if not active_run_items.empty else pd.DataFrame()
+        completed_rows_for_summary = run_items[pmt_completed_item_mask(run_items)].copy() if not run_items.empty else pd.DataFrame()
+        canceled_rows_for_summary = run_items[pmt_canceled_item_mask(run_items)].copy() if not run_items.empty else pd.DataFrame()
+        run_counts = {
+            "active_rows": len(active_rows_for_summary),
+            "active_stores": distinct_store_count(active_rows_for_summary),
+            "active_pmts": int(active_rows_for_summary["employee_id"].dropna().nunique()) if not active_rows_for_summary.empty and "employee_id" in active_rows_for_summary.columns else 0,
+            "completed_rows": len(completed_rows_for_summary),
+            "canceled_rows": len(canceled_rows_for_summary),
+        }
+        current_assignments = current_assignments_from_database()
         current_assigned_store_count = (
-            int(pd.to_numeric(current_pmt_summary.get("assigned_stores"), errors="coerce").fillna(0).sum())
-            if not current_pmt_summary.empty
+            distinct_store_count(current_assignments)
+            if not current_assignments.empty and "store_id" in current_assignments.columns
             else 0
         )
+        assigned_store_ids = set(current_assignments["store_id"].dropna().astype(int).tolist()) if not current_assignments.empty and "store_id" in current_assignments.columns else set()
+        active_store_ids = set(active_rows_for_summary["store_id"].dropna().astype(int).tolist()) if not active_rows_for_summary.empty and "store_id" in active_rows_for_summary.columns else set()
+        schedule_assigned_not_scheduled = len(assigned_store_ids - active_store_ids)
         run_cols = st.columns(6)
         run_cols[0].metric("Status", clean(run_row.get("status", "")) or "Published")
         run_cols[1].metric("Start", month_label(scalar_date(run_row.get("cycle_start"))) if scalar_date(run_row.get("cycle_start")) else "N/A")
         run_cols[2].metric("End", month_label(scalar_date(run_row.get("cycle_end"))) if scalar_date(run_row.get("cycle_end")) else "N/A")
-        run_cols[3].metric("PMTs in Selected Plan", int(run_row.get("live_active_pmts") or 0))
-        run_cols[4].metric("Active Stores in Selected Plan", distinct_store_count(run_items[pmt_active_item_mask(run_items)]) if not run_items.empty else 0)
-        run_cols[5].metric("Unscheduled", scalar_int(run_row.get("unscheduled_count"), 0))
+        run_cols[3].metric("PMTs in Selected Plan", run_counts["active_pmts"])
+        run_cols[4].metric("Active Stores in Selected Plan", run_counts["active_stores"])
+        run_cols[5].metric("Assigned Not Scheduled", schedule_assigned_not_scheduled)
         row_cols = st.columns(3)
         row_cols[0].metric("Active Rows in Selected Plan", run_counts["active_rows"])
         row_cols[1].metric("Completed Rows", run_counts["completed_rows"])
         row_cols[2].metric("Canceled / Skipped Rows", run_counts["canceled_rows"])
+        if run_counts["active_rows"] != run_counts["active_stores"]:
+            st.warning(
+                f"Selected schedule health check: active rows ({run_counts['active_rows']}) do not equal unique active stores "
+                f"({run_counts['active_stores']}). Review duplicate active rows before exporting or rebuilding."
+            )
+        with st.expander("Selected Schedule Summary Diagnostic", expanded=bool(run_counts["completed_rows"])):
+            st.caption("Read-only. These cards are calculated from the canonical current PMT schedule rows, not stored run metadata.")
+            summary_rows = [
+                {"Metric": "Canonical Active Rows", "Value": run_counts["active_rows"]},
+                {"Metric": "Canonical Unique Active Stores", "Value": run_counts["active_stores"]},
+                {"Metric": "Canonical PMTs", "Value": run_counts["active_pmts"]},
+                {"Metric": "Completed Rows In Selected Run", "Value": run_counts["completed_rows"]},
+                {"Metric": "Canceled / Skipped Rows In Selected Run", "Value": run_counts["canceled_rows"]},
+                {"Metric": "Current Assigned Stores", "Value": current_assigned_store_count},
+                {"Metric": "Assigned Not Scheduled", "Value": schedule_assigned_not_scheduled},
+                {"Metric": "Stored Run technician_count", "Value": scalar_int(run_row.get("technician_count"), 0)},
+                {"Metric": "Stored Run store_count", "Value": scalar_int(run_row.get("store_count"), 0)},
+                {"Metric": "Stored Run unscheduled_count", "Value": scalar_int(run_row.get("unscheduled_count"), 0)},
+                {"Metric": "Raw ScheduleItem Rows In Run", "Value": len(raw_run_items)},
+            ]
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+            if not run_items.empty and "status" in run_items.columns:
+                status_breakdown = (
+                    run_items.assign(normalized_status=run_items["status"].apply(normalize_schedule_status))
+                    .groupby("normalized_status", dropna=False)
+                    .size()
+                    .reset_index(name="Canonical Rows")
+                    .sort_values(["Canonical Rows", "normalized_status"], ascending=[False, True])
+                )
+                st.markdown("**Canonical Status Breakdown**")
+                st.dataframe(status_breakdown, use_container_width=True, hide_index=True)
+            if not raw_run_items.empty and "status" in raw_run_items.columns:
+                raw_status_breakdown = (
+                    raw_run_items.assign(normalized_status=raw_run_items["status"].apply(normalize_schedule_status))
+                    .groupby("normalized_status", dropna=False)
+                    .size()
+                    .reset_index(name="Raw Rows")
+                    .sort_values(["Raw Rows", "normalized_status"], ascending=[False, True])
+                )
+                st.markdown("**Raw Run Status Breakdown**")
+                st.dataframe(raw_status_breakdown, use_container_width=True, hide_index=True)
+            if not completed_rows_for_summary.empty:
+                st.warning(
+                    "These rows are counted as completed because their saved ScheduleItem status is `Completed`. "
+                    "The app also has an automatic completion routine that marks PMT rows completed when their schedule date is before the current month."
+                )
+                completed_detail_columns = [
+                    col for col in [
+                        "schedule_item_id", "technician", "employee_id", "store_number", "schedule_date",
+                        "status", "pmt_schedule_run_id", "schedule_source", "notes", "created_at", "updated_at",
+                    ] if col in completed_rows_for_summary.columns
+                ]
+                st.markdown("**Rows Currently Counted As Completed**")
+                st.dataframe(
+                    completed_rows_for_summary.sort_values([col for col in ["technician", "schedule_date", "store_number"] if col in completed_rows_for_summary.columns])[completed_detail_columns],
+                    use_container_width=True,
+                    hide_index=True,
+                )
         st.caption(
             f"This section is showing schedule run #{selected_run} only. Current active PMT assignments across all technicians: "
             f"{current_assigned_store_count:,} stores."
