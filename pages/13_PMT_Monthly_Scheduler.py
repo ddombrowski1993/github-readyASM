@@ -1591,6 +1591,63 @@ def normalize_pmt_schedule_rows(df):
     return df
 
 
+def pmt_inactive_source_mask(df):
+    if df.empty or "schedule_source" not in df.columns:
+        return pd.Series(False, index=df.index)
+    source = df["schedule_source"].fillna("").astype(str).str.lower()
+    return (
+        source.str.contains("superseded", regex=False)
+        | source.str.contains("old schedule snapshot", regex=False)
+        | source.str.contains("overflow removed", regex=False)
+        | source.str.contains("rebuild removed", regex=False)
+        | source.str.contains("out-of-period cleanup", regex=False)
+    )
+
+
+def canonicalize_current_pmt_rows(df, include_completed=False):
+    if df.empty or "store_id" not in df.columns:
+        return df
+    scoped = df.copy()
+    scoped = scoped[~pmt_inactive_source_mask(scoped)].copy()
+    if scoped.empty:
+        return scoped
+    if not include_completed:
+        scoped = scoped[pmt_active_item_mask(scoped)].copy()
+    else:
+        keep_mask = pmt_active_item_mask(scoped) | pmt_completed_item_mask(scoped)
+        scoped = scoped[keep_mask].copy()
+    if scoped.empty:
+        return scoped
+
+    scoped["_status_rank"] = 2
+    scoped.loc[pmt_completed_item_mask(scoped), "_status_rank"] = 1
+    scoped.loc[pmt_active_item_mask(scoped), "_status_rank"] = 0
+    scoped["_assigned_rank"] = 1
+    if {"employee_id", "assigned_pmt_employee_id"}.issubset(scoped.columns):
+        employee_ids = pd.to_numeric(scoped["employee_id"], errors="coerce").astype("Int64")
+        assigned_ids = pd.to_numeric(scoped["assigned_pmt_employee_id"], errors="coerce").astype("Int64")
+        scoped.loc[employee_ids.eq(assigned_ids), "_assigned_rank"] = 0
+    scoped["_updated_sort"] = pd.to_datetime(scoped.get("updated_at"), errors="coerce")
+    scoped["_created_sort"] = pd.to_datetime(scoped.get("created_at"), errors="coerce")
+    scoped["_item_sort"] = pd.to_numeric(scoped.get("schedule_item_id"), errors="coerce").fillna(0)
+    sort_cols = [
+        "store_id",
+        "_status_rank",
+        "_assigned_rank",
+        "_updated_sort",
+        "_created_sort",
+        "_item_sort",
+    ]
+    scoped = scoped.sort_values(
+        sort_cols,
+        ascending=[True, True, True, False, False, False],
+        na_position="last",
+    )
+    keep_indices = scoped.groupby("store_id", dropna=False).head(1).index
+    scoped = scoped.loc[keep_indices].copy()
+    return scoped.drop(columns=["_status_rank", "_assigned_rank", "_updated_sort", "_created_sort", "_item_sort"], errors="ignore")
+
+
 def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=None, end_date=None, include_completed=False):
     df = safe_query(
         """
@@ -1637,7 +1694,8 @@ def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=No
     )
     if df.empty:
         return pd.DataFrame()
-    return normalize_pmt_schedule_rows(df)
+    normalized = normalize_pmt_schedule_rows(df)
+    return canonicalize_current_pmt_rows(normalized, include_completed=include_completed)
 
 
 def published_pmt_run_export_draft(run_id):
@@ -2514,6 +2572,13 @@ def pmt_active_item_mask(df):
 def pmt_completed_item_mask(df):
     statuses = df.get("status", pd.Series([], dtype=str)).apply(normalize_schedule_status)
     return statuses.isin(PMT_COMPLETED_STATUSES)
+
+
+def pmt_manual_completed_item_mask(df):
+    if df.empty:
+        return pd.Series(False, index=df.index)
+    notes = df.get("notes", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
+    return pmt_completed_item_mask(df) & notes.str.contains("completed on", regex=False)
 
 
 def pmt_canceled_item_mask(df):
@@ -8012,7 +8077,11 @@ with tab_manage:
         run_items, _canonical_outside_items = split_run_items_by_period(canonical_run_items, run_cycle_start, run_cycle_end)
         _raw_period_items, out_of_period_items = split_run_items_by_period(raw_run_items, run_cycle_start, run_cycle_end)
         active_rows_for_summary = active_run_items[pmt_active_item_mask(active_run_items)].copy() if not active_run_items.empty else pd.DataFrame()
-        completed_rows_for_summary = run_items[pmt_completed_item_mask(run_items)].copy() if not run_items.empty else pd.DataFrame()
+        completed_status_rows_for_summary = run_items[pmt_completed_item_mask(run_items)].copy() if not run_items.empty else pd.DataFrame()
+        completed_rows_for_summary = run_items[pmt_manual_completed_item_mask(run_items)].copy() if not run_items.empty else pd.DataFrame()
+        auto_completed_rows_for_summary = completed_status_rows_for_summary[
+            ~completed_status_rows_for_summary.index.isin(completed_rows_for_summary.index)
+        ].copy() if not completed_status_rows_for_summary.empty else pd.DataFrame()
         canceled_rows_for_summary = run_items[pmt_canceled_item_mask(run_items)].copy() if not run_items.empty else pd.DataFrame()
         run_counts = {
             "active_rows": len(active_rows_for_summary),
@@ -8046,13 +8115,14 @@ with tab_manage:
                 f"Selected schedule health check: active rows ({run_counts['active_rows']}) do not equal unique active stores "
                 f"({run_counts['active_stores']}). Review duplicate active rows before exporting or rebuilding."
             )
-        with st.expander("Selected Schedule Summary Diagnostic", expanded=bool(run_counts["completed_rows"])):
+        with st.expander("Selected Schedule Summary Diagnostic", expanded=bool(run_counts["completed_rows"] or len(auto_completed_rows_for_summary))):
             st.caption("Read-only. These cards are calculated from the canonical current PMT schedule rows, not stored run metadata.")
             summary_rows = [
                 {"Metric": "Canonical Active Rows", "Value": run_counts["active_rows"]},
                 {"Metric": "Canonical Unique Active Stores", "Value": run_counts["active_stores"]},
                 {"Metric": "Canonical PMTs", "Value": run_counts["active_pmts"]},
-                {"Metric": "Completed Rows In Selected Run", "Value": run_counts["completed_rows"]},
+                {"Metric": "Manual Completed Rows In Selected Run", "Value": run_counts["completed_rows"]},
+                {"Metric": "Auto/History Completed Status Rows Ignored", "Value": len(auto_completed_rows_for_summary)},
                 {"Metric": "Canceled / Skipped Rows In Selected Run", "Value": run_counts["canceled_rows"]},
                 {"Metric": "Current Assigned Stores", "Value": current_assigned_store_count},
                 {"Metric": "Assigned Not Scheduled", "Value": schedule_assigned_not_scheduled},
@@ -8084,8 +8154,7 @@ with tab_manage:
                 st.dataframe(raw_status_breakdown, use_container_width=True, hide_index=True)
             if not completed_rows_for_summary.empty:
                 st.warning(
-                    "These rows are counted as completed because their saved ScheduleItem status is `Completed`. "
-                    "The app also has an automatic completion routine that marks PMT rows completed when their schedule date is before the current month."
+                    "These rows are counted as completed because their saved ScheduleItem status is `Completed` and their notes show a manual completion date."
                 )
                 completed_detail_columns = [
                     col for col in [
@@ -8096,6 +8165,23 @@ with tab_manage:
                 st.markdown("**Rows Currently Counted As Completed**")
                 st.dataframe(
                     completed_rows_for_summary.sort_values([col for col in ["technician", "schedule_date", "store_number"] if col in completed_rows_for_summary.columns])[completed_detail_columns],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            if not auto_completed_rows_for_summary.empty:
+                auto_detail_columns = [
+                    col for col in [
+                        "schedule_item_id", "technician", "employee_id", "store_number", "schedule_date",
+                        "status", "pmt_schedule_run_id", "schedule_source", "notes", "created_at", "updated_at",
+                    ] if col in auto_completed_rows_for_summary.columns
+                ]
+                st.markdown("**Completed Status Rows Ignored By Current Summary**")
+                st.caption(
+                    "These rows have status `Completed` but do not have the PMT manual completion note. "
+                    "They are treated as automatic/history rows for this current-schedule summary."
+                )
+                st.dataframe(
+                    auto_completed_rows_for_summary.sort_values([col for col in ["technician", "schedule_date", "store_number"] if col in auto_completed_rows_for_summary.columns])[auto_detail_columns],
                     use_container_width=True,
                     hide_index=True,
                 )

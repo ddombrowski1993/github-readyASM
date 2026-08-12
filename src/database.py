@@ -665,9 +665,8 @@ def apply_automatic_schedule_completion():
     run_key = f"_auto_schedule_completion_{current_account_schema() or 'local'}_{today.isoformat()}"
     if st.session_state.get(run_key):
         return 0
-    current_month_start = date(today.year, today.month, 1)
     auto_complete_statuses = {"Scheduled", "In Progress"}
-    auto_complete_work_types = {"Brand Enhancement", "Calibration", "PMT"}
+    auto_complete_work_types = {"Brand Enhancement", "Calibration"}
     updated = 0
     try:
         with session_scope() as session:
@@ -680,10 +679,7 @@ def apply_automatic_schedule_completion():
             for item in items:
                 if item.rain_delay:
                     continue
-                if item.work_type == "PMT":
-                    should_complete = item.schedule_date < current_month_start
-                else:
-                    should_complete = item.schedule_date < today
+                should_complete = item.schedule_date < today
                 if not should_complete:
                     continue
                 item.status = "Completed"
