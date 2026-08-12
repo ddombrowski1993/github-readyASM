@@ -1557,6 +1557,347 @@ def published_pmt_run_export_draft(run_id):
     return get_current_active_pmt_schedule_rows(run_id)
 
 
+def normalize_pmt_schedule_proposal(proposed_rows, employee_id=None):
+    proposal = proposed_rows.copy() if isinstance(proposed_rows, pd.DataFrame) else pd.DataFrame(proposed_rows or [])
+    if proposal.empty:
+        return proposal
+    proposal = proposal.copy()
+    if "store_id" not in proposal.columns:
+        proposal["store_id"] = pd.NA
+    if "Proposed Date" not in proposal.columns:
+        proposal["Proposed Date"] = proposal.get("schedule_date", pd.NaT)
+    if "Proposed Stop" not in proposal.columns:
+        proposal["Proposed Stop"] = proposal.get("sequence_number", pd.NA)
+    if "Route Order" not in proposal.columns:
+        proposal["Route Order"] = proposal.get("overall_route_order", pd.NA)
+    proposal["store_id"] = pd.to_numeric(proposal["store_id"], errors="coerce")
+    proposal["Proposed Date"] = pd.to_datetime(proposal["Proposed Date"], errors="coerce")
+    proposal["Proposed Stop"] = pd.to_numeric(proposal["Proposed Stop"], errors="coerce")
+    proposal["Route Order"] = pd.to_numeric(proposal["Route Order"], errors="coerce")
+    proposal = proposal.dropna(subset=["store_id", "Proposed Date"]).copy()
+    if proposal.empty:
+        return proposal
+    proposal["store_id"] = proposal["store_id"].astype(int)
+    if employee_id is not None:
+        proposal["employee_id"] = int(employee_id)
+    elif "employee_id" in proposal.columns:
+        proposal["employee_id"] = pd.to_numeric(proposal["employee_id"], errors="coerce")
+    else:
+        proposal["employee_id"] = pd.NA
+    proposal["schedule_date"] = proposal["Proposed Date"].dt.date
+    proposal["month_start"] = proposal["Proposed Date"].dt.to_period("M").dt.to_timestamp().dt.date
+    proposal["month"] = proposal["month_start"].apply(month_label)
+    proposal["monthly_stop_number"] = proposal["Proposed Stop"].fillna(0).astype(int)
+    proposal["overall_route_order"] = proposal["Route Order"].fillna(pd.Series(range(1, len(proposal) + 1), index=proposal.index)).astype(int)
+    return proposal.sort_values(["schedule_date", "monthly_stop_number", "store_id"]).reset_index(drop=True)
+
+
+def validate_pmt_schedule_proposal(
+    current_rows,
+    proposed_rows,
+    assignments=None,
+    employee_id=None,
+    monthly_target=10,
+    effective_date=None,
+    complete_replacement=False,
+    allow_monthly_target_override=False,
+):
+    proposal = normalize_pmt_schedule_proposal(proposed_rows, employee_id=employee_id)
+    failures = []
+    warnings = []
+    if proposal.empty:
+        failures.append("No proposed PMT schedule rows were provided.")
+    monthly_target = max(1, int(monthly_target or 10))
+    if not proposal.empty:
+        duplicate_preview_ids = proposal["store_id"][proposal["store_id"].duplicated()].dropna().astype(int).unique().tolist()
+        if duplicate_preview_ids:
+            failures.extend([f"store_id {store_id}: duplicate proposed store" for store_id in sorted(duplicate_preview_ids)])
+        month_counts = proposal.groupby("month")["store_id"].nunique().astype(int).to_dict()
+        over_target = {
+            month_name: count
+            for month_name, count in month_counts.items()
+            if int(count) > monthly_target
+        }
+        if over_target and not allow_monthly_target_override:
+            failures.append(f"month counts exceed target {monthly_target}: {over_target}")
+        if complete_replacement and not allow_monthly_target_override:
+            ordered_month_counts = (
+                proposal.groupby("month_start")["store_id"]
+                .nunique()
+                .sort_index()
+                .astype(int)
+                .tolist()
+            )
+            underfilled_months = [
+                index + 1
+                for index, count in enumerate(ordered_month_counts[:-1])
+                if int(count) != monthly_target
+            ]
+            if underfilled_months:
+                failures.append(
+                    f"full replacement must fill each month before the final month to target {monthly_target}; underfilled month position(s): {underfilled_months}"
+                )
+        for month_name, group in proposal.groupby("month", dropna=False):
+            stops = group["monthly_stop_number"].dropna().astype(int).tolist()
+            expected_stops = list(range(1, len(stops) + 1))
+            if sorted(stops) != expected_stops:
+                failures.append(f"{month_name}: monthly stop numbers must be 1 through {len(stops)}")
+        route_orders = proposal["overall_route_order"].dropna().astype(int).tolist()
+        if len(route_orders) != len(set(route_orders)):
+            failures.append("Overall route order contains duplicate values.")
+        elif sorted(route_orders) != list(range(1, len(route_orders) + 1)):
+            failures.append(f"Overall route order must be 1 through {len(route_orders)}.")
+    active_current = current_rows.copy() if isinstance(current_rows, pd.DataFrame) else pd.DataFrame()
+    if not active_current.empty:
+        active_current = active_current[pmt_active_item_mask(active_current)].copy()
+        if effective_date is not None and "schedule_date" in active_current.columns:
+            active_current = active_current[pd.to_datetime(active_current["schedule_date"], errors="coerce").dt.date >= effective_date].copy()
+        if not active_current.empty and "store_id" in active_current.columns:
+            active_current["store_id"] = pd.to_numeric(active_current["store_id"], errors="coerce")
+            duplicate_active_ids = (
+                active_current.dropna(subset=["store_id"])
+                .groupby("store_id")["employee_id"]
+                .nunique()
+                .loc[lambda series: series > 1]
+                .index.astype(int)
+                .tolist()
+            ) if "employee_id" in active_current.columns else []
+            if duplicate_active_ids:
+                failures.extend([f"store_id {store_id}: duplicate active future schedule across PMTs" for store_id in sorted(duplicate_active_ids)])
+            duplicate_row_ids = (
+                active_current.dropna(subset=["store_id"])
+                .groupby("store_id")
+                .size()
+                .loc[lambda series: series > 1]
+                .index.astype(int)
+                .tolist()
+            )
+            if duplicate_row_ids:
+                failures.extend([f"store_id {store_id}: multiple active future schedule rows" for store_id in sorted(duplicate_row_ids)])
+    if assignments is not None and not proposal.empty:
+        assignment_df = assignments.copy() if isinstance(assignments, pd.DataFrame) else pd.DataFrame(assignments)
+        if not assignment_df.empty and {"store_id", "assigned_pmt_employee_id"}.issubset(assignment_df.columns):
+            assignment_df["store_id"] = pd.to_numeric(assignment_df["store_id"], errors="coerce")
+            assignment_df["assigned_pmt_employee_id"] = pd.to_numeric(assignment_df["assigned_pmt_employee_id"], errors="coerce")
+            owner_lookup = assignment_df.dropna(subset=["store_id"]).drop_duplicates("store_id").set_index("store_id")["assigned_pmt_employee_id"].to_dict()
+            for _, row in proposal.iterrows():
+                assigned_employee_id = owner_lookup.get(int(row["store_id"]))
+                proposed_employee_id = scalar_int(row.get("employee_id"), 0)
+                if pd.notna(assigned_employee_id) and proposed_employee_id and int(assigned_employee_id) != int(proposed_employee_id):
+                    warnings.append(
+                        f"store_id {int(row['store_id'])}: current assignment employee_id {int(assigned_employee_id)} differs from proposed employee_id {proposed_employee_id}"
+                    )
+    return {
+        "valid": not failures,
+        "failures": failures,
+        "warnings": warnings,
+        "month_counts": proposal.groupby("month")["store_id"].nunique().astype(int).to_dict() if not proposal.empty else {},
+        "unique_store_count": int(proposal["store_id"].nunique()) if not proposal.empty else 0,
+        "proposal": proposal,
+    }
+
+
+def validate_saved_pmt_schedule_matches_proposal(
+    saved_rows,
+    proposed_rows,
+    employee_id=None,
+    monthly_target=10,
+    complete_replacement=False,
+    allow_monthly_target_override=False,
+):
+    proposal = normalize_pmt_schedule_proposal(proposed_rows, employee_id=employee_id)
+    saved = saved_rows.copy() if isinstance(saved_rows, pd.DataFrame) else pd.DataFrame()
+    failures = []
+    if saved.empty and not proposal.empty:
+        failures.append("Saved schedule contains no active rows for the proposal.")
+    if not saved.empty:
+        saved = normalize_pmt_schedule_rows(saved)
+        saved = saved[pmt_active_item_mask(saved)].copy()
+    if proposal.empty:
+        failures.append("No proposed PMT schedule rows were provided.")
+    if not proposal.empty and not saved.empty:
+        proposal_ids = set(proposal["store_id"].dropna().astype(int).tolist())
+        saved_ids = set(saved["store_id"].dropna().astype(int).tolist()) if "store_id" in saved.columns else set()
+        missing_ids = proposal_ids - saved_ids
+        extra_ids = saved_ids - proposal_ids if complete_replacement else set()
+        failures.extend([f"store_id {store_id}: missing active saved row" for store_id in sorted(missing_ids)])
+        failures.extend([f"store_id {store_id}: extra active saved row not in proposal" for store_id in sorted(extra_ids)])
+        if "store_id" in saved.columns:
+            duplicate_saved_ids = saved["store_id"][saved["store_id"].duplicated()].dropna().astype(int).unique().tolist()
+            failures.extend([f"store_id {store_id}: duplicate active saved rows" for store_id in sorted(duplicate_saved_ids)])
+        saved_by_store = saved.drop_duplicates("store_id").set_index("store_id").to_dict("index") if "store_id" in saved.columns else {}
+        for _, row in proposal.iterrows():
+            store_id = int(row["store_id"])
+            saved_row = saved_by_store.get(store_id)
+            if not saved_row:
+                continue
+            saved_date = scalar_date(saved_row.get("schedule_date"))
+            if saved_date != row["schedule_date"]:
+                failures.append(f"store_id {store_id}: proposed date {row['schedule_date']} saved date {saved_date}")
+            saved_month = month_start(saved_date) if saved_date else None
+            if saved_month != row["month_start"]:
+                failures.append(f"store_id {store_id}: proposed month {month_label(row['month_start'])} saved month {month_label(saved_month) if saved_month else 'None'}")
+            saved_stop = scalar_int(saved_row.get("sequence_number"), 0)
+            if saved_stop != int(row["monthly_stop_number"]):
+                failures.append(f"store_id {store_id}: proposed stop {int(row['monthly_stop_number'])} saved stop {saved_stop}")
+            proposed_employee_id = scalar_int(row.get("employee_id"), 0)
+            saved_employee_id = scalar_int(saved_row.get("employee_id"), 0)
+            if proposed_employee_id and saved_employee_id and proposed_employee_id != saved_employee_id:
+                failures.append(f"store_id {store_id}: proposed employee_id {proposed_employee_id} saved employee_id {saved_employee_id}")
+        saved_month_counts = saved.groupby("month")["store_id"].nunique().astype(int).to_dict() if {"month", "store_id"}.issubset(saved.columns) else {}
+        proposed_month_counts = proposal.groupby("month")["store_id"].nunique().astype(int).to_dict()
+        if complete_replacement and saved_month_counts != proposed_month_counts:
+            failures.append(f"month counts proposed {proposed_month_counts} saved {saved_month_counts}")
+        monthly_target = max(1, int(monthly_target or 10))
+        over_target = {
+            month_name: count
+            for month_name, count in saved_month_counts.items()
+            if int(count) > monthly_target
+        }
+        if over_target and not allow_monthly_target_override:
+            failures.append(f"saved month counts exceed target {monthly_target}: {over_target}")
+        if complete_replacement and not allow_monthly_target_override and {"month_start", "store_id"}.issubset(saved.columns):
+            ordered_saved_counts = (
+                saved.groupby("month_start")["store_id"]
+                .nunique()
+                .sort_index()
+                .astype(int)
+                .tolist()
+            )
+            underfilled_saved_months = [
+                index + 1
+                for index, count in enumerate(ordered_saved_counts[:-1])
+                if int(count) != monthly_target
+            ]
+            if underfilled_saved_months:
+                failures.append(
+                    f"saved full replacement must fill each month before the final month to target {monthly_target}; underfilled month position(s): {underfilled_saved_months}"
+                )
+    return {
+        "valid": not failures,
+        "failures": failures,
+        "saved_month_counts": saved.groupby("month")["store_id"].nunique().astype(int).to_dict() if not saved.empty and {"month", "store_id"}.issubset(saved.columns) else {},
+        "saved_store_count": distinct_store_count(saved) if not saved.empty else 0,
+    }
+
+
+def pmt_phase2_validator_self_test():
+    def proposal_rows(store_count, monthly_target=10, employee_id=101):
+        rows = []
+        start_month = date(2026, 8, 1)
+        for index in range(int(store_count)):
+            schedule_month = add_months(start_month, index // int(monthly_target))
+            rows.append(
+                {
+                    "store_id": index + 1,
+                    "employee_id": employee_id,
+                    "Proposed Date": schedule_month,
+                    "Proposed Stop": (index % int(monthly_target)) + 1,
+                    "Route Order": index + 1,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    tests = []
+    for store_count, expected_counts in [
+        (33, [10, 10, 10, 3]),
+        (44, [10, 10, 10, 10, 4]),
+        (55, [10, 10, 10, 10, 10, 5]),
+    ]:
+        rows = proposal_rows(store_count)
+        result = validate_pmt_schedule_proposal(
+            pd.DataFrame(),
+            rows,
+            employee_id=101,
+            monthly_target=10,
+            complete_replacement=True,
+        )
+        tests.append(
+            {
+                "Test": f"{store_count} stores / target 10",
+                "Expected": "/".join(str(value) for value in expected_counts),
+                "Actual": "/".join(str(value) for value in result.get("month_counts", {}).values()),
+                "Pass": bool(result["valid"] and list(result.get("month_counts", {}).values()) == expected_counts),
+                "Failures": " | ".join(result.get("failures", [])),
+            }
+        )
+    duplicate_rows = proposal_rows(5)
+    duplicate_rows.loc[4, "store_id"] = 1
+    duplicate_result = validate_pmt_schedule_proposal(pd.DataFrame(), duplicate_rows, employee_id=101, monthly_target=10, complete_replacement=True)
+    tests.append(
+        {
+            "Test": "Duplicate proposed store",
+            "Expected": "Blocked",
+            "Actual": "Blocked" if not duplicate_result["valid"] else "Allowed",
+            "Pass": not duplicate_result["valid"],
+            "Failures": " | ".join(duplicate_result.get("failures", [])),
+        }
+    )
+    over_target_rows = proposal_rows(11)
+    over_target_rows["Proposed Date"] = date(2026, 8, 1)
+    over_target_rows["Proposed Stop"] = list(range(1, 12))
+    over_target_result = validate_pmt_schedule_proposal(pd.DataFrame(), over_target_rows, employee_id=101, monthly_target=10, complete_replacement=True)
+    tests.append(
+        {
+            "Test": "11 stores in one month / target 10",
+            "Expected": "Blocked",
+            "Actual": "Blocked" if not over_target_result["valid"] else "Allowed",
+            "Pass": not over_target_result["valid"],
+            "Failures": " | ".join(over_target_result.get("failures", [])),
+        }
+    )
+    proposed = proposal_rows(3)
+    saved = pd.DataFrame(
+        {
+            "store_id": [1, 2, 3],
+            "employee_id": [101, 101, 101],
+            "schedule_date": [date(2026, 8, 1), date(2026, 8, 1), date(2026, 8, 1)],
+            "sequence_number": [1, 2, 3],
+            "status": ["Scheduled", "Scheduled", "Scheduled"],
+            "work_type": ["PMT", "PMT", "PMT"],
+        }
+    )
+    saved_result = validate_saved_pmt_schedule_matches_proposal(saved, proposed, employee_id=101, monthly_target=10, complete_replacement=True)
+    tests.append(
+        {
+            "Test": "Saved rows match proposal",
+            "Expected": "Allowed",
+            "Actual": "Allowed" if saved_result["valid"] else "Blocked",
+            "Pass": bool(saved_result["valid"]),
+            "Failures": " | ".join(saved_result.get("failures", [])),
+        }
+    )
+    extra_saved = pd.concat(
+        [
+            saved,
+            pd.DataFrame(
+                [
+                    {
+                        "store_id": 4,
+                        "employee_id": 101,
+                        "schedule_date": date(2026, 8, 1),
+                        "sequence_number": 4,
+                        "status": "Scheduled",
+                        "work_type": "PMT",
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    extra_result = validate_saved_pmt_schedule_matches_proposal(extra_saved, proposed, employee_id=101, monthly_target=10, complete_replacement=True)
+    tests.append(
+        {
+            "Test": "Extra saved row not in proposal",
+            "Expected": "Blocked",
+            "Actual": "Blocked" if not extra_result["valid"] else "Allowed",
+            "Pass": not extra_result["valid"],
+            "Failures": " | ".join(extra_result.get("failures", [])),
+        }
+    )
+    return pd.DataFrame(tests)
+
+
 def runtime_database_summary():
     database_url = configured_database_url()
     if not database_url:
@@ -4559,9 +4900,28 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
         int(row["store_id"]): pd.to_datetime(row["Proposed Date"]).date()
         for _, row in preview_df.dropna(subset=["Proposed Date"]).iterrows()
     }
+    proposal_validation = validate_pmt_schedule_proposal(
+        pd.DataFrame(),
+        preview_df,
+        employee_id=employee_id,
+        monthly_target=monthly_target or 10,
+        complete_replacement=replace_future,
+    )
+    if not proposal_validation["valid"]:
+        return {
+            "saved": 0,
+            "superseded": 0,
+            "created": 0,
+            "updated": 0,
+            "resequenced_rows": 0,
+            "export_visible_rows": 0,
+            "expected_month_counts": expected_month_counts,
+            "export_month_counts": {},
+            "employee_month_counts": {},
+            "error": "PMT proposal validation failed: " + " | ".join(proposal_validation["failures"][:20]),
+        }
     preview_dates = [value for value in expected_store_dates.values() if value is not None]
     replacement_start = month_start(min(preview_dates)) if preview_dates else None
-    preview_store_ids = set(expected_store_months.keys())
     saved = 0
     created = 0
     updated = 0
@@ -4735,57 +5095,33 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
             validation_items = [item for item in validation_items if item.schedule_date >= replacement_start]
         else:
             validation_items = [item for item in validation_items if int(item.store_id) in expected_store_months]
-        validation_by_store = {}
-        duplicate_stores = set()
-        for item in validation_items:
-            store_id_value = int(item.store_id)
-            if store_id_value in validation_by_store:
-                duplicate_stores.add(store_id_value)
-            validation_by_store.setdefault(store_id_value, item)
-        validation_failures = []
-        for store_id_value, expected_month in expected_store_months.items():
-            item = validation_by_store.get(store_id_value)
-            if not item:
-                validation_failures.append(f"store_id {store_id_value}: missing active saved row")
-                continue
-            saved_month = month_start(item.schedule_date)
-            if saved_month != expected_month:
-                validation_failures.append(
-                    f"store_id {store_id_value}: preview {month_label(expected_month)} saved {month_label(saved_month)}"
-                )
-            expected_date = expected_store_dates.get(store_id_value)
-            if expected_date and item.schedule_date != expected_date:
-                validation_failures.append(
-                    f"store_id {store_id_value}: preview date {expected_date} saved date {item.schedule_date}"
-                )
-        if duplicate_stores:
-            validation_failures.extend([f"store_id {store_id_value}: duplicate active saved rows" for store_id_value in sorted(duplicate_stores)])
-        if replace_future:
-            saved_store_ids = set(validation_by_store.keys())
-            missing_store_ids = preview_store_ids - saved_store_ids
-            extra_store_ids = saved_store_ids - preview_store_ids
-            if missing_store_ids:
-                validation_failures.extend([f"store_id {store_id_value}: missing from active replacement set" for store_id_value in sorted(missing_store_ids)])
-            if extra_store_ids:
-                validation_failures.extend([f"store_id {store_id_value}: extra active row not in preview" for store_id_value in sorted(extra_store_ids)])
-            saved_month_counts = {}
-            for item in validation_items:
-                label = month_label(month_start(item.schedule_date))
-                saved_month_counts[label] = saved_month_counts.get(label, 0) + 1
-            if saved_month_counts != expected_month_counts:
-                validation_failures.append(f"month counts preview {expected_month_counts} saved {saved_month_counts}")
-            if monthly_target:
-                over_target = {
-                    month_name: count
-                    for month_name, count in saved_month_counts.items()
-                    if int(count) > int(monthly_target)
+        saved_validation_rows = pd.DataFrame(
+            [
+                {
+                    "schedule_item_id": item.id,
+                    "schedule_id": item.schedule_id,
+                    "pmt_schedule_run_id": item.pmt_schedule_run_id,
+                    "employee_id": item.employee_id,
+                    "store_id": item.store_id,
+                    "schedule_date": item.schedule_date,
+                    "sequence_number": item.sequence_number,
+                    "status": item.status,
+                    "work_type": item.work_type,
                 }
-                if over_target:
-                    validation_failures.append(f"month counts exceed target {int(monthly_target)}: {over_target}")
-        if validation_failures:
+                for item in validation_items
+            ]
+        )
+        saved_validation = validate_saved_pmt_schedule_matches_proposal(
+            saved_validation_rows,
+            preview_df,
+            employee_id=employee_id,
+            monthly_target=monthly_target or 10,
+            complete_replacement=replace_future,
+        )
+        if not saved_validation["valid"]:
             raise RuntimeError(
                 "Manual apply validation failed; saved schedule does not match the route preview. "
-                + " | ".join(validation_failures[:20])
+                + " | ".join(saved_validation["failures"][:20])
             )
         export_visible_rows = 0
         if touched_store_ids:
@@ -7624,6 +7960,13 @@ with tab_manage:
                 ]
                 st.markdown("**Phase 1 Shared Reader Store-ID Check**")
                 st.dataframe(pd.DataFrame(phase1_rows), use_container_width=True, hide_index=True)
+                with st.expander("Phase 2 Validator Self-Test", expanded=False):
+                    validator_tests = pmt_phase2_validator_self_test()
+                    st.dataframe(validator_tests, use_container_width=True, hide_index=True)
+                    if bool(validator_tests["Pass"].all()):
+                        st.success("Phase 2 validator self-test passed.")
+                    else:
+                        st.error("Phase 2 validator self-test failed. Do not apply schedule changes until this is corrected.")
                 st.markdown("**Stage Counts**")
                 st.dataframe(diag["stage_counts"], use_container_width=True, hide_index=True)
                 st.markdown("**Month Counts By Pipeline Stage**")
