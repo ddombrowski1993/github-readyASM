@@ -1444,67 +1444,117 @@ def render_pmt_export_controls(export_draft, key_prefix):
         st.download_button("Download Individual PDF", data=pdf_bytes(path), file_name=pdf_file, key=f"{key_prefix}_individual_pdf_download")
 
 
-def published_pmt_run_export_draft(run_id):
-    df = safe_query(
-        """
-        select si.schedule_date, si.sequence_number, si.status, si.completion_notes as notes,
-               e.id as employee_id, e.full_name as technician, e.home_latitude, e.home_longitude,
-               s.id as store_id, s.store_number, s.address, s.city, s.state, s.zip,
-               s.latitude, s.longitude
-        from schedule_items si
-        left join pmt_schedule_runs r on r.id = si.pmt_schedule_run_id
-        left join employees e on e.id = si.employee_id
-        left join stores s on s.id = si.store_id
-        where si.pmt_schedule_run_id = :run_id
-          and si.work_type = 'PMT'
-          and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('cancelled','canceled','skipped','deleted','transferred','superseded','archived')
-          and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
-          and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
-        order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
-        """,
-        {"run_id": int(run_id)},
-        use_cache=False,
-    )
+def normalize_pmt_schedule_rows(df):
     if df.empty:
-        return pd.DataFrame()
+        return df
     df = df.copy()
     df["schedule_date"] = pd.to_datetime(df["schedule_date"], errors="coerce")
     df = df.dropna(subset=["schedule_date"])
     if df.empty:
-        return pd.DataFrame()
-    df["month_start"] = df["schedule_date"].dt.to_period("M").dt.to_timestamp()
-    df["month"] = df["month_start"].apply(lambda value: month_label(value.date()))
+        return df
+    df["month_start"] = df["schedule_date"].dt.to_period("M").dt.to_timestamp().dt.date
+    df["month"] = df["month_start"].apply(month_label)
     df["schedule_date"] = df["schedule_date"].dt.date
-    df["month_start"] = df["month_start"].dt.date
-    df["work_type"] = "PMT"
-    df["estimated_drive_time"] = ""
-    df["distance_from_home"] = df.apply(
-        lambda row: round(
-            haversine_miles(float(row["home_latitude"]), float(row["home_longitude"]), float(row["latitude"]), float(row["longitude"])),
-            1,
+    if "original_schedule_date" in df.columns:
+        df["original_schedule_date"] = pd.to_datetime(df.get("original_schedule_date"), errors="coerce").dt.date
+    for column in [
+        "schedule_item_id",
+        "schedule_id",
+        "pmt_schedule_run_id",
+        "employee_id",
+        "store_id",
+        "sequence_number",
+        "assigned_pmt_employee_id",
+    ]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    if "work_type" not in df.columns:
+        df["work_type"] = "PMT"
+    if "estimated_drive_time" not in df.columns:
+        df["estimated_drive_time"] = ""
+    if {"home_latitude", "home_longitude", "latitude", "longitude"}.issubset(df.columns):
+        df["distance_from_home"] = df.apply(
+            lambda row: round(
+                haversine_miles(float(row["home_latitude"]), float(row["home_longitude"]), float(row["latitude"]), float(row["longitude"])),
+                1,
+            )
+            if pd.notna(row.get("home_latitude"))
+            and pd.notna(row.get("home_longitude"))
+            and pd.notna(row.get("latitude"))
+            and pd.notna(row.get("longitude"))
+            else None,
+            axis=1,
         )
-        if pd.notna(row.get("home_latitude"))
-        and pd.notna(row.get("home_longitude"))
-        and pd.notna(row.get("latitude"))
-        and pd.notna(row.get("longitude"))
-        else None,
-        axis=1,
-    )
+    elif "distance_from_home" not in df.columns:
+        df["distance_from_home"] = None
     previous_distances = {}
-    for group_key, group in df.sort_values(["employee_id", "month_start", "sequence_number", "store_number"]).groupby(["employee_id", "month"], dropna=False):
-        prev_lat = to_float(group.iloc[0].get("home_latitude"))
-        prev_lon = to_float(group.iloc[0].get("home_longitude"))
-        for idx, row in group.iterrows():
-            lat = to_float(row.get("latitude"))
-            lon = to_float(row.get("longitude"))
-            if prev_lat is not None and prev_lon is not None and lat is not None and lon is not None:
-                previous_distances[idx] = round(haversine_miles(prev_lat, prev_lon, lat, lon), 1)
-                prev_lat = lat
-                prev_lon = lon
-            else:
-                previous_distances[idx] = None
-    df["miles_from_previous_stop"] = df.index.map(previous_distances)
+    if {"employee_id", "month", "sequence_number", "store_number", "latitude", "longitude"}.issubset(df.columns):
+        for _, group in df.sort_values(["employee_id", "month_start", "sequence_number", "store_number"]).groupby(["employee_id", "month"], dropna=False):
+            prev_lat = to_float(group.iloc[0].get("home_latitude"))
+            prev_lon = to_float(group.iloc[0].get("home_longitude"))
+            for idx, row in group.iterrows():
+                lat = to_float(row.get("latitude"))
+                lon = to_float(row.get("longitude"))
+                if prev_lat is not None and prev_lon is not None and lat is not None and lon is not None:
+                    previous_distances[idx] = round(haversine_miles(prev_lat, prev_lon, lat, lon), 1)
+                    prev_lat = lat
+                    prev_lon = lon
+                else:
+                    previous_distances[idx] = None
+    df["miles_from_previous_stop"] = df.index.map(previous_distances) if previous_distances else df.get("miles_from_previous_stop", "")
     return df
+
+
+def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=None, end_date=None, include_completed=False):
+    df = safe_query(
+        """
+        select si.id as schedule_item_id, si.schedule_id, si.pmt_schedule_run_id,
+               si.schedule_date, si.sequence_number, si.status, si.completion_notes as notes,
+               e.id as employee_id, e.full_name as technician, e.home_latitude, e.home_longitude,
+               s.id as store_id, s.store_number, s.address, s.city, s.state, s.zip,
+               s.assigned_pmt_employee_id, owner.full_name as assigned_technician,
+               s.latitude, s.longitude, si.work_type, si.cycle_label, si.schedule_source, si.original_schedule_date
+        from schedule_items si
+        left join pmt_schedule_runs r on r.id = si.pmt_schedule_run_id
+        left join employees e on e.id = si.employee_id
+        left join stores s on s.id = si.store_id
+        left join employees owner on owner.id = s.assigned_pmt_employee_id
+        where si.pmt_schedule_run_id = :run_id
+          and si.work_type = 'PMT'
+          and coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot','archived','historical')
+          and (:employee_id is null or si.employee_id = :employee_id)
+          and (:start_date is null or date(si.schedule_date) >= date(:start_date))
+          and (:end_date is null or date(si.schedule_date) <= date(:end_date))
+          and (
+              (
+                  :include_completed = true
+                  and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('cancelled','canceled','skipped','deleted','transferred','superseded','archived')
+              )
+              or (
+                  :include_completed = false
+                  and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('completed','complete','cancelled','canceled','skipped','deleted','transferred','superseded','archived')
+              )
+          )
+          and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
+          and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
+        order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
+        """,
+        {
+            "run_id": int(run_id),
+            "employee_id": int(employee_id) if employee_id is not None else None,
+            "start_date": start_date,
+            "end_date": end_date,
+            "include_completed": bool(include_completed),
+        },
+        use_cache=False,
+    )
+    if df.empty:
+        return pd.DataFrame()
+    return normalize_pmt_schedule_rows(df)
+
+
+def published_pmt_run_export_draft(run_id):
+    return get_current_active_pmt_schedule_rows(run_id)
 
 
 def runtime_database_summary():
@@ -6697,7 +6747,7 @@ with tab_health:
             key="pmt_fix_run",
         )
         repair_run_row = repair_runs.set_index("id").loc[repair_run_id]
-        repair_run_items = pmt_manage_run_items(repair_run_id)
+        repair_run_items = get_current_active_pmt_schedule_rows(repair_run_id, include_completed=True)
         repair_cycle_start = scalar_date(repair_run_row.get("cycle_start"))
         repair_cycle_end = scalar_date(repair_run_row.get("cycle_end"))
         repair_run_items, repair_outside_items = split_run_items_by_period(repair_run_items, repair_cycle_start, repair_cycle_end)
@@ -7435,34 +7485,18 @@ with tab_manage:
     if runs.empty:
         st.info("No current active PMT schedule plans are available for manual editing. Historical snapshots are read-only in History & Revisions.")
     else:
-        run_live_counts = safe_query(
-            """
-            select
-                r.id,
-                count(si.id) filter (
-                    where si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
-                      and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
-                      and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
-                ) as live_active_rows,
-                count(distinct si.store_id) filter (
-                    where si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
-                      and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
-                      and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
-                ) as live_active_stores,
-                count(distinct si.employee_id) filter (
-                    where si.status in ('Scheduled','Needs Rescheduled','Rescheduled','Rain Delay','Not Completed')
-                      and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
-                      and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
-                ) as live_active_pmts
-            from pmt_schedule_runs r
-            left join schedule_items si
-              on si.pmt_schedule_run_id = r.id
-             and si.work_type = 'PMT'
-            where coalesce(r.status, '') <> 'Deleted'
-            group by r.id
-            """,
-            use_cache=False,
-        )
+        live_count_rows = []
+        for run_id_value in runs["id"].dropna().astype(int).tolist():
+            live_rows = get_current_active_pmt_schedule_rows(run_id_value)
+            live_count_rows.append(
+                {
+                    "id": int(run_id_value),
+                    "live_active_rows": len(live_rows),
+                    "live_active_stores": distinct_store_count(live_rows),
+                    "live_active_pmts": int(live_rows["employee_id"].dropna().nunique()) if not live_rows.empty and "employee_id" in live_rows.columns else 0,
+                }
+            )
+        run_live_counts = pd.DataFrame(live_count_rows)
         if not run_live_counts.empty:
             runs = runs.merge(run_live_counts, on="id", how="left")
         for column in ["live_active_rows", "live_active_stores", "live_active_pmts"]:
@@ -7497,9 +7531,11 @@ with tab_manage:
         )
         run_row = run_lookup.loc[selected_run]
         raw_run_items = pmt_manage_run_items(selected_run)
+        canonical_run_items = get_current_active_pmt_schedule_rows(selected_run, include_completed=True)
         run_cycle_start = scalar_date(run_row.get("cycle_start"))
         run_cycle_end = scalar_date(run_row.get("cycle_end"))
-        run_items, out_of_period_items = split_run_items_by_period(raw_run_items, run_cycle_start, run_cycle_end)
+        run_items, _canonical_outside_items = split_run_items_by_period(canonical_run_items, run_cycle_start, run_cycle_end)
+        _raw_period_items, out_of_period_items = split_run_items_by_period(raw_run_items, run_cycle_start, run_cycle_end)
         run_counts = run_status_counts(run_items)
         current_pmt_summary = active_pmt_employee_summary()
         current_assigned_store_count = (
@@ -7551,6 +7587,43 @@ with tab_manage:
                 diag_cols[1].info(
                     f"Tracing employee_id={int(selected_employee_diag['employee_id'])}: {selected_employee_diag['full_name']}"
                 )
+                diag_employee_id = int(selected_employee_diag["employee_id"])
+                canonical_employee_rows = get_current_active_pmt_schedule_rows(
+                    selected_run,
+                    employee_id=diag_employee_id,
+                )
+                run_active_rows = run_items[pmt_active_item_mask(run_items)].copy() if not run_items.empty else pd.DataFrame()
+                overview_ids = set(
+                    run_active_rows[
+                        pd.to_numeric(run_active_rows.get("employee_id"), errors="coerce").fillna(-1).astype(int)
+                        == diag_employee_id
+                    ]["store_id"].dropna().astype(int).tolist()
+                ) if not run_active_rows.empty and {"employee_id", "store_id"}.issubset(run_active_rows.columns) else set()
+                canonical_ids = set(canonical_employee_rows["store_id"].dropna().astype(int).tolist()) if not canonical_employee_rows.empty else set()
+                canonical_export_rows = published_pmt_run_export_draft(selected_run)
+                export_employee_rows = canonical_export_rows[
+                    pd.to_numeric(canonical_export_rows.get("employee_id"), errors="coerce").fillna(-1).astype(int) == diag_employee_id
+                ].copy() if not canonical_export_rows.empty and "employee_id" in canonical_export_rows.columns else pd.DataFrame()
+                export_ids = set(export_employee_rows["store_id"].dropna().astype(int).tolist()) if not export_employee_rows.empty and "store_id" in export_employee_rows.columns else set()
+                phase1_rows = [
+                    {
+                        "Comparison": "Overview vs Canonical/Map",
+                        "Missing": len(canonical_ids - overview_ids),
+                        "Extra": len(overview_ids - canonical_ids),
+                    },
+                    {
+                        "Comparison": "Overview vs Export",
+                        "Missing": len(export_ids - overview_ids),
+                        "Extra": len(overview_ids - export_ids),
+                    },
+                    {
+                        "Comparison": "Canonical/Map vs Export",
+                        "Missing": len(export_ids - canonical_ids),
+                        "Extra": len(canonical_ids - export_ids),
+                    },
+                ]
+                st.markdown("**Phase 1 Shared Reader Store-ID Check**")
+                st.dataframe(pd.DataFrame(phase1_rows), use_container_width=True, hide_index=True)
                 st.markdown("**Stage Counts**")
                 st.dataframe(diag["stage_counts"], use_container_width=True, hide_index=True)
                 st.markdown("**Month Counts By Pipeline Stage**")
@@ -8710,7 +8783,7 @@ with tab_export:
     if not latest_export_draft.empty:
         export_source_options.append("Current Draft Schedule")
     normal_export_runs = _export_runs[
-        ~_export_runs["status"].fillna("").astype(str).str.lower().str.strip().isin(["deleted", "snapshot"])
+        ~_export_runs["status"].fillna("").astype(str).str.lower().str.strip().isin(["deleted", "snapshot", "archived", "historical"])
     ].copy() if not _export_runs.empty else pd.DataFrame()
     if not normal_export_runs.empty:
         export_source_options.append("Published PMT Schedule Run")
@@ -8739,11 +8812,7 @@ with tab_export:
                 index=export_run_index,
                 key="pmt_bottom_export_run",
             )
-            export_run_row = normal_export_runs.set_index("id").loc[selected_export_run]
-            export_raw_items = pmt_manage_run_items(selected_export_run)
-            export_cycle_start = scalar_date(export_run_row.get("cycle_start"))
-            export_cycle_end = scalar_date(export_run_row.get("cycle_end"))
-            export_run_items, _export_outside_items = split_run_items_by_period(export_raw_items, export_cycle_start, export_cycle_end)
+            export_run_items = get_current_active_pmt_schedule_rows(selected_export_run)
             export_conflicts = pmt_schedule_conflicts(export_run_items)
             if not export_conflicts.empty:
                 st.error(
@@ -8755,7 +8824,7 @@ with tab_export:
                 ].copy()
                 st.dataframe(export_conflict_view, use_container_width=True, hide_index=True)
             else:
-                published_export_draft = published_pmt_run_export_draft(selected_export_run)
+                published_export_draft = export_run_items
                 render_pmt_export_controls(published_export_draft, f"pmt_bottom_export_run_{selected_export_run}")
 
         st.divider()
