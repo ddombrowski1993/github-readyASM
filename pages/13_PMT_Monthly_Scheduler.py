@@ -2387,7 +2387,7 @@ PMT_NON_EDITABLE_RUN_STATUSES = {"snapshot", "deleted", "archived", "historical"
 
 
 def normalize_schedule_status(value):
-    return clean(value).lower()
+    return clean(value).lower() or "scheduled"
 
 
 def normalize_run_status(value):
@@ -2416,7 +2416,7 @@ def pmt_run_edit_check(session, run_id):
 
 
 def active_pmt_status_condition(column):
-    return func.lower(func.trim(func.coalesce(column, "scheduled"))).in_(list(PMT_ACTIVE_STATUSES))
+    return func.coalesce(func.nullif(func.lower(func.trim(column)), ""), "scheduled").in_(list(PMT_ACTIVE_STATUSES))
 
 
 def pmt_active_item_mask(df):
@@ -3518,7 +3518,7 @@ def apply_pmt_reconciliation_transfers(schedule_item_ids, effective_date, reason
                     func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
                     ScheduleItem.store_id == int(item.store_id),
                     ScheduleItem.employee_id == assigned_employee_id,
-                    func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+                    active_pmt_status_condition(ScheduleItem.status),
                 )
                 .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.id)
             ).first()
@@ -3586,7 +3586,7 @@ def resequence_pmt_month(session, run_id, employee_id, month_start_value):
             ScheduleItem.pmt_schedule_run_id == int(run_id),
             ScheduleItem.employee_id == int(employee_id),
             func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
-            func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+            active_pmt_status_condition(ScheduleItem.status),
             ScheduleItem.schedule_date >= start_value,
             ScheduleItem.schedule_date < add_months(start_value, 1),
         )
@@ -3614,7 +3614,7 @@ def rebalance_pmt_employee_future_schedule(session, run_id, employee_id, start_m
             ScheduleItem.pmt_schedule_run_id == int(run_id),
             ScheduleItem.employee_id == int(employee_id),
             func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
-            func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+            active_pmt_status_condition(ScheduleItem.status),
             ScheduleItem.schedule_date >= start_value,
         )
         .order_by(ScheduleItem.schedule_date, ScheduleItem.sequence_number, ScheduleItem.store_id, ScheduleItem.id)
@@ -3747,7 +3747,7 @@ def rebuild_pmt_employee_from_current_assignments(session, run_id, employee_id, 
                 ScheduleItem.pmt_schedule_run_id == int(run_id),
                 ScheduleItem.employee_id == int(employee_id),
                 func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
-                func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+                active_pmt_status_condition(ScheduleItem.status),
                 ScheduleItem.schedule_date >= start_value,
                 ScheduleItem.schedule_date <= cycle_end,
             )
@@ -3772,7 +3772,7 @@ def rebuild_pmt_employee_from_current_assignments(session, run_id, employee_id, 
         select(ScheduleItem).where(
             ScheduleItem.pmt_schedule_run_id == int(run_id),
             func.upper(func.coalesce(ScheduleItem.work_type, "")).like("%PMT%"),
-            func.lower(func.trim(func.coalesce(ScheduleItem.status, "scheduled"))).notin_(list(PMT_COMPLETED_STATUSES | PMT_CANCELED_STATUSES)),
+            active_pmt_status_condition(ScheduleItem.status),
             ScheduleItem.schedule_date >= start_value,
             ScheduleItem.schedule_date <= cycle_end,
         )
