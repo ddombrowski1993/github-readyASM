@@ -1371,13 +1371,96 @@ def build_pmt_schedule_pdf(draft, filename, title, technician=None, route_filter
     return path
 
 
-def render_pmt_export_controls(export_draft, key_prefix):
+def pmt_export_integrity(export_draft, canonical_draft=None):
+    canonical = canonical_draft.copy() if canonical_draft is not None else export_draft.copy()
+    export = export_draft.copy()
+    result = {
+        "canonical_rows": len(canonical),
+        "export_rows": len(export),
+        "canonical_unique_stores": 0,
+        "export_unique_stores": 0,
+        "duplicate_store_count": 0,
+        "missing_store_count": 0,
+        "extra_store_count": 0,
+        "valid": True,
+        "duplicates": pd.DataFrame(),
+        "missing_store_ids": [],
+        "extra_store_ids": [],
+    }
+    if export.empty:
+        return result
+    if "store_id" not in export.columns:
+        result["valid"] = False
+        return result
+    export_ids = pd.to_numeric(export["store_id"], errors="coerce").dropna().astype(int)
+    canonical_ids = pd.to_numeric(canonical.get("store_id", pd.Series(dtype=int)), errors="coerce").dropna().astype(int)
+    export_set = set(export_ids.tolist())
+    canonical_set = set(canonical_ids.tolist())
+    duplicate_ids = (
+        export_ids.value_counts()
+        .loc[lambda series: series > 1]
+        .index.astype(int)
+        .tolist()
+    )
+    missing_ids = sorted(canonical_set - export_set)
+    extra_ids = sorted(export_set - canonical_set)
+    result.update(
+        {
+            "canonical_unique_stores": len(canonical_set),
+            "export_unique_stores": len(export_set),
+            "duplicate_store_count": len(duplicate_ids),
+            "missing_store_count": len(missing_ids),
+            "extra_store_count": len(extra_ids),
+            "missing_store_ids": missing_ids,
+            "extra_store_ids": extra_ids,
+            "valid": len(export) == len(canonical) and not duplicate_ids and not missing_ids and not extra_ids,
+        }
+    )
+    if duplicate_ids:
+        duplicate_mask = pd.to_numeric(export["store_id"], errors="coerce").astype("Int64").isin(duplicate_ids)
+        result["duplicates"] = export[duplicate_mask].copy()
+    return result
+
+
+def render_pmt_export_controls(export_draft, key_prefix, canonical_draft=None):
     if export_draft.empty:
         st.info("Generate a PMT draft or select a published PMT schedule run, then the export buttons will appear here.")
         return
     st.subheader("PMT Schedule Exports")
     export_tech_count = int(export_draft["technician"].dropna().nunique()) if "technician" in export_draft.columns else 0
     st.caption(f"Export source contains {len(export_draft)} schedule row(s) for {export_tech_count} technician(s).")
+    integrity = pmt_export_integrity(export_draft, canonical_draft)
+    integrity_summary = pd.DataFrame(
+        [
+            {"Metric": "Canonical Active Rows", "Value": integrity["canonical_rows"]},
+            {"Metric": "Export Rows", "Value": integrity["export_rows"]},
+            {"Metric": "Canonical Unique Stores", "Value": integrity["canonical_unique_stores"]},
+            {"Metric": "Export Unique Stores", "Value": integrity["export_unique_stores"]},
+            {"Metric": "Export Duplicate Stores", "Value": integrity["duplicate_store_count"]},
+            {"Metric": "Missing From Export", "Value": integrity["missing_store_count"]},
+            {"Metric": "Extra In Export", "Value": integrity["extra_store_count"]},
+        ]
+    )
+    with st.expander("Export integrity gate", expanded=not integrity["valid"]):
+        st.dataframe(integrity_summary, use_container_width=True, hide_index=True)
+        if not integrity["duplicates"].empty:
+            duplicate_columns = [
+                col for col in [
+                    "schedule_item_id", "store_id", "store_number", "employee_id", "technician",
+                    "pmt_schedule_run_id", "schedule_date", "month", "status", "work_type",
+                    "schedule_source", "original_schedule_date", "notes",
+                ] if col in integrity["duplicates"].columns
+            ]
+            st.dataframe(
+                integrity["duplicates"].sort_values([col for col in ["store_number", "schedule_date", "schedule_item_id"] if col in integrity["duplicates"].columns])[duplicate_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
+        if integrity["missing_store_ids"] or integrity["extra_store_ids"]:
+            st.caption(f"Missing store IDs: {integrity['missing_store_ids'] or 'none'}")
+            st.caption(f"Extra store IDs: {integrity['extra_store_ids'] or 'none'}")
+    if not integrity["valid"]:
+        st.error("Export validation failed: export dataset does not match the current active schedule.")
     if {"technician", "month", "store_id"}.issubset(export_draft.columns):
         with st.expander("Export row count check", expanded=False):
             count_group_cols = ["technician", "month"]
@@ -1411,9 +1494,10 @@ def render_pmt_export_controls(export_draft, key_prefix):
         data=pmt_schedule_workbook_bytes(export_draft, route_filter),
         file_name=f"pmt_full_team_schedule_{export_name}_{export_stamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        disabled=not integrity["valid"],
         key=f"{key_prefix}_full_team_excel",
     )
-    if full_pdf.button("Build Full Team PDF", key=f"{key_prefix}_full_team_pdf_button"):
+    if full_pdf.button("Build Full Team PDF", disabled=not integrity["valid"], key=f"{key_prefix}_full_team_pdf_button"):
         pdf_file = f"pmt_full_team_schedule_{export_name}_{export_stamp}.pdf"
         path = build_pmt_schedule_pdf(export_draft, pdf_file, "PMT Full Team Schedule", route_filter=route_filter)
         st.download_button("Download Full Team PDF", data=pdf_bytes(path), file_name=pdf_file, key=f"{key_prefix}_full_team_pdf_download")
@@ -1422,6 +1506,7 @@ def render_pmt_export_controls(export_draft, key_prefix):
         data=excel_bytes(export_draft),
         file_name=f"pmt_raw_export_rows_{export_name}_{export_stamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        disabled=not integrity["valid"],
         key=f"{key_prefix}_raw_export_rows",
     )
     tech_options = sorted(export_draft["technician"].dropna().unique().tolist())
@@ -1436,9 +1521,10 @@ def render_pmt_export_controls(export_draft, key_prefix):
         data=pmt_schedule_workbook_bytes(individual, route_filter),
         file_name=f"pmt_schedule_{key(selected_export_tech) or 'technician'}_{export_name}_{export_stamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        disabled=not integrity["valid"],
         key=f"{key_prefix}_individual_excel",
     )
-    if ind_pdf.button("Build Individual PDF", key=f"{key_prefix}_individual_pdf_button"):
+    if ind_pdf.button("Build Individual PDF", disabled=not integrity["valid"], key=f"{key_prefix}_individual_pdf_button"):
         pdf_file = f"pmt_schedule_{key(selected_export_tech) or 'technician'}_{export_name}_{export_stamp}.pdf"
         path = build_pmt_schedule_pdf(individual, pdf_file, "PMT Individual Schedule", selected_export_tech, route_filter)
         st.download_button("Download Individual PDF", data=pdf_bytes(path), file_name=pdf_file, key=f"{key_prefix}_individual_pdf_download")
@@ -7733,11 +7819,12 @@ with tab_reconcile:
     updated_schedule_export = pd.DataFrame()
     if selected_reconcile_run is not None:
         reconcile_run_row = reconcile_runs.set_index("id").loc[selected_reconcile_run] if not reconcile_runs.empty and selected_reconcile_run in reconcile_runs["id"].tolist() else {}
-        updated_schedule_export = current_month_forward_schedule_rows(
-            pmt_manage_run_items(selected_reconcile_run),
-            scalar_date(reconcile_run_row.get("cycle_start")) if hasattr(reconcile_run_row, "get") else None,
-            scalar_date(reconcile_run_row.get("cycle_end")) if hasattr(reconcile_run_row, "get") else None,
+        updated_schedule_export = get_current_active_pmt_schedule_rows(
+            selected_reconcile_run,
+            start_date=scalar_date(reconcile_run_row.get("cycle_start")) if hasattr(reconcile_run_row, "get") else None,
+            end_date=scalar_date(reconcile_run_row.get("cycle_end")) if hasattr(reconcile_run_row, "get") else None,
         )
+        updated_schedule_export = current_month_forward_schedule_rows(updated_schedule_export)
         export_cols = [
             col for col in [
                 "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number",
@@ -9222,7 +9309,7 @@ with tab_export:
                 st.dataframe(export_conflict_view, use_container_width=True, hide_index=True)
             else:
                 published_export_draft = export_run_items
-                render_pmt_export_controls(published_export_draft, f"pmt_bottom_export_run_{selected_export_run}")
+                render_pmt_export_controls(published_export_draft, f"pmt_bottom_export_run_{selected_export_run}", canonical_draft=export_run_items)
 
         st.divider()
         st.markdown("**Reconciliation Schedule Exports**")
@@ -9281,11 +9368,12 @@ with tab_export:
                 selected_recon_run_row = reconciled_runs.set_index("id").loc[selected_recon_export_run]
                 recon_cycle_start = scalar_date(selected_recon_run_row.get("cycle_start"))
                 recon_cycle_end = scalar_date(selected_recon_run_row.get("cycle_end"))
-                new_schedule_items = current_month_forward_schedule_rows(
-                    pmt_manage_run_items(selected_recon_export_run),
-                    recon_cycle_start,
-                    recon_cycle_end,
+                new_schedule_items = get_current_active_pmt_schedule_rows(
+                    selected_recon_export_run,
+                    start_date=recon_cycle_start,
+                    end_date=recon_cycle_end,
                 )
+                new_schedule_items = current_month_forward_schedule_rows(new_schedule_items)
                 old_schedule_items = current_month_forward_schedule_rows(
                     pmt_manage_run_items(selected_old_snapshot_run),
                     recon_cycle_start,
