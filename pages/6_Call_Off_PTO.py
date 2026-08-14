@@ -229,8 +229,10 @@ with tabs[2]:
                 "employee": employee["employee"],
                 "call_off_days_this_month": event_days_total(employee_events, "Call Off", month_start, next_month - timedelta(days=1)),
                 "pto_days_this_month": event_days_total(employee_events, "PTO", month_start, next_month - timedelta(days=1)),
+                "no_call_no_show_days_this_month": event_days_total(employee_events, "No Call No Show", month_start, next_month - timedelta(days=1)),
                 "call_off_days_ytd": event_days_total(employee_events, "Call Off", year_start, next_year - timedelta(days=1)),
                 "pto_days_ytd": event_days_total(employee_events, "PTO", year_start, next_year - timedelta(days=1)),
+                "no_call_no_show_days_ytd": event_days_total(employee_events, "No Call No Show", year_start, next_year - timedelta(days=1)),
                 "late_left_early_count": int(late_lookup.get(employee_id, 0) or 0),
             }
         )
