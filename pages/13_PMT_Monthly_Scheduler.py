@@ -941,6 +941,7 @@ def route_table_view(routes):
 def route_map_source_for_export(draft, route_filter):
     if draft.empty:
         return draft
+    draft = canonicalize_pmt_export_draft(draft)
     if route_filter == SAVED_ROUTE:
         return draft.copy()
     if route_filter in (HOME_ROUTE, NEXT_ROUTE):
@@ -1110,10 +1111,40 @@ def draft_with_route_order(draft, route_type):
     return updated.sort_values(["month_start", "technician", "sequence_number", "store_number"]).reset_index(drop=True)
 
 
+def canonicalize_pmt_export_draft(draft):
+    if draft.empty:
+        return draft
+    export_df = draft.copy()
+    if "status" in export_df.columns:
+        export_df = export_df[pmt_active_item_mask(export_df)].copy()
+    if export_df.empty:
+        return export_df
+    for column in ["employee_id", "store_id", "sequence_number", "schedule_item_id"]:
+        if column in export_df.columns:
+            export_df[column] = pd.to_numeric(export_df[column], errors="coerce")
+    export_df["_month_sort"] = pd.to_datetime(export_df["month_start"], errors="coerce") if "month_start" in export_df.columns else pd.NaT
+    export_df["_date_sort"] = pd.to_datetime(export_df["schedule_date"], errors="coerce") if "schedule_date" in export_df.columns else pd.NaT
+    export_df["_sequence_sort"] = pd.to_numeric(export_df["sequence_number"], errors="coerce").fillna(0) if "sequence_number" in export_df.columns else 0
+    export_df["_item_sort"] = pd.to_numeric(export_df["schedule_item_id"], errors="coerce").fillna(0) if "schedule_item_id" in export_df.columns else 0
+    sort_cols = ["_month_sort", "_date_sort", "_sequence_sort", "_item_sort"]
+    if "technician" in export_df.columns:
+        sort_cols.insert(0, "technician")
+    export_df = export_df.sort_values(sort_cols, na_position="last")
+    if {"employee_id", "store_id"}.issubset(export_df.columns):
+        export_df = export_df.dropna(subset=["employee_id", "store_id"]).drop_duplicates(["employee_id", "store_id"], keep="first")
+    elif {"technician", "store_id"}.issubset(export_df.columns):
+        export_df = export_df.dropna(subset=["store_id"]).drop_duplicates(["technician", "store_id"], keep="first")
+    elif {"technician", "store_number"}.issubset(export_df.columns):
+        export_df = export_df.drop_duplicates(["technician", "store_number"], keep="first")
+    return export_df.drop(columns=["_month_sort", "_date_sort", "_sequence_sort", "_item_sort"], errors="ignore").reset_index(drop=True)
+
+
 def pmt_export_views(draft, route_filter="Both Route Options"):
     if draft.empty:
         return pd.DataFrame(), pd.DataFrame()
-    export_df = draft.copy()
+    export_df = canonicalize_pmt_export_draft(draft)
+    if export_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
     for column in ["zip", "distance_from_home", "miles_from_previous_stop", "estimated_drive_time"]:
         if column not in export_df.columns:
             export_df[column] = ""
@@ -1228,6 +1259,7 @@ def safe_sheet_name(value, used):
 
 
 def pmt_schedule_workbook_bytes(draft, route_filter="Both Route Options"):
+    draft = canonicalize_pmt_export_draft(draft)
     schedule_view, route_view = pmt_export_views(draft, route_filter)
     map_draft = route_map_source_for_export(draft, route_filter)
     buffer = io.BytesIO()
@@ -1295,6 +1327,7 @@ def month_count_summary(counts):
 
 
 def build_pmt_schedule_pdf(draft, filename, title, technician=None, route_filter="Both Route Options"):
+    draft = canonicalize_pmt_export_draft(draft)
     schedule_view, route_view = pmt_export_views(draft, route_filter)
     map_draft = route_map_source_for_export(draft, route_filter)
     path = REPORT_DIR / filename
@@ -1426,9 +1459,21 @@ def render_pmt_export_controls(export_draft, key_prefix, canonical_draft=None):
     if export_draft.empty:
         st.info("Generate a PMT draft or select a published PMT schedule run, then the export buttons will appear here.")
         return
+    raw_export_rows = len(export_draft)
+    export_draft = canonicalize_pmt_export_draft(export_draft)
+    canonical_draft = canonicalize_pmt_export_draft(canonical_draft) if canonical_draft is not None and not canonical_draft.empty else canonical_draft
+    removed_export_duplicates = raw_export_rows - len(export_draft)
+    if export_draft.empty:
+        st.info("No active PMT schedule rows are available for export after filtering completed, canceled, skipped, or duplicate rows.")
+        return
     st.subheader("PMT Schedule Exports")
     export_tech_count = int(export_draft["technician"].dropna().nunique()) if "technician" in export_draft.columns else 0
     st.caption(f"Export source contains {len(export_draft)} schedule row(s) for {export_tech_count} technician(s).")
+    if removed_export_duplicates > 0:
+        st.warning(
+            f"Removed {removed_export_duplicates} duplicate or inactive PMT schedule row(s) from the export source. "
+            "Each technician/store is exported once."
+        )
     integrity = pmt_export_integrity(export_draft, canonical_draft)
     integrity_summary = pd.DataFrame(
         [
@@ -1727,6 +1772,24 @@ def pmt_shared_run_index(run_ids):
         0,
     )
     return run_ids.index(preferred) if preferred in run_ids else 0
+
+
+def pmt_full_team_run_index(runs_df):
+    if runs_df.empty or "id" not in runs_df.columns:
+        return 0
+    ranked = runs_df.copy().reset_index(drop=True)
+    ranked["_technician_count"] = pd.to_numeric(ranked.get("technician_count"), errors="coerce").fillna(0)
+    ranked["_store_count"] = pd.to_numeric(ranked.get("store_count"), errors="coerce").fillna(0)
+    ranked["_created_sort"] = pd.to_datetime(ranked.get("created_at"), errors="coerce")
+    ranked["_id_sort"] = pd.to_numeric(ranked.get("id"), errors="coerce").fillna(0)
+    ranked = ranked.sort_values(
+        ["_technician_count", "_store_count", "_created_sort", "_id_sort"],
+        ascending=[False, False, False, False],
+        na_position="last",
+    )
+    selected_id = int(ranked.iloc[0]["id"])
+    run_ids = [int(value) for value in runs_df["id"].tolist()]
+    return run_ids.index(selected_id) if selected_id in run_ids else 0
 
 
 def pmt_shared_employee_index(employee_ids):
@@ -8311,7 +8374,11 @@ with tab_manage:
                 ["schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "address", "city", "state", "zip", "status", "cycle_label", "notes"]
             ] if not run_items.empty else pd.DataFrame()
             st.dataframe(run_item_view, use_container_width=True, hide_index=True)
-            st.download_button("Export Full Schedule", data=excel_bytes(run_item_view), file_name=f"pmt_schedule_plan_{selected_run}.xlsx", key=f"export_selected_pmt_run_{selected_run}")
+            clean_run_export = canonicalize_pmt_export_draft(run_items) if not run_items.empty else pd.DataFrame()
+            clean_run_export_view = clean_run_export[
+                ["schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "address", "city", "state", "zip", "status", "cycle_label", "notes"]
+            ] if not clean_run_export.empty else pd.DataFrame()
+            st.download_button("Export Full Schedule", data=excel_bytes(clean_run_export_view), file_name=f"pmt_schedule_plan_{selected_run}.xlsx", key=f"export_selected_pmt_run_{selected_run}")
         active_outside_items = out_of_period_items[pmt_active_item_mask(out_of_period_items)].copy() if not out_of_period_items.empty else pd.DataFrame()
         history_outside_items = out_of_period_items[~pmt_active_item_mask(out_of_period_items)].copy() if not out_of_period_items.empty else pd.DataFrame()
         if not active_outside_items.empty:
@@ -8589,6 +8656,7 @@ with tab_manage:
                     notice_tech_name = clean(notice.get("technician", ""))
                     if notice_run_id:
                         notice_export = published_pmt_run_export_draft(notice_run_id)
+                        notice_export = canonicalize_pmt_export_draft(notice_export) if not notice_export.empty else notice_export
                         if notice_export.empty:
                             st.error(f"Schedule run #{notice_run_id} has no active export rows. The route did not save to the export dataset.")
                         else:
@@ -9446,12 +9514,15 @@ with tab_export:
             render_pmt_export_controls(latest_export_draft, "pmt_bottom_export_draft")
         else:
             run_options = normal_export_runs["id"].tolist()
-            last_manual_run = st.session_state.get("pmt_last_manual_route_export_run")
-            export_run_index = run_options.index(int(last_manual_run)) if last_manual_run and int(last_manual_run) in run_options else 0
+            export_run_index = pmt_full_team_run_index(normal_export_runs)
             selected_export_run = st.selectbox(
                 "Published PMT schedule run",
                 run_options,
-                format_func=lambda value: f"#{value} - {normal_export_runs.set_index('id').loc[value, 'run_name']}",
+                format_func=lambda value: (
+                    f"#{value} - {normal_export_runs.set_index('id').loc[value, 'run_name']} "
+                    f"({scalar_int(normal_export_runs.set_index('id').loc[value, 'technician_count'], 0)} PMTs, "
+                    f"{scalar_int(normal_export_runs.set_index('id').loc[value, 'store_count'], 0)} stores)"
+                ),
                 index=export_run_index,
                 key="pmt_bottom_export_run",
             )
