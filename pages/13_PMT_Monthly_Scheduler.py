@@ -1122,6 +1122,14 @@ def canonicalize_pmt_export_draft(draft):
     for column in ["employee_id", "store_id", "sequence_number", "schedule_item_id"]:
         if column in export_df.columns:
             export_df[column] = pd.to_numeric(export_df[column], errors="coerce")
+    if {"employee_id", "assigned_pmt_employee_id"}.issubset(export_df.columns):
+        export_df["assigned_pmt_employee_id"] = pd.to_numeric(export_df["assigned_pmt_employee_id"], errors="coerce")
+        export_df = export_df[
+            export_df["assigned_pmt_employee_id"].isna()
+            | export_df["employee_id"].astype("Int64").eq(export_df["assigned_pmt_employee_id"].astype("Int64"))
+        ].copy()
+    if export_df.empty:
+        return export_df
     export_df["_month_sort"] = pd.to_datetime(export_df["month_start"], errors="coerce") if "month_start" in export_df.columns else pd.NaT
     export_df["_date_sort"] = pd.to_datetime(export_df["schedule_date"], errors="coerce") if "schedule_date" in export_df.columns else pd.NaT
     export_df["_sequence_sort"] = pd.to_numeric(export_df["sequence_number"], errors="coerce").fillna(0) if "sequence_number" in export_df.columns else 0
@@ -2719,13 +2727,17 @@ def technician_schedule_reconciliation(run_items, employee_id, selected_month="A
     scheduled_no_longer_assigned = tech_active[
         ~pd.to_numeric(tech_active["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
     ].copy() if not tech_active.empty else pd.DataFrame()
+    tech_current_active = tech_active[
+        pd.to_numeric(tech_active["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
+    ].copy() if not tech_active.empty else pd.DataFrame()
     assigned_scheduled_elsewhere = active_any[
         pd.to_numeric(active_any["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
         & (pd.to_numeric(active_any["employee_id"], errors="coerce").fillna(-1).astype(int) != int(employee_id))
     ].copy() if not active_any.empty else pd.DataFrame()
     return {
         "assigned_count": len(assigned_ids),
-        "active_count": distinct_store_count(tech_active),
+        "active_count": distinct_store_count(tech_current_active),
+        "raw_active_count": distinct_store_count(tech_active),
         "completed_count": distinct_store_count(tech_completed),
         "accounted_count": len(tech_accounted_store_ids & assigned_ids),
         "canceled_count": distinct_store_count(tech_canceled),
@@ -2735,6 +2747,7 @@ def technician_schedule_reconciliation(run_items, employee_id, selected_month="A
         "assigned_df": assigned_df,
         "tech_all": tech_all,
         "tech_active": tech_active,
+        "tech_current_active": tech_current_active,
         "tech_completed": tech_completed,
         "tech_canceled": tech_canceled,
         "assigned_not_scheduled": assigned_not_scheduled,
@@ -8562,6 +8575,8 @@ with tab_manage:
 
             rec = technician_schedule_reconciliation(run_items, selected_employee, selected_month)
             selected_scope = filter_manage_scope(run_items, selected_employee, selected_month, status_filter).sort_values(["schedule_date", "sequence_number", "store_number"])
+            if status_filter == "Active":
+                selected_scope = rec["tech_current_active"].sort_values(["schedule_date", "sequence_number", "store_number"])
             overview_tab, map_builder_tab, build_tab, reorder_tab = st.tabs(["Overview", "Map Route Builder", "Build or Add Stores", "Reorder or Remove Stores"])
 
             with overview_tab:
@@ -8585,6 +8600,8 @@ with tab_manage:
                 )
                 if rec["scheduled_no_longer_assigned_count"]:
                     explanation += f" {rec['scheduled_no_longer_assigned_count']} store(s) remain scheduled under {selected_tech_name} but are no longer assigned to this PMT."
+                if rec.get("raw_active_count", rec["active_count"]) != rec["active_count"]:
+                    explanation += f" {rec['raw_active_count'] - rec['active_count']} stale active row(s) are excluded from the active route count."
                 st.info(explanation)
                 st.caption("Use the Rebuild / Balance sub-tab if this PMT needs to be rebuilt from current Areas and Maps assignments.")
                 if rec["completed_count"]:
@@ -8627,7 +8644,8 @@ with tab_manage:
                 if show_map:
                     map_scope = selected_scope.copy()
                     if show_future_months and selected_month != "All months":
-                        map_scope = filter_manage_scope(run_items, selected_employee, "All months", "Active")
+                        future_rec = technician_schedule_reconciliation(run_items, selected_employee, "All months")
+                        map_scope = future_rec["tech_current_active"]
                         map_scope = map_scope[map_scope["month_start"] >= selected_month].copy()
                     if map_scope.empty:
                         st.info("No rows match the current map filters.")
@@ -8807,7 +8825,8 @@ with tab_manage:
 
                 command_cols = st.columns(4)
                 if command_cols[0].button("Load Existing Route", key=f"pmt_map_load_existing_{selected_run}_{selected_employee}_{map_month_key}"):
-                    existing_route = filter_manage_scope(run_items, selected_employee, "All months", "Active")
+                    all_month_rec = technician_schedule_reconciliation(run_items, selected_employee, "All months")
+                    existing_route = all_month_rec["tech_current_active"]
                     existing_route = existing_route[
                         (existing_route["month_start"] >= map_start_month)
                         & (existing_route["month_start"] <= map_end_month)
@@ -9263,7 +9282,8 @@ with tab_manage:
                                     st.warning("These stores will be moved off the PMT currently shown in `move_from_technician` and into the proposed route above.")
                                     st.dataframe(moved_rows[[col for col in impact_cols if col in moved_rows.columns]], use_container_width=True, hide_index=True)
                                     for moved_employee_id in pd.to_numeric(moved_rows.get("move_from_employee_id"), errors="coerce").dropna().astype(int).unique().tolist():
-                                        remaining_schedule = filter_manage_scope(run_items, moved_employee_id, selected_month, "Active")
+                                        moved_rec = technician_schedule_reconciliation(run_items, moved_employee_id, selected_month)
+                                        remaining_schedule = moved_rec["tech_current_active"]
                                         remaining_schedule = remaining_schedule[
                                             ~pd.to_numeric(remaining_schedule["store_id"], errors="coerce").fillna(-1).astype(int).isin(move_conflict_ids)
                                         ].copy()
@@ -9298,7 +9318,7 @@ with tab_manage:
                                 st.rerun()
 
             with reorder_tab:
-                reorder_scope = filter_manage_scope(run_items, selected_employee, selected_month, "Active").sort_values(["schedule_date", "sequence_number", "store_number"])
+                reorder_scope = rec["tech_current_active"].sort_values(["schedule_date", "sequence_number", "store_number"])
                 if reorder_scope.empty:
                     st.info("No active schedule rows match the selected PMT and month.")
                 else:
