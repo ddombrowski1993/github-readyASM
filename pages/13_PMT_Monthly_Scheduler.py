@@ -1585,12 +1585,12 @@ def render_pmt_export_controls(export_draft, key_prefix, canonical_draft=None):
 
 def normalize_pmt_schedule_rows(df):
     if df.empty:
-        return df
+        return ensure_pmt_schedule_columns(df)
     df = df.copy()
     df["schedule_date"] = pd.to_datetime(df["schedule_date"], errors="coerce")
     df = df.dropna(subset=["schedule_date"])
     if df.empty:
-        return df
+        return ensure_pmt_schedule_columns(df)
     df["month_start"] = df["schedule_date"].dt.to_period("M").dt.to_timestamp().dt.date
     df["month"] = df["month_start"].apply(month_label)
     df["schedule_date"] = df["schedule_date"].dt.date
@@ -1641,7 +1641,7 @@ def normalize_pmt_schedule_rows(df):
                 else:
                     previous_distances[idx] = None
     df["miles_from_previous_stop"] = df.index.map(previous_distances) if previous_distances else df.get("miles_from_previous_stop", "")
-    return df
+    return ensure_pmt_schedule_columns(df)
 
 
 def pmt_inactive_source_mask(df):
@@ -1659,18 +1659,18 @@ def pmt_inactive_source_mask(df):
 
 def canonicalize_current_pmt_rows(df, include_completed=False):
     if df.empty or "store_id" not in df.columns:
-        return df
+        return ensure_pmt_schedule_columns(df)
     scoped = df.copy()
     scoped = scoped[~pmt_inactive_source_mask(scoped)].copy()
     if scoped.empty:
-        return scoped
+        return ensure_pmt_schedule_columns(scoped)
     if not include_completed:
         scoped = scoped[pmt_active_item_mask(scoped)].copy()
     else:
         keep_mask = pmt_active_item_mask(scoped) | pmt_completed_item_mask(scoped)
         scoped = scoped[keep_mask].copy()
     if scoped.empty:
-        return scoped
+        return ensure_pmt_schedule_columns(scoped)
 
     scoped["_status_rank"] = 2
     scoped.loc[pmt_completed_item_mask(scoped), "_status_rank"] = 1
@@ -1698,7 +1698,7 @@ def canonicalize_current_pmt_rows(df, include_completed=False):
     )
     keep_indices = scoped.groupby("store_id", dropna=False).head(1).index
     scoped = scoped.loc[keep_indices].copy()
-    return scoped.drop(columns=["_status_rank", "_assigned_rank", "_updated_sort", "_created_sort", "_item_sort"], errors="ignore")
+    return ensure_pmt_schedule_columns(scoped.drop(columns=["_status_rank", "_assigned_rank", "_updated_sort", "_created_sort", "_item_sort"], errors="ignore"))
 
 
 def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=None, end_date=None, include_completed=False):
@@ -1746,7 +1746,7 @@ def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=No
         use_cache=False,
     )
     if df.empty:
-        return pd.DataFrame()
+        return ensure_pmt_schedule_columns(df)
     normalized = normalize_pmt_schedule_rows(df)
     return canonicalize_current_pmt_rows(normalized, include_completed=include_completed)
 
@@ -2580,19 +2580,19 @@ def pmt_manage_run_items(run_id):
         use_cache=False,
     )
     if df.empty:
-        return df
+        return ensure_pmt_schedule_columns(df)
     df = df.copy()
     df["schedule_date"] = pd.to_datetime(df["schedule_date"], errors="coerce")
     df = df.dropna(subset=["schedule_date"])
     if df.empty:
-        return df
+        return ensure_pmt_schedule_columns(df)
     df["month_start"] = df["schedule_date"].dt.to_period("M").dt.to_timestamp().dt.date
     df["month"] = df["month_start"].apply(month_label)
     df["schedule_date"] = df["schedule_date"].dt.date
     df["original_schedule_date"] = pd.to_datetime(df.get("original_schedule_date"), errors="coerce").dt.date
     for column in ["employee_id", "store_id", "schedule_item_id", "schedule_id", "sequence_number", "assigned_pmt_employee_id"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    return df
+    return ensure_pmt_schedule_columns(df)
 
 
 PMT_ACTIVE_STATUSES = {"scheduled", "needs rescheduled", "rescheduled", "rain delay", "not completed"}
@@ -2600,6 +2600,55 @@ PMT_COMPLETED_STATUSES = {"completed", "complete"}
 PMT_CANCELED_STATUSES = {"cancelled", "canceled", "skipped", "deleted", "transferred", "superseded", "archived"}
 PMT_ACTIVE_STATUS_VALUES = ["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]
 PMT_NON_EDITABLE_RUN_STATUSES = {"snapshot", "deleted", "archived", "historical"}
+CANONICAL_PMT_COLUMNS = [
+    "schedule_item_id",
+    "schedule_id",
+    "pmt_schedule_run_id",
+    "employee_id",
+    "technician",
+    "store_id",
+    "store_number",
+    "schedule_date",
+    "month_start",
+    "month",
+    "sequence_number",
+    "status",
+    "work_type",
+    "schedule_source",
+    "notes",
+]
+PMT_SCHEDULE_SORT_COLUMNS = ["schedule_date", "sequence_number", "store_number"]
+
+
+def ensure_pmt_schedule_columns(df, extra_columns=None):
+    columns = list(dict.fromkeys(CANONICAL_PMT_COLUMNS + list(extra_columns or [])))
+    if df is None:
+        return pd.DataFrame(columns=columns)
+    normalized = df.copy()
+    for column in columns:
+        if column not in normalized.columns:
+            normalized[column] = pd.NA
+    return normalized
+
+
+def sort_pmt_schedule_display(df, sort_columns=None, warning_label=None):
+    sort_columns = sort_columns or PMT_SCHEDULE_SORT_COLUMNS
+    source_columns = list(df.columns) if isinstance(df, pd.DataFrame) else []
+    missing_sort = [column for column in sort_columns if column not in source_columns]
+    scoped = ensure_pmt_schedule_columns(df)
+    if missing_sort and len(scoped) > 0 and warning_label:
+        st.warning(
+            f"{warning_label} is missing expected field(s): "
+            + ", ".join(missing_sort)
+        )
+    if "schedule_date" in scoped.columns:
+        scoped["schedule_date"] = pd.to_datetime(scoped["schedule_date"], errors="coerce")
+    if "sequence_number" in scoped.columns:
+        scoped["sequence_number"] = pd.to_numeric(scoped["sequence_number"], errors="coerce")
+    available_sort = [column for column in sort_columns if column in scoped.columns]
+    if available_sort:
+        return scoped.sort_values(available_sort, kind="stable", na_position="last")
+    return scoped.reset_index(drop=True)
 
 
 def normalize_schedule_status(value):
@@ -2726,14 +2775,14 @@ def technician_schedule_reconciliation(run_items, employee_id, selected_month="A
         assigned_not_scheduled = assigned_df[assigned_df["store_id"].astype(int).isin(assigned_not_scheduled_ids)].copy()
     scheduled_no_longer_assigned = tech_active[
         ~pd.to_numeric(tech_active["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
-    ].copy() if not tech_active.empty else pd.DataFrame()
+    ].copy() if not tech_active.empty else ensure_pmt_schedule_columns(tech_active)
     tech_current_active = tech_active[
         pd.to_numeric(tech_active["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
-    ].copy() if not tech_active.empty else pd.DataFrame()
+    ].copy() if not tech_active.empty else ensure_pmt_schedule_columns(tech_active)
     assigned_scheduled_elsewhere = active_any[
         pd.to_numeric(active_any["store_id"], errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
         & (pd.to_numeric(active_any["employee_id"], errors="coerce").fillna(-1).astype(int) != int(employee_id))
-    ].copy() if not active_any.empty else pd.DataFrame()
+    ].copy() if not active_any.empty else ensure_pmt_schedule_columns(active_any)
     return {
         "assigned_count": len(assigned_ids),
         "active_count": distinct_store_count(tech_current_active),
@@ -8574,9 +8623,15 @@ with tab_manage:
             st.markdown(f"**Managing: {selected_tech_name} - {month_text}**")
 
             rec = technician_schedule_reconciliation(run_items, selected_employee, selected_month)
-            selected_scope = filter_manage_scope(run_items, selected_employee, selected_month, status_filter).sort_values(["schedule_date", "sequence_number", "store_number"])
+            selected_scope = sort_pmt_schedule_display(
+                filter_manage_scope(run_items, selected_employee, selected_month, status_filter),
+                warning_label="PMT schedule display data",
+            )
             if status_filter == "Active":
-                selected_scope = rec["tech_current_active"].sort_values(["schedule_date", "sequence_number", "store_number"])
+                selected_scope = sort_pmt_schedule_display(
+                    rec.get("tech_current_active", pd.DataFrame()),
+                    warning_label="PMT current active display data",
+                )
             overview_tab, map_builder_tab, build_tab, reorder_tab = st.tabs(["Overview", "Map Route Builder", "Build or Add Stores", "Reorder or Remove Stores"])
 
             with overview_tab:
@@ -8830,7 +8885,11 @@ with tab_manage:
                     existing_route = existing_route[
                         (existing_route["month_start"] >= map_start_month)
                         & (existing_route["month_start"] <= map_end_month)
-                    ].sort_values(["schedule_date", "sequence_number", "store_number"]).copy()
+                    ].copy()
+                    existing_route = sort_pmt_schedule_display(
+                        existing_route,
+                        warning_label="PMT existing route display data",
+                    )
                     if existing_route.empty:
                         st.info("No existing active route was found for this PMT/month.")
                     else:
@@ -9296,7 +9355,10 @@ with tab_manage:
                                                 remaining_cols = ["schedule_date", "sequence_number", "store_number", "city", "state", "status"]
                                                 st.dataframe(remaining_schedule[remaining_cols], use_container_width=True, hide_index=True)
                                                 render_store_map(
-                                                    remaining_schedule.sort_values(["schedule_date", "sequence_number", "store_number"]),
+                                                    sort_pmt_schedule_display(
+                                                        remaining_schedule,
+                                                        warning_label="PMT remaining schedule display data",
+                                                    ),
                                                     color_by="status",
                                                     show_route_path=True,
                                                     max_route_points=200,
@@ -9318,7 +9380,10 @@ with tab_manage:
                                 st.rerun()
 
             with reorder_tab:
-                reorder_scope = rec["tech_current_active"].sort_values(["schedule_date", "sequence_number", "store_number"])
+                reorder_scope = sort_pmt_schedule_display(
+                    rec.get("tech_current_active", pd.DataFrame()),
+                    warning_label="PMT reorder display data",
+                )
                 if reorder_scope.empty:
                     st.info("No active schedule rows match the selected PMT and month.")
                 else:
