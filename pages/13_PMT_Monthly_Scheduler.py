@@ -5011,7 +5011,7 @@ def route_line_position(lat, lon, route_coords):
     return best_position, best_distance
 
 
-def build_route_from_drawn_line(route_pool, drawings, route_date, route_month, selected_tech_name, max_distance_miles=8.0):
+def build_route_from_drawn_line(route_pool, drawings, route_date, route_month, selected_tech_name, max_distance_miles=8.0, match_vertices_only=False):
     route_coords = drawn_route_coordinates(drawings)
     if not route_coords or route_pool.empty:
         return pd.DataFrame(), []
@@ -5021,15 +5021,38 @@ def build_route_from_drawn_line(route_pool, drawings, route_date, route_month, s
     mapped_pool["latitude"] = pd.to_numeric(mapped_pool.get("latitude"), errors="coerce")
     mapped_pool["longitude"] = pd.to_numeric(mapped_pool.get("longitude"), errors="coerce")
     mapped_pool = mapped_pool.dropna(subset=["latitude", "longitude"])
-    for _, row in mapped_pool.iterrows():
-        position, distance = route_line_position(float(row["latitude"]), float(row["longitude"]), route_coords)
-        if position is None or distance is None or float(distance) > float(max_distance_miles):
-            skipped_rows.append(row.to_dict())
-            continue
-        route_row = row.to_dict()
-        route_row["_route_position"] = position
-        route_row["_line_distance_miles"] = round(float(distance), 2)
-        ordered_rows.append(route_row)
+    if match_vertices_only:
+        used_store_ids = set()
+        for route_index, (lat, lon) in enumerate(route_coords):
+            nearest_index = None
+            nearest_distance = None
+            for row_index, row in mapped_pool.iterrows():
+                store_id = scalar_int(row.get("store_id"), 0)
+                if not store_id or store_id in used_store_ids:
+                    continue
+                distance = haversine_miles(float(lat), float(lon), float(row["latitude"]), float(row["longitude"]))
+                if nearest_distance is None or distance < nearest_distance:
+                    nearest_index = row_index
+                    nearest_distance = distance
+            if nearest_index is None or nearest_distance is None or float(nearest_distance) > float(max_distance_miles):
+                skipped_rows.append({"route_point": route_index + 1, "latitude": lat, "longitude": lon, "distance": nearest_distance})
+                continue
+            row = mapped_pool.loc[nearest_index]
+            used_store_ids.add(scalar_int(row.get("store_id"), 0))
+            route_row = row.to_dict()
+            route_row["_route_position"] = route_index
+            route_row["_line_distance_miles"] = round(float(nearest_distance), 2)
+            ordered_rows.append(route_row)
+    else:
+        for _, row in mapped_pool.iterrows():
+            position, distance = route_line_position(float(row["latitude"]), float(row["longitude"]), route_coords)
+            if position is None or distance is None or float(distance) > float(max_distance_miles):
+                skipped_rows.append(row.to_dict())
+                continue
+            route_row = row.to_dict()
+            route_row["_route_position"] = position
+            route_row["_line_distance_miles"] = round(float(distance), 2)
+            ordered_rows.append(route_row)
     if not ordered_rows:
         return pd.DataFrame(), skipped_rows
     route_df = pd.DataFrame(ordered_rows).sort_values(["_route_position", "store_number"]).reset_index(drop=True)
@@ -9016,17 +9039,23 @@ with tab_manage:
                     component_key=route_component_key,
                 )
                 st.caption("Draw one line through the stores in route order. The start of the line becomes stop 1, and the end becomes the last stop.")
-                draw_cols = st.columns([0.24, 0.26, 0.5])
+                draw_cols = st.columns([0.24, 0.24, 0.24, 0.28])
                 max_line_distance = draw_cols[0].number_input(
-                    "Line match distance",
+                    "Store click tolerance",
                     min_value=1.0,
                     max_value=30.0,
-                    value=8.0,
+                    value=2.0,
                     step=1.0,
-                    help="Stores this many miles from the drawn line can be included. Lower this if it grabs stores you did not intend.",
+                    help="When clicked-stores mode is on, each line click selects only the nearest store within this many miles. Turn clicked-stores mode off to use the old full-line corridor matching.",
                     key=f"pmt_draw_route_max_distance_{selected_run}_{selected_employee}_{map_month_key}",
                 )
-                if draw_cols[1].button("Generate Route From Drawn Line", type="primary", key=f"pmt_draw_route_generate_{selected_run}_{selected_employee}_{map_month_key}"):
+                match_clicked_stores_only = draw_cols[1].checkbox(
+                    "Clicked stores only",
+                    value=True,
+                    help="Use one nearest store per line click. This prevents nearby unclicked stores from being added just because they are close to the route line.",
+                    key=f"pmt_draw_route_clicked_only_{selected_run}_{selected_employee}_{map_month_key}",
+                )
+                if draw_cols[2].button("Generate Route From Drawn Line", type="primary", key=f"pmt_draw_route_generate_{selected_run}_{selected_employee}_{map_month_key}"):
                     drawings = (map_result or {}).get("all_drawings") if isinstance(map_result, dict) else []
                     generated_route, skipped_rows = build_route_from_drawn_line(
                         route_pool,
@@ -9035,16 +9064,18 @@ with tab_manage:
                         apply_start_month,
                         selected_tech_name,
                         max_distance_miles=float(max_line_distance),
+                        match_vertices_only=bool(match_clicked_stores_only),
                     )
                     if generated_route.empty:
-                        st.warning("No stores matched the drawn line. Draw a line closer to the store dots or increase Line match distance.")
+                        st.warning("No stores matched the drawn line. Click closer to the store dots or increase Store click tolerance.")
                     else:
                         generated_route = distribute_route_across_months(generated_route, apply_start_month, route_monthly_target, selected_employee)
                         st.session_state[route_state_key] = generated_route.to_dict("records")
                         st.session_state[route_click_queue_key] = generated_route.to_dict("records")
-                        st.session_state[f"{route_state_key}_notice"] = f"Generated {len(generated_route)} route stop(s) from the drawn line."
+                        mode_label = "clicked store point(s)" if match_clicked_stores_only else "the drawn line corridor"
+                        st.session_state[f"{route_state_key}_notice"] = f"Generated {len(generated_route)} route stop(s) from {mode_label}."
                         st.rerun()
-                draw_cols[2].caption("Use the polyline tool on the left side of the map. Click along the route, then double-click/end the line. After the line appears, generate the route list.")
+                draw_cols[3].caption("Use the polyline tool on the left side of the map. Click each store in route order, then double-click/end the line. After the line appears, generate the route list.")
                 if st.session_state.get(f"{route_state_key}_notice"):
                     st.success(st.session_state.pop(f"{route_state_key}_notice"))
 
