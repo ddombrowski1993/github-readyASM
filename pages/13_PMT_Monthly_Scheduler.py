@@ -1951,6 +1951,23 @@ def validate_pmt_schedule_proposal(
     }
 
 
+def proposal_assignment_validation_frame(preview_df):
+    if preview_df.empty or "store_id" not in preview_df.columns:
+        return pd.DataFrame()
+    assignment_column = None
+    for column in ["assigned_pmt_employee_id", "assigned_employee_id"]:
+        if column in preview_df.columns:
+            assignment_column = column
+            break
+    if assignment_column is None:
+        return pd.DataFrame()
+    assignment_df = preview_df[["store_id", assignment_column]].copy()
+    assignment_df = assignment_df.rename(columns={assignment_column: "assigned_pmt_employee_id"})
+    assignment_df["store_id"] = pd.to_numeric(assignment_df["store_id"], errors="coerce")
+    assignment_df["assigned_pmt_employee_id"] = pd.to_numeric(assignment_df["assigned_pmt_employee_id"], errors="coerce")
+    return assignment_df.dropna(subset=["store_id"]).drop_duplicates("store_id")
+
+
 def validate_saved_pmt_schedule_matches_proposal(
     saved_rows,
     proposed_rows,
@@ -2802,6 +2819,56 @@ def technician_schedule_reconciliation(run_items, employee_id, selected_month="A
         "assigned_not_scheduled": assigned_not_scheduled,
         "scheduled_no_longer_assigned": scheduled_no_longer_assigned,
         "assigned_scheduled_elsewhere": assigned_scheduled_elsewhere,
+    }
+
+
+def pmt_export_alignment_diagnostic(run_items, employee_id, selected_month="All months"):
+    rec = technician_schedule_reconciliation(run_items, employee_id, selected_month)
+    assigned = rec.get("assigned_df", pd.DataFrame()).copy()
+    raw_active = rec.get("tech_active", pd.DataFrame()).copy()
+    current_active = rec.get("tech_current_active", pd.DataFrame()).copy()
+    export_source = canonicalize_pmt_export_draft(run_items) if isinstance(run_items, pd.DataFrame) and not run_items.empty else ensure_pmt_schedule_columns(pd.DataFrame())
+    if selected_month != "All months" and "month_start" in export_source.columns:
+        export_source = export_source[export_source["month_start"] == selected_month].copy()
+    export_rows = (
+        export_source[pd.to_numeric(export_source.get("employee_id"), errors="coerce").fillna(-1).astype(int) == int(employee_id)].copy()
+        if not export_source.empty and "employee_id" in export_source.columns
+        else ensure_pmt_schedule_columns(pd.DataFrame())
+    )
+
+    def id_set(df):
+        return set(df["store_id"].dropna().astype(int).tolist()) if not df.empty and "store_id" in df.columns else set()
+
+    assigned_ids = id_set(assigned)
+    raw_active_ids = id_set(raw_active)
+    current_active_ids = id_set(current_active)
+    export_ids = id_set(export_rows)
+    stale_scheduled = raw_active[
+        ~pd.to_numeric(raw_active.get("store_id"), errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
+    ].copy() if not raw_active.empty and "store_id" in raw_active.columns else ensure_pmt_schedule_columns(pd.DataFrame())
+    assigned_missing_export = assigned[
+        ~pd.to_numeric(assigned.get("store_id"), errors="coerce").fillna(-1).astype(int).isin(export_ids)
+    ].copy() if not assigned.empty and "store_id" in assigned.columns else pd.DataFrame()
+    export_extra = export_rows[
+        ~pd.to_numeric(export_rows.get("store_id"), errors="coerce").fillna(-1).astype(int).isin(assigned_ids)
+    ].copy() if not export_rows.empty and "store_id" in export_rows.columns else ensure_pmt_schedule_columns(pd.DataFrame())
+    summary = pd.DataFrame(
+        [
+            {"Metric": "Current assigned stores", "Count": len(assigned_ids)},
+            {"Metric": "Raw active schedule stores under this PMT", "Count": len(raw_active_ids)},
+            {"Metric": "Current-assigned active schedule stores", "Count": len(current_active_ids)},
+            {"Metric": "Export-visible stores", "Count": len(export_ids)},
+            {"Metric": "Stale active schedule stores excluded from export", "Count": len(id_set(stale_scheduled))},
+            {"Metric": "Assigned stores missing from export", "Count": len(id_set(assigned_missing_export))},
+            {"Metric": "Export stores not assigned to this PMT", "Count": len(id_set(export_extra))},
+        ]
+    )
+    return {
+        "summary": summary,
+        "assigned_missing_export": assigned_missing_export,
+        "stale_scheduled": stale_scheduled,
+        "export_extra": export_extra,
+        "export_rows": export_rows,
     }
 
 
@@ -5211,14 +5278,20 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
         int(row["store_id"]): pd.to_datetime(row["Proposed Date"]).date()
         for _, row in preview_df.dropna(subset=["Proposed Date"]).iterrows()
     }
+    assignment_validation = proposal_assignment_validation_frame(preview_df)
     proposal_validation = validate_pmt_schedule_proposal(
         pd.DataFrame(),
         preview_df,
+        assignments=assignment_validation,
         employee_id=employee_id,
         monthly_target=monthly_target or 10,
         complete_replacement=replace_future,
     )
-    if not proposal_validation["valid"]:
+    assignment_warnings = proposal_validation.get("warnings", [])
+    if not proposal_validation["valid"] or assignment_warnings:
+        assignment_message = ""
+        if assignment_warnings:
+            assignment_message = " | Assignment mismatch: " + " | ".join(assignment_warnings[:20])
         return {
             "saved": 0,
             "superseded": 0,
@@ -5229,7 +5302,7 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
             "expected_month_counts": expected_month_counts,
             "export_month_counts": {},
             "employee_month_counts": {},
-            "error": "PMT proposal validation failed: " + " | ".join(proposal_validation["failures"][:20]),
+            "error": "PMT proposal validation failed: " + " | ".join(proposal_validation["failures"][:20]) + assignment_message,
         }
     preview_dates = [value for value in expected_store_dates.values() if value is not None]
     replacement_start = month_start(min(preview_dates)) if preview_dates else None
@@ -8658,6 +8731,26 @@ with tab_manage:
                 if rec.get("raw_active_count", rec["active_count"]) != rec["active_count"]:
                     explanation += f" {rec['raw_active_count'] - rec['active_count']} stale active row(s) are excluded from the active route count."
                 st.info(explanation)
+                export_diag = pmt_export_alignment_diagnostic(run_items, selected_employee, selected_month)
+                with st.expander("Why this PMT export may not match", expanded=bool(rec.get("raw_active_count", 0) != rec.get("active_count", 0) or rec.get("assigned_not_scheduled_count", 0))):
+                    st.caption(
+                        "Read-only comparison for the selected PMT and month filter. Export uses active schedule rows that still match current store ownership."
+                    )
+                    st.dataframe(export_diag["summary"], use_container_width=True, hide_index=True)
+                    if not export_diag["assigned_missing_export"].empty:
+                        st.markdown("**Assigned stores missing from export**")
+                        missing_cols = [col for col in ["store_number", "city", "state", "assigned_pmt", "scheduled_technician", "scheduled_date"] if col in export_diag["assigned_missing_export"].columns]
+                        st.dataframe(export_diag["assigned_missing_export"][missing_cols], use_container_width=True, hide_index=True)
+                    if not export_diag["stale_scheduled"].empty:
+                        st.markdown("**Stale active rows excluded from export**")
+                        stale_cols = [col for col in ["schedule_item_id", "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source"] if col in export_diag["stale_scheduled"].columns]
+                        st.dataframe(export_diag["stale_scheduled"][stale_cols], use_container_width=True, hide_index=True)
+                    if not export_diag["export_extra"].empty:
+                        st.markdown("**Export rows not assigned to this PMT**")
+                        extra_cols = [col for col in ["schedule_item_id", "schedule_date", "sequence_number", "technician", "assigned_technician", "store_number", "city", "state", "status", "schedule_source"] if col in export_diag["export_extra"].columns]
+                        st.dataframe(export_diag["export_extra"][extra_cols], use_container_width=True, hide_index=True)
+                    if not export_diag["assigned_missing_export"].empty or not export_diag["stale_scheduled"].empty:
+                        st.warning("Use Rebuild / Balance for this PMT if Areas & Maps has the correct assigned store list.")
                 st.caption("Use the Rebuild / Balance sub-tab if this PMT needs to be rebuilt from current Areas and Maps assignments.")
                 if rec["completed_count"]:
                     completed_rows = rec["tech_completed"].copy()
