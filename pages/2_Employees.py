@@ -64,6 +64,38 @@ def pmt_removal_workbook(preview, summary):
     return buffer.getvalue()
 
 
+def optional_float(value):
+    if pd.isna(value) or value in ("", None):
+        return None
+    return float(value)
+
+
+def optional_int(value):
+    if pd.isna(value) or value in ("", None):
+        return None
+    return int(value)
+
+
+def optional_text(value):
+    if pd.isna(value) or value is None:
+        return ""
+    return str(value)
+
+
+def optional_date(value):
+    if value in ("", None) or pd.isna(value):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    return None if pd.isna(parsed) else parsed.date()
+
+
+def split_employee_name(full_name):
+    parts = str(full_name or "").strip().split()
+    if not parts:
+        return "", ""
+    return parts[0], " ".join(parts[1:])
+
+
 if is_all_managed_view():
     page_header("Employees", "Manager roll-up view of employees and technicians across managed areas.")
     st.info("Read-only All Managed Users view. Select one managed person from the sidebar Viewing Workspace dropdown to edit that person's employees.")
@@ -176,6 +208,154 @@ with tab_list:
     filtered = df_search(filtered)
     st.dataframe(filtered, use_container_width=True, hide_index=True)
     download_table(filtered, "employees")
+    st.subheader("Edit Employee")
+    edit_id = st.selectbox(
+        "Employee to edit",
+        filtered["id"].tolist() if not filtered.empty else [],
+        format_func=lambda value: filtered.set_index("id").loc[value, "full_name"] if value in filtered["id"].values else str(value),
+        key="employee_edit_id",
+    )
+    if edit_id:
+        edit_df = safe_query(
+            """
+            select id, first_name, last_name, full_name, employee_number, role, team_id, phone, email,
+                   hire_date, truck_number, home_address, home_city, home_state, home_zip,
+                   home_latitude, home_longitude, monthly_pmt_store_target, active, inactive_reason, notes
+            from employees
+            where id = :id
+            """,
+            {"id": int(edit_id)},
+            use_cache=False,
+        )
+        if edit_df.empty:
+            st.warning("That employee record could not be loaded.")
+        else:
+            current = edit_df.iloc[0]
+            fallback_first, fallback_last = split_employee_name(current.get("full_name", ""))
+            current_role = optional_text(current.get("role")) or "Brand Enhancement"
+            current_team_id = optional_int(current.get("team_id"))
+            current_monthly_target = optional_int(current.get("monthly_pmt_store_target")) or 10
+            role_options = ["Brand Enhancement", "PMT", "Calibration"]
+            if current_role not in role_options:
+                role_options.append(current_role)
+            active_value = bool(current.get("active")) if not pd.isna(current.get("active")) else True
+            with st.form(f"edit_employee_form_{int(edit_id)}"):
+                c1, c2, c3 = st.columns(3)
+                edit_first = c1.text_input("First name", value=optional_text(current.get("first_name")) or fallback_first, key=f"edit_employee_first_{edit_id}")
+                edit_last = c2.text_input("Last name", value=optional_text(current.get("last_name")) or fallback_last, key=f"edit_employee_last_{edit_id}")
+                edit_number = c3.text_input("Employee number", value=optional_text(current.get("employee_number")), key=f"edit_employee_number_{edit_id}")
+                c4, c5, c6 = st.columns(3)
+                edit_role = c4.selectbox(
+                    "Role",
+                    role_options,
+                    index=role_options.index(current_role),
+                    key=f"edit_employee_role_{edit_id}",
+                )
+                edit_team_id = None
+                if edit_role == "Brand Enhancement":
+                    brand_teams = teams_for_work_group("Brand Enhancement", active_only=False)
+                    team_options = [None] + (brand_teams["id"].tolist() if not brand_teams.empty else [])
+                    if current_team_id and current_team_id not in team_options:
+                        team_options.append(current_team_id)
+                    edit_team_id = c5.selectbox(
+                        "Team",
+                        team_options,
+                        index=team_options.index(current_team_id) if current_team_id in team_options else 0,
+                        format_func=lambda value: "" if value is None or brand_teams.empty or value not in brand_teams["id"].values else brand_teams.set_index("id").loc[value, "team_name"],
+                        key=f"edit_employee_team_{edit_id}",
+                    )
+                edit_active = c6.checkbox("Active", value=active_value, key=f"edit_employee_active_{edit_id}")
+                c7, c8, c9, c10 = st.columns(4)
+                edit_phone = c7.text_input("Phone", value=optional_text(current.get("phone")), key=f"edit_employee_phone_{edit_id}")
+                edit_email = c8.text_input("Email", value=optional_text(current.get("email")), key=f"edit_employee_email_{edit_id}")
+                edit_hire = c9.date_input(
+                    "Hire date",
+                    value=optional_date(current.get("hire_date")) or date.today(),
+                    key=f"edit_employee_hire_{edit_id}",
+                )
+                edit_truck = c10.text_input("Truck number", value=optional_text(current.get("truck_number")), key=f"edit_employee_truck_{edit_id}")
+                edit_address = st.text_input("Home address", value=optional_text(current.get("home_address")), key=f"edit_employee_address_{edit_id}")
+                c11, c12, c13 = st.columns(3)
+                edit_city = c11.text_input("Home city", value=optional_text(current.get("home_city")), key=f"edit_employee_city_{edit_id}")
+                edit_state = c12.text_input("Home state", value=optional_text(current.get("home_state")), key=f"edit_employee_state_{edit_id}")
+                edit_zip = c13.text_input("Home zip", value=optional_text(current.get("home_zip")), key=f"edit_employee_zip_{edit_id}")
+                c14, c15, c16 = st.columns(3)
+                edit_lat = c14.number_input(
+                    "Home latitude",
+                    value=float(optional_float(current.get("home_latitude")) or 0.0),
+                    format="%.6f",
+                    key=f"edit_employee_lat_{edit_id}",
+                )
+                edit_lon = c15.number_input(
+                    "Home longitude",
+                    value=float(optional_float(current.get("home_longitude")) or 0.0),
+                    format="%.6f",
+                    key=f"edit_employee_lon_{edit_id}",
+                )
+                edit_monthly_target = c16.number_input(
+                    "Monthly PMT store target",
+                    min_value=1,
+                    max_value=100,
+                    value=current_monthly_target,
+                    step=1,
+                    key=f"edit_employee_monthly_target_{edit_id}",
+                )
+                edit_inactive_reason = st.text_input(
+                    "Inactive reason",
+                    value=optional_text(current.get("inactive_reason")),
+                    key=f"edit_employee_inactive_reason_{edit_id}",
+                )
+                edit_notes = st.text_area("Notes", value=optional_text(current.get("notes")), key=f"edit_employee_notes_{edit_id}")
+                geocode_on_save = st.checkbox(
+                    "Find coordinates from address before saving if latitude/longitude are blank",
+                    value=False,
+                    key=f"edit_employee_geocode_on_save_{edit_id}",
+                )
+                update_employee = st.form_submit_button("Save Changes", type="primary")
+            if update_employee:
+                edit_full = f"{edit_first} {edit_last}".strip()
+                if not edit_full:
+                    st.error("First or last name is required.")
+                else:
+                    save_lat = edit_lat if edit_lat else None
+                    save_lon = edit_lon if edit_lon else None
+                    geocode_note = ""
+                    if geocode_on_save and (save_lat is None or save_lon is None):
+                        result = geocode_address(edit_address, edit_city, edit_state, edit_zip) if any(str(value or "").strip() for value in [edit_address, edit_city, edit_state, edit_zip]) else None
+                        if result:
+                            save_lat = float(result["latitude"])
+                            save_lon = float(result["longitude"])
+                            geocode_note = f" Coordinates were found automatically ({result.get('match_quality', 'Address match')})."
+                        else:
+                            st.warning("Coordinates were not found. The employee changes were still saved.")
+                    with session_scope("Employee profile updated") as session:
+                        emp = session.get(Employee, int(edit_id))
+                        if not emp:
+                            st.error("That employee record no longer exists.")
+                            st.stop()
+                        emp.first_name = edit_first
+                        emp.last_name = edit_last
+                        emp.full_name = edit_full
+                        emp.employee_number = edit_number or None
+                        emp.role = edit_role
+                        emp.team_id = edit_team_id
+                        emp.phone = edit_phone
+                        emp.email = edit_email
+                        emp.hire_date = edit_hire
+                        emp.truck_number = edit_truck
+                        emp.home_address = edit_address
+                        emp.home_city = edit_city
+                        emp.home_state = edit_state
+                        emp.home_zip = edit_zip
+                        emp.home_latitude = save_lat
+                        emp.home_longitude = save_lon
+                        emp.monthly_pmt_store_target = int(edit_monthly_target)
+                        emp.active = edit_active
+                        emp.inactive_reason = edit_inactive_reason if not edit_active else ""
+                        emp.notes = edit_notes
+                    log_action("employee updated", "employees", int(edit_id), edit_full)
+                    st.success(f"Employee updated.{geocode_note}")
+                    st.rerun()
     st.subheader("Mark Inactive")
     emp_id = st.selectbox("Employee", filtered["id"].tolist() if not filtered.empty else [])
     selected_employee_row = filtered.set_index("id").loc[emp_id] if emp_id and not filtered.empty else None
