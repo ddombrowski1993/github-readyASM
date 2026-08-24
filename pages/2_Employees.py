@@ -566,6 +566,12 @@ with tab_list:
 
 with tab_add:
     section_header("Basic Employee Info", "Select the employee's role first. The form will only show fields needed for that role.")
+    if st.session_state.get("employee_add_message"):
+        message_type, message = st.session_state.pop("employee_add_message")
+        if message_type == "warning":
+            st.warning(message)
+        else:
+            st.success(message)
     c1, c2, c3 = st.columns(3)
     first = c1.text_input("First name")
     last = c2.text_input("Last name")
@@ -642,36 +648,44 @@ with tab_add:
                     st.session_state["employee_form_lat"] = save_lat
                     st.session_state["employee_form_lon"] = save_lon
                     geocode_note = f" Coordinates were found automatically on save ({result.get('match_quality', 'Address match')})."
-            with session_scope() as session:
-                emp = Employee(
-                    first_name=first,
-                    last_name=last,
-                    full_name=full,
-                    employee_number=number or None,
-                    role=role,
-                    team_id=team_id,
-                    phone=phone,
-                    email=email,
-                    hire_date=hire,
-                    truck_number=truck,
-                    home_address=address,
-                    home_city=city,
-                    home_state=state,
-                    home_zip=home_zip,
-                    home_latitude=save_lat,
-                    home_longitude=save_lon,
-                    monthly_pmt_store_target=10,
-                    active=active,
-                    notes=notes,
-                )
-                session.add(emp)
-                session.flush()
-                log_id = emp.id
-            log_action("employee added", "employees", log_id, full)
+            try:
+                with session_scope("Employee added") as session:
+                    emp = Employee(
+                        first_name=first,
+                        last_name=last,
+                        full_name=full,
+                        employee_number=number or None,
+                        role=role,
+                        team_id=team_id,
+                        phone=phone,
+                        email=email,
+                        hire_date=hire,
+                        truck_number=truck,
+                        home_address=address,
+                        home_city=city,
+                        home_state=state,
+                        home_zip=home_zip,
+                        home_latitude=save_lat,
+                        home_longitude=save_lon,
+                        monthly_pmt_store_target=10,
+                        active=active,
+                        notes=notes,
+                    )
+                    session.add(emp)
+                    session.flush()
+                    log_id = emp.id
+                log_action("employee added", "employees", log_id, full)
+            except Exception as exc:
+                st.error(f"Employee was not saved: {exc}")
+                st.stop()
             if save_lat is None or save_lon is None:
-                st.warning("Employee saved, but coordinates were not found. Use Employee List > Fix Home Coordinates or enter latitude/longitude manually.")
+                st.session_state["employee_add_message"] = (
+                    "warning",
+                    f"{full} was saved, but coordinates were not found. Use Employee List > Fix Home Coordinates or enter latitude/longitude manually.",
+                )
             else:
-                st.success(f"Employee saved.{geocode_note}")
+                st.session_state["employee_add_message"] = ("success", f"{full} was saved.{geocode_note}")
+            st.rerun()
 
 with tab_teams:
     st.dataframe(teams(active_only=False), use_container_width=True, hide_index=True)
