@@ -85,6 +85,7 @@ class Store(Base, TimestampMixin):
     assigned_pmt_team_id = Column(Integer, ForeignKey("teams.id"))
     assigned_brand_team_id = Column(Integer, ForeignKey("teams.id"))
     assigned_calibration_team_id = Column(Integer, ForeignKey("teams.id"))
+    service_type = Column(String(80), default="Standard")
     store_status = Column(String(80), default="Not Started")
     priority = Column(String(40), default="Medium")
     notes = Column(Text)

@@ -462,8 +462,9 @@ def assigned_store_counts(team_id, include_unassigned, exclude_completed, work_t
         else ""
     )
     params = {"team_id": team_id, "work_type": work_type}
+    standard_store_filter = "coalesce(s.service_type, 'Standard') = 'Standard'"
     assigned_count = safe_query(
-        f"select count(*) as count from stores s where s.active = true and {assignment_filter}",
+        f"select count(*) as count from stores s where s.active = true and {standard_store_filter} and {assignment_filter}",
         params,
     )
     missing_coords = safe_query(
@@ -471,6 +472,7 @@ def assigned_store_counts(team_id, include_unassigned, exclude_completed, work_t
         select s.store_number, s.address, s.city, s.state
         from stores s
         where s.active = true
+          and {standard_store_filter}
           and ({assignment_filter} {unassigned_filter})
           and (s.latitude is null or s.longitude is null)
         order by s.store_number
@@ -483,6 +485,7 @@ def assigned_store_counts(team_id, include_unassigned, exclude_completed, work_t
         from stores s
         join schedule_items si on si.store_id = s.id
         where s.active = true
+          and {standard_store_filter}
           and ({assignment_filter} {unassigned_filter})
           and si.work_type = :work_type
           and si.status in ('Scheduled','Completed')
@@ -494,6 +497,7 @@ def assigned_store_counts(team_id, include_unassigned, exclude_completed, work_t
         select s.id, s.store_number, s.address, s.city, s.state, s.latitude, s.longitude
         from stores s
         where s.active = true
+          and {standard_store_filter}
           and s.latitude is not null and s.longitude is not null
           and ({assignment_filter} {unassigned_filter})
           and not exists (
@@ -510,6 +514,7 @@ def assigned_store_counts(team_id, include_unassigned, exclude_completed, work_t
         select count(*) as count
         from stores s
         where s.active = true
+          and {standard_store_filter}
           and ({assignment_filter} {unassigned_filter})
           and coalesce(s.store_status,'') <> 'Completed'
           and not exists (

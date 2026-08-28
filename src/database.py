@@ -418,6 +418,7 @@ def ensure_schema_updates(engine):
         "store_name": "VARCHAR(200)",
         "assigned_calibration_employee_id": "INTEGER",
         "assigned_calibration_team_id": "INTEGER",
+        "service_type": "VARCHAR(80) DEFAULT 'Standard'",
         "store_status": "VARCHAR(80) DEFAULT 'Not Started'",
         "priority": "VARCHAR(40) DEFAULT 'Medium'",
     }

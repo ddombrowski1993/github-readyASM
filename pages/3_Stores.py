@@ -10,7 +10,7 @@ from src.exports import download_table, excel_bytes
 from src.geocoding import build_address, geocode_address
 from src.imports import clean_store_number, import_stores, sample_store_template
 from src.manager_rollup import manager_rollup_query
-from src.models import Store
+from src.models import PMTScheduleBacklog, ScheduleItem, Store
 from src.smart_import import (
     REQUIRED_FIELDS,
     display_field,
@@ -27,6 +27,18 @@ from src.utils import apply_theme, df_search, effective_rollup_user_id, ensure_d
 
 
 LOCAL_STORE_CSV = "data/stores.csv"
+STORE_SERVICE_TYPES = ["Standard", "COCM"]
+FIELD_SERVICE_WORK_TYPES = ["PMT", "Brand Enhancement", "Calibration"]
+OPEN_SCHEDULE_STATUSES = [
+    "Scheduled",
+    "Needs Rescheduled",
+    "Rescheduled",
+    "Rain Delay",
+    "Not Completed",
+    "Carryover",
+    "Overdue",
+    "Skipped",
+]
 
 EXACT_ASSIGNMENT_HEADERS = {
     "assigned_pmt": ["pmt", "assigned pmt", "pmt technician", "assigned pmt technician"],
@@ -109,6 +121,40 @@ def render_store_import_summary(summary):
         st.json(summary)
 
 
+def normalize_service_type(value):
+    cleaned = str(value or "").strip().upper()
+    if cleaned == "COCM":
+        return "COCM"
+    return "Standard"
+
+
+def clear_field_service_for_store(session, store):
+    store.assigned_pmt_employee_id = None
+    store.assigned_brand_employee_id = None
+    store.assigned_calibration_employee_id = None
+    store.assigned_pmt_team_id = None
+    store.assigned_brand_team_id = None
+    store.assigned_calibration_team_id = None
+
+    schedule_items = session.query(ScheduleItem).filter(
+        ScheduleItem.store_id == int(store.id),
+        ScheduleItem.work_type.in_(FIELD_SERVICE_WORK_TYPES),
+        ScheduleItem.status.in_(OPEN_SCHEDULE_STATUSES),
+    ).all()
+    schedule_count = len(schedule_items)
+    for item in schedule_items:
+        session.delete(item)
+
+    backlog_items = session.query(PMTScheduleBacklog).filter(
+        PMTScheduleBacklog.store_id == int(store.id),
+        PMTScheduleBacklog.status.in_(["Not Scheduled", "Not Completed", "Carryover", "Overdue", "Skipped"]),
+    ).all()
+    backlog_count = len(backlog_items)
+    for item in backlog_items:
+        session.delete(item)
+    return schedule_count, backlog_count
+
+
 apply_theme()
 sidebar_nav()
 
@@ -121,7 +167,7 @@ if is_all_managed_view():
         select s.store_number, s.store_name, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
                p.full_name as assigned_pmt, b.full_name as assigned_brand, c.full_name as assigned_calibration,
                pt.team_name as pmt_team, bt.team_name as brand_team, ct.team_name as calibration_team,
-               s.store_status, s.priority, s.notes
+               coalesce(s.service_type, 'Standard') as service_type, s.store_status, s.priority, s.notes
         from stores s
         left join employees p on p.id = s.assigned_pmt_employee_id
         left join employees b on b.id = s.assigned_brand_employee_id
@@ -198,7 +244,7 @@ def active_store_rows():
         select s.id, s.store_number, s.store_name, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
                p.full_name as assigned_pmt, b.full_name as assigned_brand, c.full_name as assigned_calibration,
                pt.team_name as pmt_team, bt.team_name as brand_team, ct.team_name as calibration_team,
-               s.store_status, s.priority, s.notes
+               coalesce(s.service_type, 'Standard') as service_type, s.store_status, s.priority, s.notes
         from stores s
         left join employees p on p.id = s.assigned_pmt_employee_id
         left join employees b on b.id = s.assigned_brand_employee_id
@@ -236,7 +282,8 @@ def find_store_by_number(store_number):
         """
         select id, store_number, store_name, address, city, state, zip, latitude, longitude, active,
                assigned_pmt_employee_id, assigned_brand_employee_id, assigned_calibration_employee_id,
-               assigned_pmt_team_id, assigned_brand_team_id, assigned_calibration_team_id
+               assigned_pmt_team_id, assigned_brand_team_id, assigned_calibration_team_id,
+               coalesce(service_type, 'Standard') as service_type
         from stores
         where store_number = :store_number
         """,
@@ -254,7 +301,7 @@ if selected_section == "Store List":
     missing_city_count = missing_city_total()
     if stores.empty:
         st.info("No stores found. Upload stores first, or select a different workspace from the sidebar.")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     city_options = ["All"]
     if missing_city_count:
         city_options.append("Missing City")
@@ -262,12 +309,13 @@ if selected_section == "Store List":
         city_options.extend(city_summary["city"].tolist())
     city = c1.selectbox("City", city_options, key="store_list_city_filter")
     status = c2.selectbox("Status", ["All"] + sorted(stores["store_status"].dropna().unique().tolist()) if not stores.empty else ["All"])
+    service_type_filter = c3.selectbox("Service Type", ["All"] + sorted(stores["service_type"].dropna().unique().tolist()) if not stores.empty else ["All"])
     filtered = stores.copy()
     if city == "Missing City":
         filtered = filtered[filtered["city"].fillna("").astype(str).str.strip() == ""]
     elif city != "All":
         filtered = filtered[filtered["city"].fillna("").astype(str).str.strip() == city]
-    for field, value in [("store_status", status)]:
+    for field, value in [("store_status", status), ("service_type", service_type_filter)]:
         if value != "All":
             filtered = filtered[filtered[field] == value]
     filtered = df_search(filtered)
@@ -510,7 +558,9 @@ if selected_section == "Store Details":
             select s.id, s.store_number, s.store_name, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
                    p.full_name as assigned_pmt, b.full_name as assigned_brand, c.full_name as assigned_calibration,
                    pt.team_name as pmt_team, bt.team_name as brand_team, ct.team_name as calibration_team,
-                   s.store_status, s.priority, s.notes
+                   coalesce(s.service_type, 'Standard') as service_type, s.store_status, s.priority, s.notes,
+                   s.assigned_pmt_employee_id, s.assigned_brand_employee_id, s.assigned_calibration_employee_id,
+                   s.assigned_pmt_team_id, s.assigned_brand_team_id, s.assigned_calibration_team_id
             from stores s
             left join employees p on p.id = s.assigned_pmt_employee_id
             left join employees b on b.id = s.assigned_brand_employee_id
@@ -523,6 +573,42 @@ if selected_section == "Store Details":
             {"id": int(selected)},
         )
         st.dataframe(detail, use_container_width=True, hide_index=True)
+        if not detail.empty:
+            current = detail.iloc[0]
+            current_service_type = normalize_service_type(current.get("service_type"))
+            st.subheader("Store Type / Service Rules")
+            with st.form(f"store_service_type_form_{int(selected)}"):
+                service_type = st.selectbox(
+                    "Service Type",
+                    STORE_SERVICE_TYPES,
+                    index=STORE_SERVICE_TYPES.index(current_service_type),
+                    help="COCM stores remain active in your store list but cannot be assigned to PMT, Brand Enhancement, or Calibration schedules.",
+                )
+                st.caption("COCM clears PMT, Brand Enhancement, and Calibration assignments and removes open field-service schedule rows for this store.")
+                save_service_type = st.form_submit_button("Save Store Type", type="primary")
+            if save_service_type:
+                with session_scope(action_label="Store service type updated") as session:
+                    store = session.get(Store, int(selected))
+                    if not store:
+                        st.error("That store record no longer exists.")
+                        st.stop()
+                    store.service_type = service_type
+                    removed_schedule_count = 0
+                    removed_backlog_count = 0
+                    if service_type == "COCM":
+                        removed_schedule_count, removed_backlog_count = clear_field_service_for_store(session, store)
+                    saved_store_number = store.store_number
+                log_action(
+                    "store service type updated",
+                    "stores",
+                    int(selected),
+                    f"Store {saved_store_number} set to {service_type}; removed {removed_schedule_count} open schedule row(s) and {removed_backlog_count} PMT backlog row(s).",
+                )
+                if service_type == "COCM":
+                    st.success(f"Store {saved_store_number} is now COCM. Removed {removed_schedule_count} open schedule row(s) and cleared field-service assignments.")
+                else:
+                    st.success(f"Store {saved_store_number} is now Standard.")
+                st.rerun()
         st.subheader("Open Follow-Ups")
         st.dataframe(safe_query("select * from followups where store_id = :id and status not in ('Completed','Cancelled')", {"id": int(selected)}), use_container_width=True, hide_index=True)
         st.subheader("Deferred Work Orders")
@@ -612,6 +698,7 @@ if selected_section == "Add Individual Store Manually":
             store.longitude = float(lookup_result["longitude"])
             store.store_status = store.store_status or "Not Started"
             store.priority = store.priority or "Medium"
+            store.service_type = store.service_type or "Standard"
             store.notes = store.notes or ""
             store.active = True
             if created:

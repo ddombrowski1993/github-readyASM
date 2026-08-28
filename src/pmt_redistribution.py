@@ -2,6 +2,7 @@ import math
 from datetime import date
 
 import pandas as pd
+from sqlalchemy import func
 
 from src.models import Employee, MapArea, PMTScheduleBacklog, ScheduleItem, Store, Team
 
@@ -60,7 +61,7 @@ def _active_pmt_candidates(session, removed_employee_id):
     rows = []
     for employee in employees:
         location = technician_location(employee)
-        assigned = session.query(Store).filter(Store.active == True, Store.assigned_pmt_employee_id == employee.id).count()
+        assigned = session.query(Store).filter(Store.active == True, func.coalesce(Store.service_type, "Standard") == "Standard", Store.assigned_pmt_employee_id == employee.id).count()
         rows.append(
             {
                 "employee": employee,
@@ -77,7 +78,7 @@ def _active_pmt_candidates(session, removed_employee_id):
 def _assigned_stores(session, employee_id):
     return (
         session.query(Store)
-        .filter(Store.active == True, Store.assigned_pmt_employee_id == int(employee_id))
+        .filter(Store.active == True, func.coalesce(Store.service_type, "Standard") == "Standard", Store.assigned_pmt_employee_id == int(employee_id))
         .order_by(Store.store_number)
         .all()
     )
@@ -194,7 +195,7 @@ def build_pmt_removal_preview(session, employee_id, mode, split_count=3):
 
 def _sync_pmt_area_for_employee(session, employee):
     team = ensure_pmt_team(session, employee)
-    stores = session.query(Store).filter(Store.active == True, Store.assigned_pmt_employee_id == employee.id).all()
+    stores = session.query(Store).filter(Store.active == True, func.coalesce(Store.service_type, "Standard") == "Standard", Store.assigned_pmt_employee_id == employee.id).all()
     store_ids = sorted(int(store.id) for store in stores)
     area = session.query(MapArea).filter(MapArea.team_id == team.id, MapArea.area_type == "PMT", MapArea.active == True).first()
     if not area and stores:
@@ -220,7 +221,7 @@ def _sync_pmt_area_for_employee(session, employee):
 def _deactivate_pmt_area_for_employee(session, employee):
     team = session.query(Team).filter(Team.team_name == employee.full_name, Team.team_type == "PMT").first()
     if team:
-        assigned_count = session.query(Store).filter(Store.active == True, Store.assigned_pmt_team_id == team.id).count()
+        assigned_count = session.query(Store).filter(Store.active == True, func.coalesce(Store.service_type, "Standard") == "Standard", Store.assigned_pmt_team_id == team.id).count()
         if assigned_count == 0:
             team.active = False
     areas = session.query(MapArea).filter(MapArea.area_type == "PMT", MapArea.employee_id == employee.id).all()

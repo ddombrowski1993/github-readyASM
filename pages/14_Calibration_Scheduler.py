@@ -183,6 +183,7 @@ def assigned_calibration_stores(employee_id):
         select id, store_number, address, city, state, zip, latitude, longitude
         from stores
         where active = true
+          and coalesce(service_type, 'Standard') = 'Standard'
           and assigned_calibration_employee_id = :employee_id
           and latitude is not null
           and longitude is not null
@@ -293,7 +294,7 @@ with tab_build:
         ", ".join([item for item in [tech_row.get("home_city"), tech_row.get("home_state")] if item]),
         ", ".join([item for item in [tech_row.get("base_city"), tech_row.get("base_state")] if item]),
     ] if value]) or "-")
-    s3.metric("Stores Missing Coordinates", int(safe_query("select count(*) as count from stores where active = true and assigned_calibration_employee_id = :employee_id and (latitude is null or longitude is null)", {"employee_id": int(selected_tech)}).iloc[0]["count"]))
+    s3.metric("Stores Missing Coordinates", int(safe_query("select count(*) as count from stores where active = true and coalesce(service_type, 'Standard') = 'Standard' and assigned_calibration_employee_id = :employee_id and (latitude is null or longitude is null)", {"employee_id": int(selected_tech)}).iloc[0]["count"]))
 
     st.dataframe(stores, use_container_width=True, hide_index=True)
     if stores.empty:

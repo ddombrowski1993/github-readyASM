@@ -8,6 +8,7 @@ from math import ceil
 import folium
 import pandas as pd
 import streamlit as st
+from sqlalchemy import func
 from sqlalchemy.orm import object_session
 
 st.set_page_config(page_title="Areas and Maps", layout="wide")
@@ -50,6 +51,7 @@ GROUPS = {
         "default_assignment": "Calibration area",
     },
 }
+FIELD_SERVICE_STORE_TYPE = "Standard"
 TECHNICIAN_CONTRAST_PALETTE = [
     "#e11d48",
     "#2563eb",
@@ -537,7 +539,7 @@ def stores_query():
         """
         select s.id, s.store_number, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
                s.market, s.district, s.area,
-               s.store_status, s.notes,
+               coalesce(s.service_type, 'Standard') as service_type, s.store_status, s.notes,
                s.assigned_brand_team_id, s.assigned_brand_employee_id,
                s.assigned_pmt_team_id, s.assigned_pmt_employee_id,
                s.assigned_calibration_team_id, s.assigned_calibration_employee_id,
@@ -1561,6 +1563,8 @@ def assign_store_to_group(store, group, team_id=None, employee_id=None, change_s
     config = group_config(group)
     if not config:
         return
+    if str(getattr(store, "service_type", "") or FIELD_SERVICE_STORE_TYPE) != FIELD_SERVICE_STORE_TYPE:
+        return
     if group == "PMT":
         apply_pmt_assignment_change(store, employee_id, team_id, change_source, change_action, batch_id)
         return
@@ -1667,7 +1671,7 @@ def sync_pmt_employee_areas():
         )
         touched = 0
         for employee in employees:
-            stores = session.query(Store).filter(Store.assigned_pmt_employee_id == employee.id, Store.active == True).all()
+            stores = session.query(Store).filter(Store.assigned_pmt_employee_id == employee.id, Store.active == True, func.coalesce(Store.service_type, FIELD_SERVICE_STORE_TYPE) == FIELD_SERVICE_STORE_TYPE).all()
             if not stores:
                 continue
             team_name = employee.full_name
@@ -1773,7 +1777,7 @@ def technician_assignment_summary(role, employee_field, team_field, work_type):
             count(distinct case when si.work_type = :work_type and si.status = 'Scheduled' then si.store_id end) as scheduled_this_cycle
         from employees e
         left join teams t on t.team_name = e.full_name and t.active = true
-        left join stores s on s.{employee_field} = e.id and s.active = true
+        left join stores s on s.{employee_field} = e.id and s.active = true and coalesce(s.service_type, 'Standard') = 'Standard'
         left join schedule_items si on si.employee_id = e.id
              and si.store_id = s.id
              and si.work_type = :work_type
@@ -1784,6 +1788,7 @@ def technician_assignment_summary(role, employee_field, team_field, work_type):
                 select distinct {employee_field}
                 from stores
                 where active = true
+                  and coalesce(service_type, 'Standard') = 'Standard'
                   and {employee_field} is not null
             )
         )
@@ -3114,6 +3119,9 @@ page_header(
 
 team_df = teams()
 stores_df = stores_query()
+field_service_stores_df = stores_df[
+    stores_df["service_type"].fillna(FIELD_SERVICE_STORE_TYPE).astype(str).eq(FIELD_SERVICE_STORE_TYPE)
+].copy() if not stores_df.empty and "service_type" in stores_df.columns else stores_df.copy()
 missing_coordinate_stores = stores_df[stores_df[["latitude", "longitude"]].isna().any(axis=1)].copy() if not stores_df.empty else pd.DataFrame()
 
 control_cols = st.columns([0.25, 0.25, 0.25, 0.25])
@@ -3144,7 +3152,7 @@ nav_cols[2].page_link("pages/13_PMT_Monthly_Scheduler.py", label="PMT Scheduler"
 nav_cols[3].page_link("pages/14_Calibration_Scheduler.py", label="Calibration Scheduler")
 
 areas_df = active_areas(None if view_mode == "All Stores Overview" else selected_group)
-visible_stores = stores_df.copy()
+visible_stores = stores_df.copy() if view_mode == "All Stores Overview" else field_service_stores_df.copy()
 if view_mode != "All Stores Overview" and config:
     if show_unassigned_only:
         visible_stores = visible_stores[visible_stores[config["team_field"]].isna()]
@@ -4128,7 +4136,7 @@ if selected_group in ("PMT", "Calibration"):
     )
     show_unassigned_tech = map_cols[1].checkbox(f"Show unassigned {selected_group} stores", value=True)
     search_store = map_cols[2].text_input("Search store number", key=f"{selected_group}_search_store")
-    tech_visible = stores_df.copy()
+    tech_visible = field_service_stores_df.copy()
     if selected_tech_employee is not None:
         tech_visible = tech_visible[tech_visible[tech_config["employee_field"]] == int(selected_tech_employee)]
     elif not show_unassigned_tech:

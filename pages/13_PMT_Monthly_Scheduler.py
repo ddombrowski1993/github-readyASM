@@ -565,6 +565,7 @@ def current_assignments_from_database():
         join stores s on s.assigned_pmt_employee_id = e.id
         where e.active = true
           and s.active = true
+          and coalesce(s.service_type, 'Standard') = 'Standard'
         order by e.full_name, s.store_number
         """
     )
@@ -585,7 +586,7 @@ def active_pmt_employee_summary():
             coalesce(e.monthly_pmt_store_target, 10) as monthly_target,
             count(s.id) as assigned_stores
         from employees e
-        left join stores s on s.assigned_pmt_employee_id = e.id and s.active = true
+        left join stores s on s.assigned_pmt_employee_id = e.id and s.active = true and coalesce(s.service_type, 'Standard') = 'Standard'
         where e.active = true
           and lower(trim(coalesce(e.role, ''))) in (
               'pmt',
@@ -2232,6 +2233,7 @@ def pmt_employee_pipeline_diagnostic(employee_search, run_id):
         from stores s
         left join employees e on e.id = s.assigned_pmt_employee_id
         where s.active = true
+          and coalesce(s.service_type, 'Standard') = 'Standard'
           and s.assigned_pmt_employee_id = :employee_id
         order by s.store_number
         """,
@@ -2413,6 +2415,7 @@ def pmt_stores_not_in_run(run_id):
         join stores s on s.active = true
         join employees e on e.id = s.assigned_pmt_employee_id and e.active = true
         where r.id = :run_id
+          and coalesce(s.service_type, 'Standard') = 'Standard'
           and not exists (
               select 1
               from schedule_items si
@@ -2454,6 +2457,7 @@ def pmt_rotation_gaps_for_period(cycle_start, months):
         from stores s
         join employees e on e.id = s.assigned_pmt_employee_id and e.active = true
         where s.active = true
+          and coalesce(s.service_type, 'Standard') = 'Standard'
           and not exists (
               select 1
               from schedule_items si
@@ -2514,7 +2518,7 @@ def pmt_rotation_gap_summary(cycle_start, months):
                 greatest(0::bigint, count(distinct s.id) - count(distinct si.store_id)) as assigned_stores_not_scheduled,
                 count(distinct case when si.status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Carryover','Overdue','Skipped','Cancelled','Canceled') then si.id end) as scheduled_not_completed
             from employees e
-            join stores s on s.assigned_pmt_employee_id = e.id and s.active = true
+            join stores s on s.assigned_pmt_employee_id = e.id and s.active = true and coalesce(s.service_type, 'Standard') = 'Standard'
             left join schedule_items si
               on si.work_type = 'PMT'
              and si.employee_id = e.id
@@ -3065,6 +3069,7 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         from stores s
         left join employees e on e.id = s.assigned_pmt_employee_id
         where s.active = true
+          and coalesce(s.service_type, 'Standard') = 'Standard'
           and s.assigned_pmt_employee_id is not null
         order by assigned_technician, s.store_number
         """,
@@ -3113,7 +3118,7 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         left join (
             select assigned_pmt_employee_id as employee_id, count(*) as assigned_stores
             from stores
-            where active = true and assigned_pmt_employee_id is not null
+            where active = true and coalesce(service_type, 'Standard') = 'Standard' and assigned_pmt_employee_id is not null
             group by assigned_pmt_employee_id
         ) assigned on assigned.employee_id = e.id
         left join (
@@ -4047,6 +4052,7 @@ def rebuild_pmt_employee_from_current_assignments(session, run_id, employee_id, 
         select(Store)
         .where(
             Store.active == True,  # noqa: E712
+            func.coalesce(Store.service_type, "Standard") == "Standard",
             Store.assigned_pmt_employee_id == int(employee_id),
         )
         .order_by(Store.store_number)
@@ -4786,6 +4792,7 @@ def assigned_pmt_store_candidates(employee_id, run_id=None, include_scheduled=Fa
         join employees e on e.id = s.assigned_pmt_employee_id
         {schedule_join}
         where s.active = true
+          and coalesce(s.service_type, 'Standard') = 'Standard'
           and s.assigned_pmt_employee_id = :employee_id
           {run_filter}
         group by s.id, s.store_number, s.address, s.city, s.state, s.zip,
