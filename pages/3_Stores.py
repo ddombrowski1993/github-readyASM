@@ -157,6 +157,7 @@ def clear_field_service_for_store(session, store):
 
 apply_theme()
 sidebar_nav()
+ensure_database_or_stop()
 
 if is_all_managed_view():
     page_header("Stores", "Manager roll-up view of stores across all managed areas.")
@@ -215,7 +216,6 @@ if is_all_managed_view():
         download_table(filtered_rollup, "manager_rollup_stores")
     st.stop()
 
-ensure_database_or_stop()
 page_header("Stores", "Master store database, uploads, store details, location data, and one-off store adds.")
 
 store_sections = ["Store List", "Upload Stores", "Store Details", "Add Individual Store Manually"]

@@ -1707,7 +1707,7 @@ def df_search(df, label="Search"):
 
 
 def ensure_database_or_stop():
-    from src.database import apply_automatic_schedule_completion, get_database_status, init_db, show_database_setup
+    from src.database import apply_automatic_schedule_completion, ensure_runtime_schema_compatibility, get_database_status, init_db, show_database_setup
 
     if not require_login():
         st.stop()
@@ -1720,4 +1720,5 @@ def ensure_database_or_stop():
         st.code(status["error"] or "")
         st.stop()
     init_db()
+    ensure_runtime_schema_compatibility()
     apply_automatic_schedule_completion()

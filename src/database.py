@@ -234,6 +234,13 @@ def init_db():
     return True
 
 
+def ensure_runtime_schema_compatibility():
+    schema = ensure_workspace_schema()
+    engine = get_engine(get_database_url(), schema=schema or None)
+    ensure_schema_updates(engine)
+    return True
+
+
 @st.cache_resource(show_spinner=False)
 def _init_db_for_schema(url, schema):
     engine = get_engine(url, schema=schema or None)
@@ -411,9 +418,6 @@ def ensure_undo_table(engine=None):
 
 
 def ensure_schema_updates(engine):
-    existing = {column["name"] for column in inspect(engine).get_columns("stores")}
-    employee_existing = {column["name"] for column in inspect(engine).get_columns("employees")}
-    schedule_item_existing = {column["name"] for column in inspect(engine).get_columns("schedule_items")}
     store_columns = {
         "store_name": "VARCHAR(200)",
         "assigned_calibration_employee_id": "INTEGER",
@@ -435,13 +439,10 @@ def ensure_schema_updates(engine):
         "pmt_schedule_run_id": "INTEGER",
         "cycle_label": "VARCHAR(160)",
     }
-    dwo_existing = {column["name"] for column in inspect(engine).get_columns("deferred_work_orders")}
     dwo_columns = {
         "work_order_type": "VARCHAR(120)",
         "completed_team_id": "INTEGER",
     }
-    followup_existing = {column["name"] for column in inspect(engine).get_columns("followups")}
-    map_area_existing = {column["name"] for column in inspect(engine).get_columns("map_areas")}
     followup_columns = {
         "followup_type": "VARCHAR(80)",
         "related_person": "VARCHAR(180)",
@@ -462,6 +463,14 @@ def ensure_schema_updates(engine):
         "assigned_store_ids": "TEXT",
     }
     with engine.begin() as conn:
+        _apply_workspace_search_path(conn)
+        inspector = inspect(conn)
+        existing = {column["name"] for column in inspector.get_columns("stores")}
+        employee_existing = {column["name"] for column in inspector.get_columns("employees")}
+        schedule_item_existing = {column["name"] for column in inspector.get_columns("schedule_items")}
+        dwo_existing = {column["name"] for column in inspector.get_columns("deferred_work_orders")}
+        followup_existing = {column["name"] for column in inspector.get_columns("followups")}
+        map_area_existing = {column["name"] for column in inspector.get_columns("map_areas")}
         for column_name, column_type in store_columns.items():
             if column_name not in existing:
                 conn.execute(text(f"ALTER TABLE stores ADD COLUMN {column_name} {column_type}"))
