@@ -110,6 +110,11 @@ def _format_date(value):
     return parsed.strftime("%m/%d/%Y")
 
 
+def _format_metric_date(value):
+    formatted = _format_date(value)
+    return formatted or "-"
+
+
 def _format_month(value):
     if not value:
         return ""
@@ -497,7 +502,7 @@ if not projection.empty:
     p2.metric("Scheduled By Year End", scheduled)
     with p3:
         metric_help_card("Unscheduled Projection", remaining, "Active stores not completed and not scheduled by year end under the current projection.")
-    p4.metric("Current Finish Date", row["current_finish_date"] or "-")
+    p4.metric("Current Finish Date", _format_metric_date(row.get("current_finish_date")))
 if technician_view:
     st.caption(f"{view} progress counts scheduled, completed, and not completed/exceptions only.")
 else:
