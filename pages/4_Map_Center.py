@@ -3286,7 +3286,15 @@ else:
     task_options = ["View"]
 task_index = task_options.index(st.session_state.get("map_task", "View")) if st.session_state.get("map_task", "View") in task_options else 0
 map_task = control_cols[2].selectbox("Task", task_options, index=task_index)
-show_unassigned_only = control_cols[3].checkbox("Show stores missing assigned tech", value=False, disabled=selected_group is None)
+map_scope_default = "Selected + Unassigned" if map_task in ("Create Area", "Edit Selected Area", "Edit Assignments") else "Selected/Assigned"
+map_scope_options = ["Selected + Unassigned", "Unassigned Only", "Selected/Assigned", "All Stores"]
+map_scope = control_cols[3].selectbox(
+    "Map store scope",
+    map_scope_options,
+    index=map_scope_options.index(map_scope_default),
+    disabled=selected_group is None,
+    key=f"{selected_group or 'overview'}_{map_task}_map_store_scope",
+)
 
 nav_cols = st.columns(4)
 nav_cols[0].page_link("pages/3_Stores.py", label="Stores")
@@ -3298,12 +3306,16 @@ areas_df = active_areas(None if view_mode == "All Stores Overview" else selected
 visible_stores = stores_df.copy()
 if view_mode != "All Stores Overview" and config:
     non_service_mask = ~field_service_mask(visible_stores)
-    if show_unassigned_only:
+    unassigned_mask = visible_stores[config["team_field"]].isna()
+    selected_mask = visible_stores[config["team_field"]] == current_area_id if current_area_id else visible_stores[config["team_field"]].notna()
+    if map_scope == "All Stores":
+        visible_stores = visible_stores.copy()
+    elif map_scope == "Unassigned Only":
         visible_stores = visible_stores[visible_stores[config["team_field"]].isna()]
-    elif current_area_id:
-        visible_stores = visible_stores[(visible_stores[config["team_field"]] == current_area_id) | non_service_mask]
+    elif map_scope == "Selected + Unassigned":
+        visible_stores = visible_stores[selected_mask | unassigned_mask | non_service_mask]
     else:
-        visible_stores = visible_stores[visible_stores[config["team_field"]].notna() | non_service_mask]
+        visible_stores = visible_stores[selected_mask | non_service_mask]
 
 if view_mode == "All Stores Overview":
     st.subheader("All Stores Overview")
