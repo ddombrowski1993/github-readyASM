@@ -1215,8 +1215,12 @@ def render_area_manager_map(
     team_anchor_stores_df=None,
     technicians_df=None,
     adjusted_bounds=None,
+    include_ids=None,
+    excluded_ids=None,
 ):
     selected_ids = set(selected_ids or [])
+    include_ids = set(include_ids or [])
+    excluded_ids = set(excluded_ids or [])
     valid = stores_df.dropna(subset=["latitude", "longitude"]).copy()
     if valid.empty:
         st.info("No mapped stores found. Upload stores with latitude and longitude first.")
@@ -1309,6 +1313,7 @@ def render_area_manager_map(
 
     for _, row in valid.iterrows():
         state = store_status_for_map(row, group, selected_team_id, selected_ids)
+        store_id = int(row["id"])
         service_type = store_service_type(row)
         is_service_store = is_field_service_store(row)
         pmt_person = map_label(row.get("pmt_person"))
@@ -1339,11 +1344,16 @@ def render_area_manager_map(
         """
         folium.CircleMarker(
             [float(row["latitude"]), float(row["longitude"])],
-            radius=7 if state in ("selected", "current_area") else (6 if not is_service_store else 5),
-            color="#64748b" if not is_service_store else ("#111827" if state == "selected" else "#ffffff"),
-            weight=2 if state in ("selected", "current_area") or not is_service_store else 1,
+            radius=8 if store_id in include_ids else 7 if store_id in excluded_ids or state in ("selected", "current_area") else (6 if not is_service_store else 5),
+            color="#16a34a" if store_id in include_ids else "#dc2626" if store_id in excluded_ids else "#64748b" if not is_service_store else ("#111827" if state == "selected" else "#ffffff"),
+            weight=3 if store_id in include_ids or store_id in excluded_ids else 2 if state in ("selected", "current_area") or not is_service_store else 1,
             fill=True,
             fill_color=(
+                "#22c55e"
+                if store_id in include_ids
+                else "#fee2e2"
+                if store_id in excluded_ids
+                else
                 "#f8fafc"
                 if not is_service_store
                 else
@@ -1353,8 +1363,8 @@ def render_area_manager_map(
                 if group == "Calibration" and calibration_person != "Unassigned"
                 else marker_color(state)
             ),
-            fill_opacity=0.45 if not is_service_store else 0.92,
-            dash_array="4,4" if not is_service_store else None,
+            fill_opacity=0.55 if store_id in excluded_ids else 0.45 if not is_service_store else 0.92,
+            dash_array="5,5" if store_id in excluded_ids else "4,4" if not is_service_store else None,
             popup=folium.Popup(popup, max_width=340),
             tooltip=f"Store {row.get('store_number','')} - {service_type} - {tooltip_assignment}",
         ).add_to(fmap)
@@ -4793,7 +4803,37 @@ adjusted_bounds = adjusted_drawing_bounds(
     east_miles=float(stretch_east),
     west_miles=float(stretch_west),
 ) if saved_drawings and any(float(value or 0) > 0 for value in stretch_values) else None
+preview_selected = stores_within_drawings(visible_stores, saved_drawings, close_lines_as_areas=True) if saved_drawings else pd.DataFrame()
+preview_stretched = stores_within_adjusted_bounds(
+    visible_stores,
+    saved_drawings,
+    north_miles=float(stretch_north),
+    south_miles=float(stretch_south),
+    east_miles=float(stretch_east),
+    west_miles=float(stretch_west),
+) if saved_drawings and any(float(value or 0) > 0 for value in stretch_values) else pd.DataFrame()
+if not preview_stretched.empty:
+    preview_selected = pd.concat([preview_selected, preview_stretched], ignore_index=True).drop_duplicates(subset=["id"])
+preview_include_ids = set()
+preview_excluded_ids = set()
+if not preview_selected.empty and selected_target_team:
+    preview_candidates = preview_selected[field_service_mask(preview_selected)].copy()
+    if config and not allow_move:
+        preview_candidates = preview_candidates[
+            preview_candidates[config["team_field"]].isna()
+            | (preview_candidates[config["team_field"]] == selected_target_team)
+        ].copy()
+    preview_limited = limit_area_assignment_candidates(
+        preview_candidates,
+        int(area_target_count),
+        selected_target_team,
+        group_teams,
+        stores_df,
+    ) if use_assignment_target else preview_candidates
+    preview_include_ids = set(preview_limited["id"].astype(int).tolist())
+    preview_excluded_ids = set(preview_selected["id"].astype(int).tolist()) - preview_include_ids
 st.caption("Draw a polygon or rectangle to select stores. Red dots are assigned to another area in the same group. The orange dashed box shows the stretched boundary when stretch miles are used.")
+st.caption("Green outlined dots will be saved. Red outlined/dashed dots are inside the drawing but excluded by target count, service type, or move rules.")
 fmap, map_data = render_area_manager_map(
     visible_stores,
     map_areas,
@@ -4805,9 +4845,13 @@ fmap, map_data = render_area_manager_map(
     teams_df=group_teams,
     team_anchor_stores_df=stores_df,
     adjusted_bounds=adjusted_bounds,
+    include_ids=preview_include_ids,
+    excluded_ids=preview_excluded_ids,
 )
 if fmap:
     st.download_button("Export Map", data=map_html(fmap), file_name="store_area_map.html")
+    if st.button("Refresh included/excluded dot colors", type="secondary", key=f"refresh_area_preview_{selected_group}_{selected_team_id or 'none'}"):
+        st.rerun()
 
 drawings = map_data.get("all_drawings") if map_data else []
 if drawings:
@@ -4834,6 +4878,17 @@ if not draw_selected.empty:
     selected_store_ids = set(draw_selected["id"].tolist())
     non_service_draw_selected = draw_selected[~field_service_mask(draw_selected)]
     assignable_candidates = draw_selected[field_service_mask(draw_selected)].copy()
+    move_blocked_ids = set()
+    if config and selected_target_team and not allow_move:
+        assigned_elsewhere = assignable_candidates[
+            assignable_candidates[config["team_field"]].notna()
+            & (assignable_candidates[config["team_field"]] != selected_target_team)
+        ]
+        move_blocked_ids = set(assigned_elsewhere["id"].astype(int).tolist())
+        assignable_candidates = assignable_candidates[
+            assignable_candidates[config["team_field"]].isna()
+            | (assignable_candidates[config["team_field"]] == selected_target_team)
+        ].copy()
     limited_candidates = limit_area_assignment_candidates(
         assignable_candidates,
         int(area_target_count),
@@ -4859,7 +4914,16 @@ if not draw_selected.empty:
             st.warning(f"{len(moved)} stores are already assigned to another {selected_group} area. Saving will move them if you allow overlap/move.")
     display_selected = draw_selected.copy()
     display_selected["Will Assign"] = display_selected["id"].astype(int).isin(assignable_area_store_ids)
-    st.dataframe(display_selected[["Will Assign", "id", "store_number", "service_type", "address", "city", "state"]], use_container_width=True, hide_index=True)
+    display_selected["Reason"] = "Will assign"
+    display_selected.loc[~field_service_mask(display_selected), "Reason"] = "Not serviced"
+    display_selected.loc[display_selected["id"].astype(int).isin(move_blocked_ids), "Reason"] = "Already assigned elsewhere"
+    display_selected.loc[
+        field_service_mask(display_selected)
+        & ~display_selected["id"].astype(int).isin(assignable_area_store_ids)
+        & ~display_selected["id"].astype(int).isin(move_blocked_ids),
+        "Reason",
+    ] = "Excluded by target count"
+    st.dataframe(display_selected[["Will Assign", "Reason", "id", "store_number", "service_type", "address", "city", "state"]], use_container_width=True, hide_index=True)
 
 b1, b2, b3, b4 = st.columns(4)
 if b1.button("Save Drawn Stores to Selected Area", type="primary", disabled=not selected_target_team or not assignable_area_store_ids):
