@@ -1211,7 +1211,7 @@ with tab_build:
             eligible_ids,
             route_records,
             team_id,
-            key=f"be_manual_route_map_{team_id}_{len(route_records)}",
+            key=f"be_manual_route_map_{team_id}",
             click_tolerance_miles=float(click_tolerance),
         )
         drawings = (map_data or {}).get("all_drawings") if isinstance(map_data, dict) else []
@@ -1222,10 +1222,16 @@ with tab_build:
                 drawn_stores["id"].astype(int).isin(eligible_ids)
                 & drawn_stores.apply(is_standard_store, axis=1)
             ].copy()
-            d1, d2, d3 = st.columns(3)
+            excluded_by_target = max(len(drawn_eligible) - int(target_store_count), 0)
+            d1, d2, d3, d4 = st.columns(4)
             d1.metric("Stores In Drawn Area", len(drawn_stores))
             d2.metric("Eligible In Drawn Area", len(drawn_eligible))
             d3.metric("Target Build Count", int(target_store_count))
+            d4.metric("Left Out By Target", excluded_by_target)
+            st.caption(
+                f"Auto-build will use the best {min(len(drawn_eligible), int(target_store_count))} eligible store(s) from the drawn area "
+                f"and leave {excluded_by_target} eligible extra store(s) out."
+            )
         if st.button(
             "Auto Build Route From Drawn Area",
             type="secondary",
