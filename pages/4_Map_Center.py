@@ -4,6 +4,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from math import atan2
 from math import ceil
+from math import cos, radians
 
 import folium
 import pandas as pd
@@ -1073,6 +1074,91 @@ def service_type_counts(df):
     return df["service_type"].fillna(FIELD_SERVICE_STORE_TYPE).astype(str).str.strip().replace("", FIELD_SERVICE_STORE_TYPE).value_counts().to_dict()
 
 
+def drawing_bounds(drawings):
+    points = []
+    for drawing in drawings or []:
+        geometry = drawing.get("geometry", {})
+        properties = drawing.get("properties", {})
+        geometry_type = geometry.get("type")
+        coordinates = geometry.get("coordinates", [])
+        if geometry_type == "Polygon" and coordinates:
+            points.extend((float(lat), float(lon)) for lon, lat in coordinates[0])
+        elif geometry_type == "LineString" and coordinates:
+            points.extend((float(lat), float(lon)) for lon, lat in coordinates)
+        elif geometry_type == "Point" and coordinates:
+            center_lon, center_lat = coordinates
+            radius_miles = float(properties.get("radius") or 0) / 1609.344
+            lat_pad = radius_miles / 69.0
+            lon_pad = radius_miles / max(69.0 * cos(radians(float(center_lat))), 0.0001)
+            points.extend(
+                [
+                    (float(center_lat) - lat_pad, float(center_lon) - lon_pad),
+                    (float(center_lat) + lat_pad, float(center_lon) + lon_pad),
+                ]
+            )
+    if not points:
+        return None
+    lat_values = [point[0] for point in points]
+    lon_values = [point[1] for point in points]
+    return min(lat_values), max(lat_values), min(lon_values), max(lon_values)
+
+
+def adjusted_drawing_bounds(drawings, north_miles=0, south_miles=0, east_miles=0, west_miles=0):
+    bounds = drawing_bounds(drawings)
+    if bounds is None:
+        return None
+    min_lat, max_lat, min_lon, max_lon = bounds
+    center_lat = (min_lat + max_lat) / 2
+    lat_miles = 69.0
+    lon_miles = max(69.0 * cos(radians(float(center_lat))), 0.0001)
+    return (
+        min_lat - (float(south_miles or 0) / lat_miles),
+        max_lat + (float(north_miles or 0) / lat_miles),
+        min_lon - (float(west_miles or 0) / lon_miles),
+        max_lon + (float(east_miles or 0) / lon_miles),
+    )
+
+
+def stores_within_adjusted_bounds(stores_df, drawings, north_miles=0, south_miles=0, east_miles=0, west_miles=0):
+    bounds = adjusted_drawing_bounds(drawings, north_miles, south_miles, east_miles, west_miles)
+    if bounds is None or stores_df is None or stores_df.empty:
+        return stores_df.iloc[0:0].copy() if stores_df is not None else pd.DataFrame()
+    min_lat, max_lat, min_lon, max_lon = bounds
+    scoped = stores_df.copy()
+    scoped["latitude"] = pd.to_numeric(scoped["latitude"], errors="coerce")
+    scoped["longitude"] = pd.to_numeric(scoped["longitude"], errors="coerce")
+    scoped = scoped.dropna(subset=["latitude", "longitude"])
+    return scoped[
+        scoped["latitude"].between(min_lat, max_lat)
+        & scoped["longitude"].between(min_lon, max_lon)
+    ].copy()
+
+
+def limit_area_assignment_candidates(candidates, target_count, selected_target_team, group_teams, anchor_source):
+    if candidates is None or candidates.empty:
+        return candidates
+    limited = candidates.copy()
+    if selected_target_team and group_teams is not None and not group_teams.empty:
+        team_row = group_teams[group_teams["id"].astype(int) == int(selected_target_team)]
+        if not team_row.empty:
+            center, issue = team_anchor_center(team_row.iloc[0], anchor_source)
+            if center:
+                limited["_target_distance"] = limited.apply(
+                    lambda row: haversine_miles(float(center[0]), float(center[1]), float(row["latitude"]), float(row["longitude"]))
+                    if pd.notna(row.get("latitude")) and pd.notna(row.get("longitude"))
+                    else 999999,
+                    axis=1,
+                )
+                limited = limited.sort_values(["_target_distance", "store_number"], na_position="last")
+            else:
+                limited = limited.sort_values("store_number", na_position="last")
+        else:
+            limited = limited.sort_values("store_number", na_position="last")
+    else:
+        limited = limited.sort_values("store_number", na_position="last")
+    return limited.head(int(target_count)).drop(columns=["_target_distance"], errors="ignore")
+
+
 def technician_color_lookup(stores_df, group):
     if group not in ("PMT", "Calibration") or stores_df is None or stores_df.empty:
         return {}
@@ -1128,6 +1214,7 @@ def render_area_manager_map(
     teams_df=None,
     team_anchor_stores_df=None,
     technicians_df=None,
+    adjusted_bounds=None,
 ):
     selected_ids = set(selected_ids or [])
     valid = stores_df.dropna(subset=["latitude", "longitude"]).copy()
@@ -1136,6 +1223,18 @@ def render_area_manager_map(
         return None, {}
 
     fmap = folium.Map(location=center_for(valid), zoom_start=8, tiles="OpenStreetMap")
+    if adjusted_bounds:
+        min_lat, max_lat, min_lon, max_lon = adjusted_bounds
+        folium.Rectangle(
+            bounds=[[float(min_lat), float(min_lon)], [float(max_lat), float(max_lon)]],
+            color="#f97316",
+            weight=4,
+            fill=True,
+            fill_color="#f97316",
+            fill_opacity=0.08,
+            dash_array="8,6",
+            tooltip="Adjusted stretch boundary used for store assignment",
+        ).add_to(fmap)
     tech_color_lookup = technician_color_lookup(valid, group)
     add_area_overlays(fmap, colorized_technician_areas(areas_df, tech_color_lookup, group))
     non_service_count = int((~field_service_mask(valid)).sum())
@@ -1267,7 +1366,7 @@ def render_area_manager_map(
                 "polyline": False,
                 "polygon": True,
                 "rectangle": True,
-                "circle": False,
+                "circle": True,
                 "marker": False,
                 "circlemarker": False,
             },
@@ -4641,7 +4740,40 @@ if selected_team_id and config:
 st.divider()
 st.subheader("Map and Area Editing")
 map_areas = active_areas(None if view_mode == "All Stores" else selected_group)
-st.caption("Draw a polygon or rectangle to select stores. Orange dots are inside the current drawing. Red dots are assigned to another area in the same group.")
+a1, a2, a3 = st.columns(3)
+allow_move = a1.checkbox("Allow moving stores from another area in this group", value=False)
+store_options = visible_stores["id"].tolist() if not visible_stores.empty else []
+manual_store = a2.selectbox("Manual store add/remove", store_options, format_func=lambda x: f"{visible_stores.set_index('id').loc[x, 'store_number']} - {visible_stores.set_index('id').loc[x, 'city']}" if store_options else "", key="manual_store")
+selected_target_team = a3.selectbox("Target area", [None] + group_teams["id"].tolist() if not group_teams.empty else [None], format_func=lambda x: "Select area" if x is None else group_teams.set_index("id").loc[x, "team_name"], key="target_area")
+target_cols = st.columns([0.22, 0.20, 0.58])
+area_target_count = target_cols[0].number_input(
+    "Stores to assign",
+    min_value=1,
+    max_value=max(len(field_service_stores_df), 1),
+    value=min(20, max(len(field_service_stores_df), 1)),
+    step=1,
+    key=f"{selected_group}_area_target_count",
+)
+use_assignment_target = target_cols[1].checkbox("Limit to target count", value=True, key=f"{selected_group}_limit_drawn_assignment")
+target_cols[2].caption("Draw around the city/section, set the store count for this team, then save only that many stores to the target area.")
+with st.expander("Easy boundary stretch", expanded=False):
+    st.caption("Use these if dragging the drawn shape is awkward. North / Up pulls the boundary higher on the map.")
+    stretch_cols = st.columns(4)
+    stretch_north = stretch_cols[0].number_input("Stretch North / Up miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key=f"{selected_group}_area_stretch_north")
+    stretch_south = stretch_cols[1].number_input("Stretch South / Down miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key=f"{selected_group}_area_stretch_south")
+    stretch_east = stretch_cols[2].number_input("Stretch East / Right miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key=f"{selected_group}_area_stretch_east")
+    stretch_west = stretch_cols[3].number_input("Stretch West / Left miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key=f"{selected_group}_area_stretch_west")
+drawings_state_key = f"area_manager_drawings_{selected_group}_{selected_team_id or 'none'}"
+saved_drawings = st.session_state.get(drawings_state_key, [])
+stretch_values = [stretch_north, stretch_south, stretch_east, stretch_west]
+adjusted_bounds = adjusted_drawing_bounds(
+    saved_drawings,
+    north_miles=float(stretch_north),
+    south_miles=float(stretch_south),
+    east_miles=float(stretch_east),
+    west_miles=float(stretch_west),
+) if saved_drawings and any(float(value or 0) > 0 for value in stretch_values) else None
+st.caption("Draw a polygon or rectangle to select stores. Red dots are assigned to another area in the same group. The orange dashed box shows the stretched boundary when stretch miles are used.")
 fmap, map_data = render_area_manager_map(
     visible_stores,
     map_areas,
@@ -4652,32 +4784,62 @@ fmap, map_data = render_area_manager_map(
     key=f"area_manager_{selected_group}_{map_task}_{selected_team_id or 'none'}",
     teams_df=group_teams,
     team_anchor_stores_df=stores_df,
+    adjusted_bounds=adjusted_bounds,
 )
 if fmap:
     st.download_button("Export Map", data=map_html(fmap), file_name="store_area_map.html")
 
 drawings = map_data.get("all_drawings") if map_data else []
+if drawings:
+    st.session_state[drawings_state_key] = drawings
+elif saved_drawings:
+    drawings = saved_drawings
 draw_selected = stores_within_drawings(visible_stores, drawings, close_lines_as_areas=True) if drawings else pd.DataFrame()
+stretched_selected = stores_within_adjusted_bounds(
+    visible_stores,
+    drawings,
+    north_miles=float(stretch_north),
+    south_miles=float(stretch_south),
+    east_miles=float(stretch_east),
+    west_miles=float(stretch_west),
+) if drawings and any(float(value or 0) > 0 for value in stretch_values) else pd.DataFrame()
+added_by_stretch = 0
+if not stretched_selected.empty:
+    drawn_ids_before_stretch = set(draw_selected["id"].dropna().astype(int).tolist()) if not draw_selected.empty else set()
+    added_by_stretch = int((~stretched_selected["id"].astype(int).isin(drawn_ids_before_stretch)).sum())
+    draw_selected = pd.concat([draw_selected, stretched_selected], ignore_index=True).drop_duplicates(subset=["id"])
 selected_area_rows = stores_df[stores_df["id"].isin(selected_store_ids)].copy() if selected_store_ids else stores_df.iloc[0:0].copy()
 assignable_area_store_ids = sorted(selected_area_rows[field_service_mask(selected_area_rows)]["id"].astype(int).tolist()) if not selected_area_rows.empty else []
 if not draw_selected.empty:
     selected_store_ids = set(draw_selected["id"].tolist())
     non_service_draw_selected = draw_selected[~field_service_mask(draw_selected)]
-    assignable_area_store_ids = sorted(draw_selected[field_service_mask(draw_selected)]["id"].astype(int).tolist())
-    st.metric("Stores inside current drawing", len(draw_selected))
+    assignable_candidates = draw_selected[field_service_mask(draw_selected)].copy()
+    limited_candidates = limit_area_assignment_candidates(
+        assignable_candidates,
+        int(area_target_count),
+        selected_target_team,
+        group_teams,
+        stores_df,
+    ) if use_assignment_target else assignable_candidates
+    assignable_area_store_ids = sorted(limited_candidates["id"].astype(int).tolist())
+    left_out_by_target = max(len(assignable_candidates) - len(limited_candidates), 0)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Stores In Adjusted Area", len(draw_selected))
+    m2.metric("Assignable Stores", len(assignable_candidates))
+    m3.metric("Target Count", int(area_target_count) if use_assignment_target else "All")
+    m4.metric("Will Assign", len(assignable_area_store_ids))
+    m5.metric("Left Out", left_out_by_target)
+    if added_by_stretch:
+        st.caption(f"Stretch added {added_by_stretch} store(s) to the drawn selection.")
     if not non_service_draw_selected.empty:
         st.caption(f"{len(non_service_draw_selected)} selected store(s) are marked not serviced and will stay visible but will not be assigned to this {selected_group} area.")
     if config:
         moved = draw_selected[draw_selected[config["team_field"]].notna() & (draw_selected[config["team_field"]] != selected_team_id)]
         if not moved.empty:
             st.warning(f"{len(moved)} stores are already assigned to another {selected_group} area. Saving will move them if you allow overlap/move.")
-    st.dataframe(draw_selected[["id", "store_number", "service_type", "address", "city", "state"]], use_container_width=True, hide_index=True)
-
-a1, a2, a3 = st.columns(3)
-allow_move = a1.checkbox("Allow moving stores from another area in this group", value=False)
-store_options = visible_stores["id"].tolist() if not visible_stores.empty else []
-manual_store = a2.selectbox("Manual store add/remove", store_options, format_func=lambda x: f"{visible_stores.set_index('id').loc[x, 'store_number']} - {visible_stores.set_index('id').loc[x, 'city']}" if store_options else "", key="manual_store")
-selected_target_team = a3.selectbox("Target area", [None] + group_teams["id"].tolist() if not group_teams.empty else [None], format_func=lambda x: "Select area" if x is None else group_teams.set_index("id").loc[x, "team_name"], key="target_area")
+    display_selected = draw_selected.copy()
+    display_selected["Will Assign"] = display_selected["id"].astype(int).isin(assignable_area_store_ids)
+    st.dataframe(display_selected[["Will Assign", "id", "store_number", "service_type", "address", "city", "state"]], use_container_width=True, hide_index=True)
 
 b1, b2, b3, b4 = st.columns(4)
 if b1.button("Save Drawn Stores to Selected Area", type="primary", disabled=not selected_target_team or not assignable_area_store_ids):
