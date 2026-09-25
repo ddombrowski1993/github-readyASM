@@ -2,8 +2,10 @@ from datetime import date, timedelta
 from html import escape
 import json
 
+import folium
 import pandas as pd
 import streamlit as st
+from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Brand Enhancement Scheduler", layout="wide")
 
@@ -242,6 +244,216 @@ def schedule_items_for_day(work_date, team_id=None):
         order by si.sequence_number, si.id
         """
     return safe_query(sql, params)
+
+
+def brand_route_map_stores():
+    return safe_query(
+        """
+        select s.id, s.store_number, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
+               coalesce(s.service_type, 'Standard') as service_type,
+               s.store_status,
+               s.assigned_brand_team_id,
+               coalesce(t.team_name, 'Unassigned') as brand_area
+        from stores s
+        left join teams t on t.id = s.assigned_brand_team_id
+        where s.active = true
+        order by s.store_number
+        """,
+        use_cache=False,
+    )
+
+
+def service_type_value(row):
+    value = str(row.get("service_type") or "Standard").strip()
+    return value or "Standard"
+
+
+def is_standard_store(row):
+    return service_type_value(row) == "Standard"
+
+
+def route_builder_key(team_id):
+    return f"be_manual_route_{int(team_id)}"
+
+
+def nearest_store_to_click(stores_df, click, max_miles=2.0):
+    if not click or stores_df.empty:
+        return None, None
+    lat = click.get("lat")
+    lon = click.get("lng")
+    if lat is None or lon is None:
+        return None, None
+    candidates = stores_df.dropna(subset=["latitude", "longitude"]).copy()
+    if candidates.empty:
+        return None, None
+    candidates["_click_miles"] = candidates.apply(
+        lambda row: haversine_miles(float(lat), float(lon), float(row["latitude"]), float(row["longitude"])),
+        axis=1,
+    )
+    nearest = candidates.sort_values("_click_miles").iloc[0]
+    distance = float(nearest["_click_miles"])
+    if distance > float(max_miles):
+        return None, distance
+    return nearest.drop(labels=["_click_miles"], errors="ignore"), distance
+
+
+def route_records_dataframe(records):
+    df = pd.DataFrame(records or [])
+    if df.empty:
+        return df
+    df["Route Stop"] = range(1, len(df) + 1)
+    return df
+
+
+def selected_route_store_ids(records):
+    return {int(row.get("id")) for row in records or [] if row.get("id") is not None}
+
+
+def build_manual_brand_preview(route_records, start_date, end_date, weekdays, stores_per_day):
+    route_df = route_records_dataframe(route_records)
+    if route_df.empty:
+        return pd.DataFrame()
+    dates = [
+        day.date()
+        for day in pd.date_range(start_date, end_date)
+        if day.strftime("%A") in weekdays and not is_company_holiday(day.date())
+    ] if start_date <= end_date else []
+    rows = []
+    prev = None
+    day_index = 0
+    seq = 1
+    for _, store in route_df.iterrows():
+        if day_index >= len(dates):
+            break
+        schedule_date = dates[day_index]
+        distance = ""
+        if prev is not None:
+            distance = round(haversine_miles(float(prev["latitude"]), float(prev["longitude"]), float(store["latitude"]), float(store["longitude"])), 1)
+        rows.append(
+            {
+                "schedule_date": schedule_date,
+                "sequence_number": seq,
+                "store_id": int(store["id"]),
+                "store_number": store.get("store_number", ""),
+                "address": store.get("address", ""),
+                "city": store.get("city", ""),
+                "latitude": float(store["latitude"]),
+                "longitude": float(store["longitude"]),
+                "distance_from_previous": distance,
+                "status": "Scheduled",
+            }
+        )
+        prev = store
+        seq += 1
+        if seq > int(stores_per_day):
+            seq = 1
+            day_index += 1
+            prev = None
+    return pd.DataFrame(rows)
+
+
+def render_brand_route_builder_map(stores_df, eligible_ids, route_records, selected_team_id, key, click_tolerance_miles=2.0):
+    mapped = stores_df.copy()
+    if mapped.empty:
+        st.info("No stores found for the map.")
+        return None, None
+    mapped["latitude"] = pd.to_numeric(mapped["latitude"], errors="coerce")
+    mapped["longitude"] = pd.to_numeric(mapped["longitude"], errors="coerce")
+    mapped = mapped.dropna(subset=["latitude", "longitude"])
+    if mapped.empty:
+        st.info("No mapped stores found. Stores need latitude and longitude to appear here.")
+        return None, None
+
+    selected_ids = selected_route_store_ids(route_records)
+    route_df = route_records_dataframe(route_records)
+    fmap = folium.Map(location=[float(mapped["latitude"].mean()), float(mapped["longitude"].mean())], zoom_start=8, tiles="OpenStreetMap")
+
+    if not route_df.empty:
+        route_points = [[float(row["latitude"]), float(row["longitude"])] for _, row in route_df.iterrows()]
+        if len(route_points) >= 2:
+            folium.PolyLine(route_points, color="#111827", weight=4, opacity=0.82, tooltip="Manual route order").add_to(fmap)
+        for _, row in route_df.iterrows():
+            folium.Marker(
+                [float(row["latitude"]), float(row["longitude"])],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="background:#111827;color:white;border:2px solid white;border-radius:999px;
+                    width:26px;height:26px;line-height:22px;text-align:center;font-size:12px;font-weight:850;
+                    box-shadow:0 1px 4px rgba(0,0,0,.35);">{int(row["Route Stop"])}</div>
+                    """
+                ),
+                tooltip=f"Stop {int(row['Route Stop'])}: Store {row.get('store_number', '')}",
+            ).add_to(fmap)
+
+    for _, row in mapped.iterrows():
+        store_id = int(row["id"])
+        service_type = service_type_value(row)
+        standard = is_standard_store(row)
+        eligible = store_id in eligible_ids
+        selected = store_id in selected_ids
+        assigned_here = pd.notna(row.get("assigned_brand_team_id")) and int(row.get("assigned_brand_team_id")) == int(selected_team_id)
+        assigned_elsewhere = pd.notna(row.get("assigned_brand_team_id")) and not assigned_here
+        if selected:
+            color = "#111827"
+            fill = "#f59e0b"
+            radius = 9
+            weight = 3
+        elif not standard:
+            color = "#64748b"
+            fill = "#f8fafc"
+            radius = 6
+            weight = 2
+        elif eligible:
+            color = "#ffffff"
+            fill = "#16a34a" if assigned_here else "#2563eb"
+            radius = 6
+            weight = 1
+        elif assigned_elsewhere:
+            color = "#ffffff"
+            fill = "#dc2626"
+            radius = 5
+            weight = 1
+        else:
+            color = "#ffffff"
+            fill = "#9ca3af"
+            radius = 5
+            weight = 1
+        popup = f"""
+        <b>Store {row.get('store_number', '')}</b><br>
+        {row.get('address', '')}<br>
+        {row.get('city', '')}, {row.get('state', '')} {row.get('zip', '')}<br><br>
+        Brand Area: {row.get('brand_area', 'Unassigned')}<br>
+        Service Type: {service_type}<br>
+        Route status: {"Already in route" if selected else "Eligible to add" if eligible else "Visible only"}
+        """
+        folium.CircleMarker(
+            [float(row["latitude"]), float(row["longitude"])],
+            radius=radius,
+            color=color,
+            weight=weight,
+            fill=True,
+            fill_color=fill,
+            fill_opacity=0.45 if not standard else 0.9,
+            dash_array="4,4" if not standard else None,
+            popup=folium.Popup(popup, max_width=320),
+            tooltip=f"Store {row.get('store_number', '')} - {service_type}",
+        ).add_to(fmap)
+
+    legend_html = """
+    <div style='position: fixed; bottom: 24px; left: 24px; z-index: 9999; background: white;
+    border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px 12px; font-size: 13px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.18);'>
+    <strong>Brand Route Map</strong>
+    <div><span style='background:#16a34a;width:12px;height:12px;border-radius:999px;display:inline-block;margin-right:6px;'></span>Eligible assigned here</div>
+    <div><span style='background:#2563eb;width:12px;height:12px;border-radius:999px;display:inline-block;margin-right:6px;'></span>Eligible other/unassigned</div>
+    <div><span style='background:#f59e0b;width:12px;height:12px;border-radius:999px;display:inline-block;margin-right:6px;'></span>Selected route stop</div>
+    <div><span style='border:2px dashed #64748b;background:#f8fafc;width:12px;height:12px;border-radius:999px;display:inline-block;margin-right:6px;'></span>Not serviced</div>
+    </div>
+    """
+    fmap.get_root().html.add_child(folium.Element(legend_html))
+    map_data = st_folium(fmap, width=None, height=620, key=key, returned_objects=["last_object_clicked"])
+    nearest, distance = nearest_store_to_click(mapped, (map_data or {}).get("last_object_clicked"), click_tolerance_miles)
+    return map_data, nearest
 
 
 def available_deferred_wos():
@@ -497,7 +709,8 @@ def assigned_store_counts(team_id, include_unassigned, exclude_completed, work_t
         params,
     )
     pool_sql = f"""
-        select s.id, s.store_number, s.address, s.city, s.state, s.latitude, s.longitude
+        select s.id, s.store_number, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
+               coalesce(s.service_type, 'Standard') as service_type
         from stores s
         where s.active = true
           and {standard_store_filter}
@@ -915,6 +1128,150 @@ with tab_build:
         if estimated_completion and estimated_completion > end:
             st.warning(f"At {int(stores_per_day)} stores/day, this area is projected to finish on {estimated_completion:%B %d, %Y}, which is after the selected last work day.")
 
+    route_state_key = route_builder_key(team_id)
+    with st.container(border=True):
+        step_header(4, "Build Manual Map Route", "Optional: click stores one-by-one to choose the exact route order before generating the draft.", "blue")
+        route_source = st.radio(
+            "Draft route source",
+            ["Automatic route method", "Manual map route"],
+            horizontal=True,
+            key="be_route_source",
+        )
+        map_stores = brand_route_map_stores()
+        eligible_ids = set(counts["pool"]["id"].dropna().astype(int).tolist()) if not counts["pool"].empty else set()
+        route_records = st.session_state.get(route_state_key, [])
+        route_records = [row for row in route_records if int(row.get("id", -1)) in eligible_ids]
+        st.session_state[route_state_key] = route_records
+
+        route_cols = st.columns([0.18, 0.18, 0.18, 0.46])
+        route_cols[0].metric("Map Stores", len(map_stores))
+        route_cols[1].metric("Eligible To Schedule", len(eligible_ids))
+        route_cols[2].metric("Route Stops", len(route_records))
+        route_cols[3].caption("Click a store dot to add it as the next stop. Green stores are assigned to this Brand area and eligible. Hollow dashed stores are visible only because their service type is not Standard.")
+
+        click_tolerance = st.slider(
+            "Store click tolerance miles",
+            min_value=0.25,
+            max_value=10.0,
+            value=2.0,
+            step=0.25,
+            key="be_route_click_tolerance",
+        )
+        map_data, clicked_store = render_brand_route_builder_map(
+            map_stores,
+            eligible_ids,
+            route_records,
+            team_id,
+            key=f"be_manual_route_map_{team_id}_{len(route_records)}",
+            click_tolerance_miles=float(click_tolerance),
+        )
+        click = (map_data or {}).get("last_object_clicked") if isinstance(map_data, dict) else None
+        click_signature = (
+            round(float(click.get("lat")), 6),
+            round(float(click.get("lng")), 6),
+            len(route_records),
+        ) if click and click.get("lat") is not None and click.get("lng") is not None else None
+        if clicked_store is not None and click_signature and st.session_state.get(f"{route_state_key}_last_click") != click_signature:
+            clicked_id = int(clicked_store["id"])
+            if clicked_id not in eligible_ids:
+                st.session_state[f"{route_state_key}_last_click"] = click_signature
+                st.warning(f"Store {clicked_store.get('store_number', '')} is visible but not eligible for this Brand schedule with the current filters.")
+            elif clicked_id in selected_route_store_ids(route_records):
+                st.session_state[f"{route_state_key}_last_click"] = click_signature
+                st.info(f"Store {clicked_store.get('store_number', '')} is already in the route.")
+            elif not is_standard_store(clicked_store):
+                st.session_state[f"{route_state_key}_last_click"] = click_signature
+                st.warning(f"Store {clicked_store.get('store_number', '')} is marked {service_type_value(clicked_store)} and was not added.")
+            else:
+                route_records.append(
+                    {
+                        "id": clicked_id,
+                        "store_number": clicked_store.get("store_number", ""),
+                        "address": clicked_store.get("address", ""),
+                        "city": clicked_store.get("city", ""),
+                        "state": clicked_store.get("state", ""),
+                        "zip": clicked_store.get("zip", ""),
+                        "latitude": float(clicked_store["latitude"]),
+                        "longitude": float(clicked_store["longitude"]),
+                        "service_type": service_type_value(clicked_store),
+                        "brand_area": clicked_store.get("brand_area", ""),
+                    }
+                )
+                st.session_state[route_state_key] = route_records
+                st.session_state[f"{route_state_key}_last_click"] = click_signature
+                st.rerun()
+
+        route_df = route_records_dataframe(route_records)
+        route_actions = st.columns([0.25, 0.25, 0.25, 0.25])
+        if route_actions[0].button("Load Eligible Stores", disabled=not eligible_ids, key="be_route_load_all"):
+            route_source_df = counts["pool"].copy()
+            st.session_state[route_state_key] = [
+                {
+                    "id": int(row["id"]),
+                    "store_number": row.get("store_number", ""),
+                    "address": row.get("address", ""),
+                    "city": row.get("city", ""),
+                    "state": row.get("state", ""),
+                    "zip": row.get("zip", ""),
+                    "latitude": float(row["latitude"]),
+                    "longitude": float(row["longitude"]),
+                    "service_type": row.get("service_type", "Standard"),
+                    "brand_area": selected_label,
+                }
+                for _, row in route_source_df.iterrows()
+            ]
+            st.rerun()
+        if route_actions[1].button("Clear Manual Route", disabled=not route_records, key="be_route_clear"):
+            st.session_state.pop(route_state_key, None)
+            st.session_state.pop(f"{route_state_key}_last_click", None)
+            st.rerun()
+        route_actions[2].download_button(
+            "Export Manual Route",
+            data=route_df.to_csv(index=False).encode("utf-8") if not route_df.empty else b"",
+            file_name="brand_enhancement_manual_route.csv",
+            mime="text/csv",
+            disabled=route_df.empty,
+        )
+        route_actions[3].caption("Use the table below to change stop numbers or remove stores.")
+
+        if route_df.empty:
+            st.info("No manual route stops selected yet. Click store dots on the map, or use Load Eligible Stores as a starting point.")
+        else:
+            route_df["Remove"] = False
+            edited_route = st.data_editor(
+                route_df[["Route Stop", "store_number", "city", "state", "service_type", "brand_area", "Remove"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Route Stop": st.column_config.NumberColumn("Route Stop", min_value=1, step=1),
+                    "store_number": st.column_config.TextColumn("Store"),
+                    "city": st.column_config.TextColumn("City"),
+                    "state": st.column_config.TextColumn("State"),
+                    "service_type": st.column_config.TextColumn("Service Type"),
+                    "brand_area": st.column_config.TextColumn("Brand Area"),
+                },
+                disabled=["store_number", "city", "state", "service_type", "brand_area"],
+                key="be_manual_route_editor",
+            )
+            update_cols = st.columns([0.25, 0.75])
+            if update_cols[0].button("Update Route Order", key="be_route_update_order"):
+                kept = edited_route[~edited_route["Remove"].astype(bool)].copy()
+                kept["Route Stop"] = pd.to_numeric(kept["Route Stop"], errors="coerce").fillna(9999)
+                order_lookup = dict(zip(kept["store_number"].astype(str), kept["Route Stop"]))
+                updated = []
+                for row in route_records:
+                    store_number = str(row.get("store_number", ""))
+                    if store_number in order_lookup:
+                        row = dict(row)
+                        row["_route_sort"] = order_lookup[store_number]
+                        updated.append(row)
+                updated = sorted(updated, key=lambda row: (row.get("_route_sort", 9999), str(row.get("store_number", ""))))
+                for row in updated:
+                    row.pop("_route_sort", None)
+                st.session_state[route_state_key] = updated
+                st.rerun()
+            update_cols[1].caption("The first row is stop 1, the second row is stop 2, and so on. When the draft is generated, stops are split across the selected work dates by Stores per day.")
+
     signature = (
         "Brand Enhancement",
         int(team_id),
@@ -923,13 +1280,15 @@ with tab_build:
         tuple(weekdays),
         int(stores_per_day),
         direction,
+        route_source,
+        tuple(int(row.get("id")) for row in st.session_state.get(route_state_key, []) if row.get("id") is not None),
         tuple(counts["pool"]["id"].astype(int).tolist()) if not counts["pool"].empty else tuple(),
     )
     if st.session_state.get("schedule_preview_signature") != signature:
         st.session_state.pop("schedule_preview", None)
 
     with st.container(border=True):
-        step_header(4, "Generate Draft Schedule", "Generate a draft from the selected area, validation checks, and schedule settings.", "green")
+        step_header(5, "Generate Draft Schedule", "Generate a draft from the selected area, validation checks, and schedule settings.", "green")
         disabled_reason = ""
         if must_fix:
             disabled_reason = "Generate Draft is disabled because no Brand Enhancement stores are assigned."
@@ -939,13 +1298,20 @@ with tab_build:
             disabled_reason = "Generate Draft is disabled because no work days are selected."
         elif counts["pool"].empty:
             disabled_reason = "Generate Draft is disabled because no eligible stores are available with the current filters."
+        elif route_source == "Manual map route" and not st.session_state.get(route_state_key):
+            disabled_reason = "Generate Draft is disabled because Manual map route is selected but no route stops have been chosen."
         if disabled_reason:
             st.warning(disabled_reason)
         if st.button("Generate Draft Schedule", type="primary", disabled=bool(disabled_reason), key="be_generate_draft"):
-            preview = build_schedule_preview(counts["pool"], start, end, weekdays, int(stores_per_day), direction)
+            if route_source == "Manual map route":
+                preview = build_manual_brand_preview(st.session_state.get(route_state_key, []), start, end, weekdays, int(stores_per_day))
+            else:
+                preview = build_schedule_preview(counts["pool"], start, end, weekdays, int(stores_per_day), direction)
             if preview.empty:
                 st.warning("No draft was generated. Check that the date range includes work days and that stores are eligible.")
-            elif len(preview) < len(counts["pool"]):
+            elif route_source == "Manual map route" and len(preview) < len(st.session_state.get(route_state_key, [])):
+                st.warning(f"{len(preview)} manual route stops fit in this date range. {len(st.session_state.get(route_state_key, [])) - len(preview)} selected stop(s) were left unscheduled.")
+            elif route_source != "Manual map route" and len(preview) < len(counts["pool"]):
                 st.warning(f"{len(preview)} stores fit in this date range. {len(counts['pool']) - len(preview)} eligible stores were left unscheduled.")
             st.session_state["schedule_preview"] = preview
             st.session_state["schedule_preview_signature"] = signature
@@ -953,9 +1319,9 @@ with tab_build:
 
     preview = st.session_state.get("schedule_preview", pd.DataFrame())
     with st.container(border=True):
-        step_header(5, "Review Draft Schedule", "Review route order, draft issues, map, and exports before publishing.", "green")
+        step_header(6, "Review Draft Schedule", "Review route order, draft issues, map, and exports before publishing.", "green")
         if preview.empty:
-            st.info("No draft generated yet. Complete Steps 1-4 first.")
+            st.info("No draft generated yet. Complete Steps 1-5 first.")
         else:
             preview_display = preview.copy()
             preview_display["Day"] = pd.to_datetime(preview_display["schedule_date"], errors="coerce").dt.day_name()
@@ -1026,7 +1392,7 @@ with tab_build:
                 st.rerun()
 
     with st.container(border=True):
-        step_header(6, "Publish Schedule", "Name and publish the reviewed Brand Enhancement draft.", "green")
+        step_header(7, "Publish Schedule", "Name and publish the reviewed Brand Enhancement draft.", "green")
         if preview.empty:
             st.info("Generate and review a draft before publishing.")
         else:
