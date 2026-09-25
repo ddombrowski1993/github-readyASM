@@ -961,20 +961,22 @@ def simple_pmt_assignment_upload_panel(employee_field, team_field):
 
 
 def active_areas(group=None):
-    params = {"group": group}
-    return safe_query(
-        """
+    params = {}
+    sql = """
         select ma.id, ma.area_name, ma.area_type, ma.team_id, ma.employee_id, ma.assignment_type,
                ma.team_members, ma.home_base, ma.geometry_json, ma.assigned_store_ids, ma.color,
                coalesce(t.team_name, ma.area_name) as team_name
         from map_areas ma
         left join teams t on t.id = ma.team_id
         where ma.active = true
-          and (:group is null or ma.area_type = :group)
+        """
+    if group is not None:
+        sql += " and ma.area_type = :group"
+        params["group"] = group
+    sql += """
         order by ma.area_type, ma.area_name
-        """,
-        params,
-    )
+        """
+    return safe_query(sql, params)
 
 
 def empty_polygon_json():

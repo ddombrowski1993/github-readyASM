@@ -224,8 +224,8 @@ def next_or_same_schedule_workday(start_date, workdays):
 
 
 def schedule_items_for_day(work_date, team_id=None):
-    return safe_query(
-        """
+    params = {"work_date": work_date}
+    sql = """
         select si.id, si.sequence_number as stop, si.schedule_date, coalesce(t.team_name,'Unassigned') as team,
                s.store_number, s.address, s.city, si.work_type, si.status,
                coalesce(si.completion_notes, si.weather_notes, '') as notes
@@ -233,12 +233,15 @@ def schedule_items_for_day(work_date, team_id=None):
         left join stores s on s.id = si.store_id
         left join teams t on t.id = si.team_id
         where si.schedule_date = :work_date
-          and (:team_id is null or si.team_id = :team_id)
+        """
+    if team_id is not None:
+        sql += " and si.team_id = :team_id"
+        params["team_id"] = team_id
+    sql += """
           and si.work_type in ('Brand Enhancement', 'Deferred Work Order')
         order by si.sequence_number, si.id
-        """,
-        {"work_date": work_date, "team_id": team_id},
-    )
+        """
+    return safe_query(sql, params)
 
 
 def available_deferred_wos():

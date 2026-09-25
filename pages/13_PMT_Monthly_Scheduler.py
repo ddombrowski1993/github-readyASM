@@ -1703,8 +1703,25 @@ def canonicalize_current_pmt_rows(df, include_completed=False):
 
 
 def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=None, end_date=None, include_completed=False):
+    params = {
+        "run_id": int(run_id),
+        "include_completed": bool(include_completed),
+    }
+    optional_filters = []
+    if employee_id is not None:
+        optional_filters.append("and si.employee_id = :employee_id")
+        params["employee_id"] = int(employee_id)
+    if start_date is not None:
+        optional_filters.append("and date(si.schedule_date) >= date(:start_date)")
+        params["start_date"] = start_date
+    if end_date is not None:
+        optional_filters.append("and date(si.schedule_date) <= date(:end_date)")
+        params["end_date"] = end_date
+    optional_filter_sql = "\n          ".join(optional_filters)
+    if optional_filter_sql:
+        optional_filter_sql = f"\n          {optional_filter_sql}"
     df = safe_query(
-        """
+        f"""
         select si.id as schedule_item_id, si.schedule_id, si.pmt_schedule_run_id,
                si.schedule_date, si.sequence_number, si.status, si.completion_notes as notes,
                si.created_at, si.updated_at,
@@ -1720,9 +1737,7 @@ def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=No
         where si.pmt_schedule_run_id = :run_id
           and si.work_type = 'PMT'
           and coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot','archived','historical')
-          and (:employee_id is null or si.employee_id = :employee_id)
-          and (:start_date is null or date(si.schedule_date) >= date(:start_date))
-          and (:end_date is null or date(si.schedule_date) <= date(:end_date))
+          {optional_filter_sql}
           and (
               (
                   :include_completed = true
@@ -1737,13 +1752,7 @@ def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=No
           and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
         order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
         """,
-        {
-            "run_id": int(run_id),
-            "employee_id": int(employee_id) if employee_id is not None else None,
-            "start_date": start_date,
-            "end_date": end_date,
-            "include_completed": bool(include_completed),
-        },
+        params,
         use_cache=False,
     )
     if df.empty:
@@ -2956,10 +2965,13 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
     params = {
         "effective_date": effective_date,
         "scan_start_date": scan_start_date,
-        "run_id": int(run_id) if run_id else None,
     }
+    run_filter_sql = ""
+    if run_id:
+        run_filter_sql = "and si.pmt_schedule_run_id = :run_id"
+        params["run_id"] = int(run_id)
     future_items = safe_query(
-        """
+        f"""
         select si.id as schedule_item_id, si.schedule_id, si.pmt_schedule_run_id,
                coalesce(r.run_name, sch.schedule_name, '') as schedule_name,
                si.schedule_date, si.sequence_number, si.status, si.cycle_label,
@@ -2987,7 +2999,7 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
           and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('completed','complete','cancelled','canceled','skipped','deleted','transferred','superseded','archived')
           and (r.id is null or coalesce(lower(trim(r.status)), '') <> 'deleted')
           and (sch.id is null or coalesce(lower(trim(sch.status)), '') <> 'deleted')
-          and (:run_id is null or si.pmt_schedule_run_id = :run_id)
+          {run_filter_sql}
         order by si.schedule_date, scheduled_technician, si.sequence_number, s.store_number
         """,
         params,
@@ -3151,14 +3163,18 @@ def pmt_reconciliation_scan(effective_date, run_id=None, ignore_effective_date=F
         active_pmts["reconciliation_status"] = active_pmts["employee_id"].apply(lambda value: "Affected" if pd.notna(value) and int(value) in affected_ids else "Protected - No assignment conflict detected")
         affected = active_pmts[active_pmts["reconciliation_status"] == "Affected"].copy()
         protected = active_pmts[active_pmts["reconciliation_status"].str.startswith("Protected")].copy()
+    schedule_runs_params = {}
+    schedule_runs_filter_sql = ""
+    if run_id:
+        schedule_runs_filter_sql = "id = :run_id and"
+        schedule_runs_params["run_id"] = int(run_id)
     schedule_runs_scanned = safe_query(
-        """
+        f"""
         select count(*) as count
         from pmt_schedule_runs
-        where (:run_id is null or id = :run_id)
-          and coalesce(lower(trim(status)), '') <> 'deleted'
+        where {schedule_runs_filter_sql} coalesce(lower(trim(status)), '') <> 'deleted'
         """,
-        {"run_id": int(run_id) if run_id else None},
+        schedule_runs_params,
         use_cache=False,
     )
     total_assignments = int(len(active_assigned)) if isinstance(active_assigned, pd.DataFrame) else 0
