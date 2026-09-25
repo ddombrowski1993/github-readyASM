@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 from html import escape
 import json
+from math import cos, radians
 
 import folium
 import pandas as pd
@@ -331,6 +332,57 @@ def stores_to_route_records(stores_df, brand_area=""):
             }
         )
     return records
+
+
+def drawing_bounds(drawings):
+    points = []
+    for drawing in drawings or []:
+        geometry = drawing.get("geometry", {})
+        properties = drawing.get("properties", {})
+        geometry_type = geometry.get("type")
+        coordinates = geometry.get("coordinates", [])
+        if geometry_type == "Polygon" and coordinates:
+            points.extend((float(lat), float(lon)) for lon, lat in coordinates[0])
+        elif geometry_type == "LineString" and coordinates:
+            points.extend((float(lat), float(lon)) for lon, lat in coordinates)
+        elif geometry_type == "Point" and coordinates:
+            center_lon, center_lat = coordinates
+            radius_miles = float(properties.get("radius") or 0) / 1609.344
+            lat_pad = radius_miles / 69.0
+            lon_pad = radius_miles / max(69.0 * cos(radians(float(center_lat))), 0.0001)
+            points.extend(
+                [
+                    (float(center_lat) - lat_pad, float(center_lon) - lon_pad),
+                    (float(center_lat) + lat_pad, float(center_lon) + lon_pad),
+                ]
+            )
+    if not points:
+        return None
+    lat_values = [point[0] for point in points]
+    lon_values = [point[1] for point in points]
+    return min(lat_values), max(lat_values), min(lon_values), max(lon_values)
+
+
+def stores_within_adjusted_bounds(stores_df, drawings, north_miles=0, south_miles=0, east_miles=0, west_miles=0):
+    bounds = drawing_bounds(drawings)
+    if bounds is None or stores_df is None or stores_df.empty:
+        return stores_df.iloc[0:0].copy() if stores_df is not None else pd.DataFrame()
+    min_lat, max_lat, min_lon, max_lon = bounds
+    center_lat = (min_lat + max_lat) / 2
+    lat_miles = 69.0
+    lon_miles = max(69.0 * cos(radians(float(center_lat))), 0.0001)
+    adjusted_min_lat = min_lat - (float(south_miles or 0) / lat_miles)
+    adjusted_max_lat = max_lat + (float(north_miles or 0) / lat_miles)
+    adjusted_min_lon = min_lon - (float(west_miles or 0) / lon_miles)
+    adjusted_max_lon = max_lon + (float(east_miles or 0) / lon_miles)
+    scoped = stores_df.copy()
+    scoped["latitude"] = pd.to_numeric(scoped["latitude"], errors="coerce")
+    scoped["longitude"] = pd.to_numeric(scoped["longitude"], errors="coerce")
+    scoped = scoped.dropna(subset=["latitude", "longitude"])
+    return scoped[
+        scoped["latitude"].between(adjusted_min_lat, adjusted_max_lat)
+        & scoped["longitude"].between(adjusted_min_lon, adjusted_max_lon)
+    ].copy()
 
 
 def build_manual_brand_preview(route_records, start_date, end_date, weekdays, stores_per_day):
@@ -1198,6 +1250,14 @@ with tab_build:
         auto_cols[2].caption("Draw a circle, rectangle, or polygon on the map, then auto-build from stores inside it.")
         auto_cols[3].caption(f"Auto-build uses route method: {route_label}")
 
+        with st.expander("Easy boundary stretch", expanded=True):
+            st.caption("If dragging the drawn shape is frustrating, stretch the selected area by miles instead. Use North to pull the boundary up.")
+            stretch_cols = st.columns(4)
+            stretch_north = stretch_cols[0].number_input("Stretch North / Up miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key="be_route_stretch_north")
+            stretch_south = stretch_cols[1].number_input("Stretch South / Down miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key="be_route_stretch_south")
+            stretch_east = stretch_cols[2].number_input("Stretch East / Right miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key="be_route_stretch_east")
+            stretch_west = stretch_cols[3].number_input("Stretch West / Left miles", min_value=0.0, max_value=250.0, value=0.0, step=5.0, key="be_route_stretch_west")
+
         click_tolerance = st.slider(
             "Store click tolerance miles",
             min_value=0.25,
@@ -1216,6 +1276,19 @@ with tab_build:
         )
         drawings = (map_data or {}).get("all_drawings") if isinstance(map_data, dict) else []
         drawn_stores = stores_within_drawings(map_stores, drawings, close_lines_as_areas=True) if drawings else pd.DataFrame()
+        stretched_stores = stores_within_adjusted_bounds(
+            map_stores,
+            drawings,
+            north_miles=float(stretch_north),
+            south_miles=float(stretch_south),
+            east_miles=float(stretch_east),
+            west_miles=float(stretch_west),
+        ) if drawings and any(float(value or 0) > 0 for value in [stretch_north, stretch_south, stretch_east, stretch_west]) else pd.DataFrame()
+        added_by_stretch = 0
+        if not stretched_stores.empty:
+            drawn_ids_before_stretch = set(drawn_stores["id"].dropna().astype(int).tolist()) if not drawn_stores.empty else set()
+            added_by_stretch = int((~stretched_stores["id"].astype(int).isin(drawn_ids_before_stretch)).sum())
+            drawn_stores = pd.concat([drawn_stores, stretched_stores], ignore_index=True).drop_duplicates(subset=["id"])
         drawn_eligible = pd.DataFrame()
         if not drawn_stores.empty:
             drawn_eligible = drawn_stores[
@@ -1223,11 +1296,12 @@ with tab_build:
                 & drawn_stores.apply(is_standard_store, axis=1)
             ].copy()
             excluded_by_target = max(len(drawn_eligible) - int(target_store_count), 0)
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Stores In Drawn Area", len(drawn_stores))
-            d2.metric("Eligible In Drawn Area", len(drawn_eligible))
+            d1, d2, d3, d4, d5 = st.columns(5)
+            d1.metric("Stores In Adjusted Area", len(drawn_stores))
+            d2.metric("Eligible In Adjusted Area", len(drawn_eligible))
             d3.metric("Target Build Count", int(target_store_count))
             d4.metric("Left Out By Target", excluded_by_target)
+            d5.metric("Added By Stretch", added_by_stretch)
             st.caption(
                 f"Auto-build will use the best {min(len(drawn_eligible), int(target_store_count))} eligible store(s) from the drawn area "
                 f"and leave {excluded_by_target} eligible extra store(s) out."
