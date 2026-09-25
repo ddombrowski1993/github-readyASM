@@ -30,6 +30,12 @@ The app is intentionally kept as a small folder instead of one huge Python file.
 pip install -r requirements.txt
 ```
 
+Run the pre-deploy safety check before pushing:
+
+```bash
+python scripts/check_sql_safety.py
+```
+
 3. Run:
 
 ```bash
