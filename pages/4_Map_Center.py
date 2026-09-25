@@ -1026,6 +1026,20 @@ def assignment_id(row, group):
     return first_map_value(row.get(config["team_field"]))
 
 
+def store_service_type(row):
+    return str(row.get("service_type") or FIELD_SERVICE_STORE_TYPE).strip() or FIELD_SERVICE_STORE_TYPE
+
+
+def is_field_service_store(row):
+    return store_service_type(row) == FIELD_SERVICE_STORE_TYPE
+
+
+def field_service_mask(df):
+    if df is None or df.empty or "service_type" not in df.columns:
+        return pd.Series(True, index=df.index if df is not None else [])
+    return df["service_type"].fillna(FIELD_SERVICE_STORE_TYPE).astype(str).str.strip().eq(FIELD_SERVICE_STORE_TYPE)
+
+
 def store_status_for_map(row, group, selected_team_id=None, selected_ids=None):
     selected_ids = selected_ids or set()
     if row["id"] in selected_ids:
@@ -1051,6 +1065,12 @@ def marker_color(status):
         "other_same_group": "#dc2626",
         "different_group": "#2563eb",
     }.get(status, "#2563eb")
+
+
+def service_type_counts(df):
+    if df is None or df.empty or "service_type" not in df.columns:
+        return {}
+    return df["service_type"].fillna(FIELD_SERVICE_STORE_TYPE).astype(str).str.strip().replace("", FIELD_SERVICE_STORE_TYPE).value_counts().to_dict()
 
 
 def technician_color_lookup(stores_df, group):
@@ -1118,6 +1138,19 @@ def render_area_manager_map(
     fmap = folium.Map(location=center_for(valid), zoom_start=8, tiles="OpenStreetMap")
     tech_color_lookup = technician_color_lookup(valid, group)
     add_area_overlays(fmap, colorized_technician_areas(areas_df, tech_color_lookup, group))
+    non_service_count = int((~field_service_mask(valid)).sum())
+    if non_service_count:
+        legend_html = (
+            "<div style='position: fixed; top: 86px; right: 24px; z-index: 9999; "
+            "background: white; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px 11px; "
+            "font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,.18);'>"
+            "<strong>Store type</strong>"
+            "<div style='display:flex;align-items:center;gap:6px;margin-top:5px;'>"
+            "<span style='border:2px dashed #64748b;background:#f8fafc;width:14px;height:14px;border-radius:999px;display:inline-block;'></span>"
+            f"<span>Not serviced: {non_service_count}</span></div>"
+            "</div>"
+        )
+        fmap.get_root().html.add_child(folium.Element(legend_html))
     if teams_df is not None and not teams_df.empty:
         anchor_source = team_anchor_stores_df if team_anchor_stores_df is not None else valid
         for _, team in teams_df.iterrows():
@@ -1177,6 +1210,8 @@ def render_area_manager_map(
 
     for _, row in valid.iterrows():
         state = store_status_for_map(row, group, selected_team_id, selected_ids)
+        service_type = store_service_type(row)
+        is_service_store = is_field_service_store(row)
         pmt_person = map_label(row.get("pmt_person"))
         calibration_person = map_label(row.get("calibration_person"))
         brand_area = map_label(row.get("brand_area"))
@@ -1194,6 +1229,8 @@ def render_area_manager_map(
         <b>Store {row.get('store_number','')}</b><br>
         {row.get('address','')}<br>
         {row.get('city','')}, {row.get('state','')} {row.get('zip','')}<br><br>
+        Service Type: {service_type}<br>
+        {"Not serviced by field teams<br>" if not is_service_store else ""}
         Brand Enhancement: {brand_area}<br>
         PMT Technician: {pmt_person}<br>
         PMT Area: {pmt_area}<br>
@@ -1203,20 +1240,24 @@ def render_area_manager_map(
         """
         folium.CircleMarker(
             [float(row["latitude"]), float(row["longitude"])],
-            radius=7 if state in ("selected", "current_area") else 5,
-            color="#111827" if state == "selected" else "#ffffff",
-            weight=2 if state in ("selected", "current_area") else 1,
+            radius=7 if state in ("selected", "current_area") else (6 if not is_service_store else 5),
+            color="#64748b" if not is_service_store else ("#111827" if state == "selected" else "#ffffff"),
+            weight=2 if state in ("selected", "current_area") or not is_service_store else 1,
             fill=True,
             fill_color=(
+                "#f8fafc"
+                if not is_service_store
+                else
                 tech_color_lookup.get(pmt_person, stable_color(pmt_person))
                 if group == "PMT" and pmt_person != "Unassigned"
                 else tech_color_lookup.get(calibration_person, stable_color(calibration_person))
                 if group == "Calibration" and calibration_person != "Unassigned"
                 else marker_color(state)
             ),
-            fill_opacity=0.92,
+            fill_opacity=0.45 if not is_service_store else 0.92,
+            dash_array="4,4" if not is_service_store else None,
             popup=folium.Popup(popup, max_width=340),
-            tooltip=f"Store {row.get('store_number','')} - {tooltip_assignment}",
+            tooltip=f"Store {row.get('store_number','')} - {service_type} - {tooltip_assignment}",
         ).add_to(fmap)
 
     if enable_draw:
@@ -3122,8 +3163,9 @@ page_header(
 team_df = teams()
 stores_df = stores_query()
 field_service_stores_df = stores_df[
-    stores_df["service_type"].fillna(FIELD_SERVICE_STORE_TYPE).astype(str).eq(FIELD_SERVICE_STORE_TYPE)
+    field_service_mask(stores_df)
 ].copy() if not stores_df.empty and "service_type" in stores_df.columns else stores_df.copy()
+non_service_stores_df = stores_df[~field_service_mask(stores_df)].copy() if not stores_df.empty else stores_df.iloc[0:0].copy()
 missing_coordinate_stores = stores_df[stores_df[["latitude", "longitude"]].isna().any(axis=1)].copy() if not stores_df.empty else pd.DataFrame()
 
 control_cols = st.columns([0.25, 0.25, 0.25, 0.25])
@@ -3154,22 +3196,24 @@ nav_cols[2].page_link("pages/13_PMT_Monthly_Scheduler.py", label="PMT Scheduler"
 nav_cols[3].page_link("pages/14_Calibration_Scheduler.py", label="Calibration Scheduler")
 
 areas_df = active_areas(None if view_mode == "All Stores Overview" else selected_group)
-visible_stores = stores_df.copy() if view_mode == "All Stores Overview" else field_service_stores_df.copy()
+visible_stores = stores_df.copy()
 if view_mode != "All Stores Overview" and config:
+    non_service_mask = ~field_service_mask(visible_stores)
     if show_unassigned_only:
         visible_stores = visible_stores[visible_stores[config["team_field"]].isna()]
     elif current_area_id:
-        visible_stores = visible_stores[visible_stores[config["team_field"]] == current_area_id]
+        visible_stores = visible_stores[(visible_stores[config["team_field"]] == current_area_id) | non_service_mask]
     else:
-        visible_stores = visible_stores[visible_stores[config["team_field"]].notna()]
+        visible_stores = visible_stores[visible_stores[config["team_field"]].notna() | non_service_mask]
 
 if view_mode == "All Stores Overview":
     st.subheader("All Stores Overview")
-    o1, o2, o3, o4 = st.columns(4)
+    o1, o2, o3, o4, o5 = st.columns(5)
     o1.metric("Active Stores", len(stores_df))
-    o2.metric("Brand Assigned", int(stores_df["assigned_brand_team_id"].notna().sum()) if "assigned_brand_team_id" in stores_df.columns else 0)
-    o3.metric("PMT Assigned", int(stores_df["assigned_pmt_employee_id"].notna().sum()) if "assigned_pmt_employee_id" in stores_df.columns else 0)
-    o4.metric("Calibration Assigned", int(stores_df["assigned_calibration_team_id"].notna().sum()) if "assigned_calibration_team_id" in stores_df.columns else 0)
+    o2.metric("Field-Service Stores", len(field_service_stores_df))
+    o3.metric("Not Serviced", len(non_service_stores_df))
+    o4.metric("PMT Assigned", int(stores_df["assigned_pmt_employee_id"].notna().sum()) if "assigned_pmt_employee_id" in stores_df.columns else 0)
+    o5.metric("Calibration Assigned", int(stores_df["assigned_calibration_team_id"].notna().sum()) if "assigned_calibration_team_id" in stores_df.columns else 0)
     overview_map, _ = render_area_manager_map(
         visible_stores,
         pd.DataFrame(),
@@ -3183,6 +3227,13 @@ if view_mode == "All Stores Overview":
     )
     if overview_map:
         st.download_button("Export Overview Map", data=map_html(overview_map), file_name="all_stores_overview_map.html")
+    if not non_service_stores_df.empty:
+        with st.expander(f"Stores Marked Not Serviced ({len(non_service_stores_df)})", expanded=False):
+            st.dataframe(
+                non_service_stores_df[["store_number", "service_type", "address", "city", "state", "zip"]],
+                use_container_width=True,
+                hide_index=True,
+            )
     if not missing_coordinate_stores.empty:
         with st.expander(f"Stores Missing Coordinates ({len(missing_coordinate_stores)})", expanded=False):
             st.dataframe(missing_coordinate_stores[["store_number", "address", "city", "state", "zip"]], use_container_width=True, hide_index=True)
@@ -3192,6 +3243,7 @@ if view_mode == "All Stores Overview":
             "address",
             "city",
             "state",
+            "service_type",
             "latitude",
             "longitude",
             "brand_area",
@@ -3205,6 +3257,7 @@ if view_mode == "All Stores Overview":
             "address": "Address",
             "city": "City",
             "state": "State",
+            "service_type": "Service Type",
             "latitude": "Latitude",
             "longitude": "Longitude",
             "brand_area": "Assigned Brand Team",
@@ -4138,11 +4191,12 @@ if selected_group in ("PMT", "Calibration"):
     )
     show_unassigned_tech = map_cols[1].checkbox(f"Show unassigned {selected_group} stores", value=True)
     search_store = map_cols[2].text_input("Search store number", key=f"{selected_group}_search_store")
-    tech_visible = field_service_stores_df.copy()
+    tech_visible = stores_df.copy()
+    tech_non_service_mask = ~field_service_mask(tech_visible)
     if selected_tech_employee is not None:
-        tech_visible = tech_visible[tech_visible[tech_config["employee_field"]] == int(selected_tech_employee)]
+        tech_visible = tech_visible[(tech_visible[tech_config["employee_field"]] == int(selected_tech_employee)) | tech_non_service_mask]
     elif not show_unassigned_tech:
-        tech_visible = tech_visible[tech_visible[tech_config["employee_field"]].notna()]
+        tech_visible = tech_visible[tech_visible[tech_config["employee_field"]].notna() | tech_non_service_mask]
     if search_store.strip():
         tech_visible = tech_visible[tech_visible["store_number"].astype(str).str.contains(search_store.strip(), case=False, na=False)]
     tech_map, tech_map_data = render_area_manager_map(
@@ -4167,7 +4221,10 @@ if selected_group in ("PMT", "Calibration"):
     map_selected_ids = draw_selected["id"].tolist() if not draw_selected.empty else []
     if not draw_selected.empty:
         st.metric("Stores inside current drawing", len(draw_selected))
-        st.dataframe(draw_selected[["id", "store_number", "address", "city", "state", tech_config["person_column"]]], use_container_width=True, hide_index=True)
+        non_service_selected = draw_selected[~field_service_mask(draw_selected)]
+        if not non_service_selected.empty:
+            st.caption(f"{len(non_service_selected)} selected store(s) are marked not serviced and will be skipped by assignment actions.")
+        st.dataframe(draw_selected[["id", "store_number", "service_type", "address", "city", "state", tech_config["person_column"]]], use_container_width=True, hide_index=True)
     else:
         st.info("Draw a polygon or rectangle on the map to select stores for bulk assignment.")
 
@@ -4183,11 +4240,17 @@ if selected_group in ("PMT", "Calibration"):
     manual_selected_store_ids = st.multiselect(
         "Additional stores to update",
         store_choices,
-        format_func=lambda value: f"{edit_df.set_index('id').loc[value, 'store_number']} - {edit_df.set_index('id').loc[value, 'city']} ({edit_df.set_index('id').loc[value, tech_config['person_column']] or 'Unassigned'})",
+        format_func=lambda value: f"{edit_df.set_index('id').loc[value, 'store_number']} - {edit_df.set_index('id').loc[value, 'city']} - {edit_df.set_index('id').loc[value, 'service_type']} ({edit_df.set_index('id').loc[value, tech_config['person_column']] or 'Unassigned'})",
         key=f"{selected_group}_manual_store_ids",
     )
     selected_store_ids = sorted(set(map_selected_ids + manual_selected_store_ids))
-    st.caption(f"Selected stores to update: {len(selected_store_ids)}")
+    selected_rows = stores_df[stores_df["id"].isin(selected_store_ids)].copy() if selected_store_ids else stores_df.iloc[0:0].copy()
+    selected_non_service_ids = set(selected_rows[~field_service_mask(selected_rows)]["id"].astype(int).tolist()) if not selected_rows.empty else set()
+    assignable_selected_store_ids = [store_id for store_id in selected_store_ids if int(store_id) not in selected_non_service_ids]
+    if selected_non_service_ids:
+        st.caption(f"Selected stores to update: {len(assignable_selected_store_ids)} field-service store(s). {len(selected_non_service_ids)} not-serviced store(s) will stay visible but skipped.")
+    else:
+        st.caption(f"Selected stores to update: {len(assignable_selected_store_ids)}")
     target_tech = st.selectbox(
         f"Target {selected_group} Technician",
         [None] + tech_summary["employee_id"].tolist() if not tech_summary.empty else [None],
@@ -4195,7 +4258,7 @@ if selected_group in ("PMT", "Calibration"):
         key=f"{selected_group}_target_tech",
     )
     edit_cols = st.columns(3)
-    if edit_cols[0].button(f"Assign Selected Stores to {selected_group}", disabled=not selected_store_ids or target_tech is None, type="primary"):
+    if edit_cols[0].button(f"Assign Selected Stores to {selected_group}", disabled=not assignable_selected_store_ids or target_tech is None, type="primary"):
         audit_rows = []
         batch_id = uuid.uuid4().hex
         change_source = "PMT Map" if map_selected_ids else "Manual Assignment"
@@ -4203,7 +4266,7 @@ if selected_group in ("PMT", "Calibration"):
         with session_scope() as session:
             employee = session.get(Employee, int(target_tech))
             team = ensure_technician_team(session, employee, selected_group)
-            for store_id in selected_store_ids:
+            for store_id in assignable_selected_store_ids:
                 store = session.get(Store, int(store_id))
                 if store:
                     old_value = getattr(store, tech_config["employee_field"])
@@ -4226,12 +4289,12 @@ if selected_group in ("PMT", "Calibration"):
         sync_technician_areas(selected_group, tech_config["employee_field"], tech_config["team_field"])
         st.success(f"Updated {len(audit_rows)} {selected_group} assignment(s).")
         st.rerun()
-    if edit_cols[1].button(f"Remove {selected_group} From Selected Stores", disabled=not selected_store_ids, type="secondary"):
+    if edit_cols[1].button(f"Remove {selected_group} From Selected Stores", disabled=not assignable_selected_store_ids, type="secondary"):
         audit_rows = []
         batch_id = uuid.uuid4().hex
         change_source = "PMT Map" if map_selected_ids else "Manual Assignment"
         with session_scope() as session:
-            for store_id in selected_store_ids:
+            for store_id in assignable_selected_store_ids:
                 store = session.get(Store, int(store_id))
                 if store:
                     old_value = getattr(store, tech_config["employee_field"])
@@ -4399,9 +4462,9 @@ if selected_group == "Brand Enhancement":
         use_employee=False,
     )
 
-counts = team_store_counts(stores_df, selected_group)
+counts = team_store_counts(field_service_stores_df, selected_group)
 assigned_count = int(counts["store_count"].sum()) if not counts.empty else 0
-total_stores = len(stores_df)
+total_stores = len(field_service_stores_df)
 unassigned_count = total_stores - assigned_count if config else 0
 team_count = len(group_teams) if not group_teams.empty else 0
 avg_count = round(assigned_count / team_count) if team_count else 0
@@ -4419,15 +4482,16 @@ if not counts.empty and not group_teams.empty:
     smallest_count = int(smallest_row["store_count"])
 
 st.subheader(f"{selected_group} Summary")
-s1, s2, s3, s4, s5 = st.columns(5)
-s1.metric("Total Stores", total_stores)
+s1, s2, s3, s4, s5, s6 = st.columns(6)
+s1.metric("Field-Service Stores", total_stores)
 s2.metric("Assigned", assigned_count)
 s3.metric("Unassigned", max(unassigned_count, 0))
-s4.metric("Teams / Areas", team_count)
-s5.metric("Average", avg_count)
-s6, s7 = st.columns(2)
-s6.metric("Largest Area", largest_count, delta=largest, delta_color="off")
-s7.metric("Smallest Area", smallest_count, delta=smallest, delta_color="off")
+s4.metric("Not Serviced", len(non_service_stores_df))
+s5.metric("Teams / Areas", team_count)
+s6.metric("Average", avg_count)
+s7, s8 = st.columns(2)
+s7.metric("Largest Area", largest_count, delta=largest, delta_color="off")
+s8.metric("Smallest Area", smallest_count, delta=smallest, delta_color="off")
 coverage = geographic_coverage_summary(stores_df, selected_group)
 if not coverage.empty:
     st.subheader(f"{selected_group} Geographic Coverage Ranking")
@@ -4594,14 +4658,20 @@ if fmap:
 
 drawings = map_data.get("all_drawings") if map_data else []
 draw_selected = stores_within_drawings(visible_stores, drawings, close_lines_as_areas=True) if drawings else pd.DataFrame()
+selected_area_rows = stores_df[stores_df["id"].isin(selected_store_ids)].copy() if selected_store_ids else stores_df.iloc[0:0].copy()
+assignable_area_store_ids = sorted(selected_area_rows[field_service_mask(selected_area_rows)]["id"].astype(int).tolist()) if not selected_area_rows.empty else []
 if not draw_selected.empty:
     selected_store_ids = set(draw_selected["id"].tolist())
+    non_service_draw_selected = draw_selected[~field_service_mask(draw_selected)]
+    assignable_area_store_ids = sorted(draw_selected[field_service_mask(draw_selected)]["id"].astype(int).tolist())
     st.metric("Stores inside current drawing", len(draw_selected))
+    if not non_service_draw_selected.empty:
+        st.caption(f"{len(non_service_draw_selected)} selected store(s) are marked not serviced and will stay visible but will not be assigned to this {selected_group} area.")
     if config:
         moved = draw_selected[draw_selected[config["team_field"]].notna() & (draw_selected[config["team_field"]] != selected_team_id)]
         if not moved.empty:
             st.warning(f"{len(moved)} stores are already assigned to another {selected_group} area. Saving will move them if you allow overlap/move.")
-    st.dataframe(draw_selected[["id", "store_number", "address", "city", "state"]], use_container_width=True, hide_index=True)
+    st.dataframe(draw_selected[["id", "store_number", "service_type", "address", "city", "state"]], use_container_width=True, hide_index=True)
 
 a1, a2, a3 = st.columns(3)
 allow_move = a1.checkbox("Allow moving stores from another area in this group", value=False)
@@ -4610,20 +4680,20 @@ manual_store = a2.selectbox("Manual store add/remove", store_options, format_fun
 selected_target_team = a3.selectbox("Target area", [None] + group_teams["id"].tolist() if not group_teams.empty else [None], format_func=lambda x: "Select area" if x is None else group_teams.set_index("id").loc[x, "team_name"], key="target_area")
 
 b1, b2, b3, b4 = st.columns(4)
-if b1.button("Save Drawn Stores to Selected Area", type="primary", disabled=not selected_target_team or not selected_store_ids):
+if b1.button("Save Drawn Stores to Selected Area", type="primary", disabled=not selected_target_team or not assignable_area_store_ids):
     with session_scope() as session:
         target_employee_id = pmt_employee_for_team(session, selected_target_team) if selected_group == "PMT" else (tech_1 if selected_group != "Brand Enhancement" else None)
-        for store_id in selected_store_ids:
+        for store_id in assignable_area_store_ids:
             store = session.get(Store, int(store_id))
             current = getattr(store, config["team_field"]) if config else None
             if current and current != selected_target_team and not allow_move:
                 continue
             assign_store_to_group(store, selected_group, selected_target_team, target_employee_id)
-        geometry = drawing_to_geometry_json(drawings[-1]) if drawings else polygon_from_points(stores_df[stores_df["id"].isin(selected_store_ids)])
+        geometry = drawing_to_geometry_json(drawings[-1]) if drawings else polygon_from_points(stores_df[stores_df["id"].isin(assignable_area_store_ids)])
         area = session.query(MapArea).filter(MapArea.team_id == int(selected_target_team), MapArea.area_type == selected_group, MapArea.active == True).first()
         if area:
             area.geometry_json = geometry or area.geometry_json
-            area.assigned_store_ids = json.dumps(sorted([int(value) for value in selected_store_ids]))
+            area.assigned_store_ids = json.dumps(sorted([int(value) for value in assignable_area_store_ids]))
             area.color = area.color or stable_color(str(selected_target_team))
             if selected_group == "PMT" and target_employee_id:
                 area.employee_id = int(target_employee_id)
@@ -4637,21 +4707,24 @@ if b1.button("Save Drawn Stores to Selected Area", type="primary", disabled=not 
                     employee_id=int(target_employee_id) if target_employee_id else None,
                     assignment_type=GROUPS[selected_group]["default_assignment"],
                     geometry_json=geometry or empty_polygon_json(),
-                    assigned_store_ids=json.dumps(sorted([int(value) for value in selected_store_ids])),
+                    assigned_store_ids=json.dumps(sorted([int(value) for value in assignable_area_store_ids])),
                     color=stable_color(team_name),
                     active=True,
                 )
             )
-    log_action("stores assigned from map", "stores", description=f"{len(selected_store_ids)} assigned to {selected_group} area {selected_target_team}")
+    log_action("stores assigned from map", "stores", description=f"{len(assignable_area_store_ids)} assigned to {selected_group} area {selected_target_team}")
     st.success("Assignments saved.")
     st.rerun()
 
 if b2.button("Assign Manual Store", disabled=not manual_store or not selected_target_team):
     with session_scope() as session:
         store = session.get(Store, int(manual_store))
-        target_employee_id = pmt_employee_for_team(session, selected_target_team) if selected_group == "PMT" else None
-        assign_store_to_group(store, selected_group, selected_target_team, target_employee_id)
-    st.success("Store assigned.")
+        if store and str(getattr(store, "service_type", "") or FIELD_SERVICE_STORE_TYPE).strip() != FIELD_SERVICE_STORE_TYPE:
+            st.warning("That store is marked not serviced, so it was not assigned.")
+        else:
+            target_employee_id = pmt_employee_for_team(session, selected_target_team) if selected_group == "PMT" else None
+            assign_store_to_group(store, selected_group, selected_target_team, target_employee_id)
+            st.success("Store assigned.")
     st.rerun()
 
 if b3.button("Remove Manual Store", disabled=not manual_store):
