@@ -5,6 +5,7 @@ import json
 import folium
 import pandas as pd
 import streamlit as st
+from folium.plugins import Draw
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Brand Enhancement Scheduler", layout="wide")
@@ -13,7 +14,7 @@ st.set_page_config(page_title="Brand Enhancement Scheduler", layout="wide")
 from src.database import log_action, safe_query, session_scope, teams_for_work_group
 from src.manager_rollup import manager_rollup_dataframe, manager_rollup_query, manager_rollup_totals
 from src.exports import excel_bytes
-from src.maps import map_html, render_plain_table, render_route_preview, render_store_map, stable_color
+from src.maps import map_html, render_plain_table, render_route_preview, render_store_map, stable_color, stores_within_drawings
 from src.models import MapArea, ScheduleItem, Store, Team
 from src.pdf_reports import build_pdf_report, pdf_bytes
 from src.scheduler import (
@@ -23,6 +24,7 @@ from src.scheduler import (
     haversine_miles,
     is_company_holiday,
     mark_weather_delay,
+    order_stores,
     pause_schedule,
     resume_schedule_from_date,
     save_schedule,
@@ -309,6 +311,28 @@ def selected_route_store_ids(records):
     return {int(row.get("id")) for row in records or [] if row.get("id") is not None}
 
 
+def stores_to_route_records(stores_df, brand_area=""):
+    records = []
+    if stores_df is None or stores_df.empty:
+        return records
+    for _, row in stores_df.iterrows():
+        records.append(
+            {
+                "id": int(row["id"]),
+                "store_number": row.get("store_number", ""),
+                "address": row.get("address", ""),
+                "city": row.get("city", ""),
+                "state": row.get("state", ""),
+                "zip": row.get("zip", ""),
+                "latitude": float(row["latitude"]),
+                "longitude": float(row["longitude"]),
+                "service_type": service_type_value(row),
+                "brand_area": row.get("brand_area", brand_area) or brand_area,
+            }
+        )
+    return records
+
+
 def build_manual_brand_preview(route_records, start_date, end_date, weekdays, stores_per_day):
     route_df = route_records_dataframe(route_records)
     if route_df.empty:
@@ -451,7 +475,19 @@ def render_brand_route_builder_map(stores_df, eligible_ids, route_records, selec
     </div>
     """
     fmap.get_root().html.add_child(folium.Element(legend_html))
-    map_data = st_folium(fmap, width=None, height=620, key=key, returned_objects=["last_object_clicked"])
+    Draw(
+        export=False,
+        draw_options={
+            "polyline": False,
+            "polygon": True,
+            "rectangle": True,
+            "circle": True,
+            "marker": False,
+            "circlemarker": False,
+        },
+        edit_options={"edit": True, "remove": True},
+    ).add_to(fmap)
+    map_data = st_folium(fmap, width=None, height=620, key=key, returned_objects=["last_object_clicked", "all_drawings"])
     nearest, distance = nearest_store_to_click(mapped, (map_data or {}).get("last_object_clicked"), click_tolerance_miles)
     return map_data, nearest
 
@@ -1149,6 +1185,19 @@ with tab_build:
         route_cols[2].metric("Route Stops", len(route_records))
         route_cols[3].caption("Click a store dot to add it as the next stop. Green stores are assigned to this Brand area and eligible. Hollow dashed stores are visible only because their service type is not Standard.")
 
+        auto_cols = st.columns([0.25, 0.25, 0.25, 0.25])
+        target_store_count = auto_cols[0].number_input(
+            "Stores to assign/build",
+            min_value=1,
+            max_value=max(len(eligible_ids), 1),
+            value=min(int(stores_per_day), max(len(eligible_ids), 1)),
+            step=1,
+            key="be_route_target_store_count",
+        )
+        replace_existing_route = auto_cols[1].checkbox("Replace current manual route", value=True, key="be_route_replace_from_area")
+        auto_cols[2].caption("Draw a circle, rectangle, or polygon on the map, then auto-build from stores inside it.")
+        auto_cols[3].caption(f"Auto-build uses route method: {route_label}")
+
         click_tolerance = st.slider(
             "Store click tolerance miles",
             min_value=0.25,
@@ -1165,6 +1214,36 @@ with tab_build:
             key=f"be_manual_route_map_{team_id}_{len(route_records)}",
             click_tolerance_miles=float(click_tolerance),
         )
+        drawings = (map_data or {}).get("all_drawings") if isinstance(map_data, dict) else []
+        drawn_stores = stores_within_drawings(map_stores, drawings, close_lines_as_areas=True) if drawings else pd.DataFrame()
+        drawn_eligible = pd.DataFrame()
+        if not drawn_stores.empty:
+            drawn_eligible = drawn_stores[
+                drawn_stores["id"].astype(int).isin(eligible_ids)
+                & drawn_stores.apply(is_standard_store, axis=1)
+            ].copy()
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Stores In Drawn Area", len(drawn_stores))
+            d2.metric("Eligible In Drawn Area", len(drawn_eligible))
+            d3.metric("Target Build Count", int(target_store_count))
+        if st.button(
+            "Auto Build Route From Drawn Area",
+            type="secondary",
+            disabled=drawn_eligible.empty,
+            key="be_route_auto_build_drawn_area",
+        ):
+            ordered = order_stores(drawn_eligible, direction)
+            ordered = ordered.head(int(target_store_count))
+            new_records = stores_to_route_records(ordered, selected_label)
+            if replace_existing_route:
+                st.session_state[route_state_key] = new_records
+            else:
+                existing_ids = selected_route_store_ids(route_records)
+                st.session_state[route_state_key] = route_records + [
+                    row for row in new_records if int(row.get("id", -1)) not in existing_ids
+                ]
+            st.session_state.pop(f"{route_state_key}_last_click", None)
+            st.rerun()
         click = (map_data or {}).get("last_object_clicked") if isinstance(map_data, dict) else None
         click_signature = (
             round(float(click.get("lat")), 6),
@@ -1184,18 +1263,7 @@ with tab_build:
                 st.warning(f"Store {clicked_store.get('store_number', '')} is marked {service_type_value(clicked_store)} and was not added.")
             else:
                 route_records.append(
-                    {
-                        "id": clicked_id,
-                        "store_number": clicked_store.get("store_number", ""),
-                        "address": clicked_store.get("address", ""),
-                        "city": clicked_store.get("city", ""),
-                        "state": clicked_store.get("state", ""),
-                        "zip": clicked_store.get("zip", ""),
-                        "latitude": float(clicked_store["latitude"]),
-                        "longitude": float(clicked_store["longitude"]),
-                        "service_type": service_type_value(clicked_store),
-                        "brand_area": clicked_store.get("brand_area", ""),
-                    }
+                    stores_to_route_records(pd.DataFrame([clicked_store]), selected_label)[0]
                 )
                 st.session_state[route_state_key] = route_records
                 st.session_state[f"{route_state_key}_last_click"] = click_signature
@@ -1205,21 +1273,7 @@ with tab_build:
         route_actions = st.columns([0.25, 0.25, 0.25, 0.25])
         if route_actions[0].button("Load Eligible Stores", disabled=not eligible_ids, key="be_route_load_all"):
             route_source_df = counts["pool"].copy()
-            st.session_state[route_state_key] = [
-                {
-                    "id": int(row["id"]),
-                    "store_number": row.get("store_number", ""),
-                    "address": row.get("address", ""),
-                    "city": row.get("city", ""),
-                    "state": row.get("state", ""),
-                    "zip": row.get("zip", ""),
-                    "latitude": float(row["latitude"]),
-                    "longitude": float(row["longitude"]),
-                    "service_type": row.get("service_type", "Standard"),
-                    "brand_area": selected_label,
-                }
-                for _, row in route_source_df.iterrows()
-            ]
+            st.session_state[route_state_key] = stores_to_route_records(route_source_df, selected_label)
             st.rerun()
         if route_actions[1].button("Clear Manual Route", disabled=not route_records, key="be_route_clear"):
             st.session_state.pop(route_state_key, None)
