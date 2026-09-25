@@ -363,10 +363,10 @@ def drawing_bounds(drawings):
     return min(lat_values), max(lat_values), min(lon_values), max(lon_values)
 
 
-def stores_within_adjusted_bounds(stores_df, drawings, north_miles=0, south_miles=0, east_miles=0, west_miles=0):
+def adjusted_drawing_bounds(drawings, north_miles=0, south_miles=0, east_miles=0, west_miles=0):
     bounds = drawing_bounds(drawings)
-    if bounds is None or stores_df is None or stores_df.empty:
-        return stores_df.iloc[0:0].copy() if stores_df is not None else pd.DataFrame()
+    if bounds is None:
+        return None
     min_lat, max_lat, min_lon, max_lon = bounds
     center_lat = (min_lat + max_lat) / 2
     lat_miles = 69.0
@@ -375,6 +375,14 @@ def stores_within_adjusted_bounds(stores_df, drawings, north_miles=0, south_mile
     adjusted_max_lat = max_lat + (float(north_miles or 0) / lat_miles)
     adjusted_min_lon = min_lon - (float(west_miles or 0) / lon_miles)
     adjusted_max_lon = max_lon + (float(east_miles or 0) / lon_miles)
+    return adjusted_min_lat, adjusted_max_lat, adjusted_min_lon, adjusted_max_lon
+
+
+def stores_within_adjusted_bounds(stores_df, drawings, north_miles=0, south_miles=0, east_miles=0, west_miles=0):
+    bounds = adjusted_drawing_bounds(drawings, north_miles, south_miles, east_miles, west_miles)
+    if bounds is None or stores_df is None or stores_df.empty:
+        return stores_df.iloc[0:0].copy() if stores_df is not None else pd.DataFrame()
+    adjusted_min_lat, adjusted_max_lat, adjusted_min_lon, adjusted_max_lon = bounds
     scoped = stores_df.copy()
     scoped["latitude"] = pd.to_numeric(scoped["latitude"], errors="coerce")
     scoped["longitude"] = pd.to_numeric(scoped["longitude"], errors="coerce")
@@ -428,7 +436,7 @@ def build_manual_brand_preview(route_records, start_date, end_date, weekdays, st
     return pd.DataFrame(rows)
 
 
-def render_brand_route_builder_map(stores_df, eligible_ids, route_records, selected_team_id, key, click_tolerance_miles=2.0):
+def render_brand_route_builder_map(stores_df, eligible_ids, route_records, selected_team_id, key, click_tolerance_miles=2.0, adjusted_bounds=None):
     mapped = stores_df.copy()
     if mapped.empty:
         st.info("No stores found for the map.")
@@ -443,6 +451,18 @@ def render_brand_route_builder_map(stores_df, eligible_ids, route_records, selec
     selected_ids = selected_route_store_ids(route_records)
     route_df = route_records_dataframe(route_records)
     fmap = folium.Map(location=[float(mapped["latitude"].mean()), float(mapped["longitude"].mean())], zoom_start=8, tiles="OpenStreetMap")
+    if adjusted_bounds:
+        min_lat, max_lat, min_lon, max_lon = adjusted_bounds
+        folium.Rectangle(
+            bounds=[[float(min_lat), float(min_lon)], [float(max_lat), float(max_lon)]],
+            color="#f97316",
+            weight=4,
+            fill=True,
+            fill_color="#f97316",
+            fill_opacity=0.08,
+            dash_array="8,6",
+            tooltip="Adjusted stretch boundary used for auto-build",
+        ).add_to(fmap)
 
     if not route_df.empty:
         route_points = [[float(row["latitude"]), float(row["longitude"])] for _, row in route_df.iterrows()]
@@ -1266,6 +1286,16 @@ with tab_build:
             step=0.25,
             key="be_route_click_tolerance",
         )
+        drawings_state_key = f"{route_state_key}_drawings"
+        saved_drawings = st.session_state.get(drawings_state_key, [])
+        stretch_values = [stretch_north, stretch_south, stretch_east, stretch_west]
+        adjusted_bounds = adjusted_drawing_bounds(
+            saved_drawings,
+            north_miles=float(stretch_north),
+            south_miles=float(stretch_south),
+            east_miles=float(stretch_east),
+            west_miles=float(stretch_west),
+        ) if saved_drawings and any(float(value or 0) > 0 for value in stretch_values) else None
         map_data, clicked_store = render_brand_route_builder_map(
             map_stores,
             eligible_ids,
@@ -1273,8 +1303,13 @@ with tab_build:
             team_id,
             key=f"be_manual_route_map_{team_id}",
             click_tolerance_miles=float(click_tolerance),
+            adjusted_bounds=adjusted_bounds,
         )
         drawings = (map_data or {}).get("all_drawings") if isinstance(map_data, dict) else []
+        if drawings:
+            st.session_state[drawings_state_key] = drawings
+        elif saved_drawings:
+            drawings = saved_drawings
         drawn_stores = stores_within_drawings(map_stores, drawings, close_lines_as_areas=True) if drawings else pd.DataFrame()
         stretched_stores = stores_within_adjusted_bounds(
             map_stores,
@@ -1283,7 +1318,7 @@ with tab_build:
             south_miles=float(stretch_south),
             east_miles=float(stretch_east),
             west_miles=float(stretch_west),
-        ) if drawings and any(float(value or 0) > 0 for value in [stretch_north, stretch_south, stretch_east, stretch_west]) else pd.DataFrame()
+        ) if drawings and any(float(value or 0) > 0 for value in stretch_values) else pd.DataFrame()
         added_by_stretch = 0
         if not stretched_stores.empty:
             drawn_ids_before_stretch = set(drawn_stores["id"].dropna().astype(int).tolist()) if not drawn_stores.empty else set()
@@ -1324,6 +1359,10 @@ with tab_build:
                 ]
             st.session_state.pop(f"{route_state_key}_last_click", None)
             st.rerun()
+        drawn_route_records = []
+        if not drawn_eligible.empty:
+            drawn_ordered = order_stores(drawn_eligible, direction).head(int(target_store_count))
+            drawn_route_records = stores_to_route_records(drawn_ordered, selected_label)
         click = (map_data or {}).get("last_object_clicked") if isinstance(map_data, dict) else None
         click_signature = (
             round(float(click.get("lat")), 6),
@@ -1432,13 +1471,16 @@ with tab_build:
             disabled_reason = "Generate Draft is disabled because no work days are selected."
         elif counts["pool"].empty:
             disabled_reason = "Generate Draft is disabled because no eligible stores are available with the current filters."
-        elif route_source == "Manual map route" and not st.session_state.get(route_state_key):
-            disabled_reason = "Generate Draft is disabled because Manual map route is selected but no route stops have been chosen."
+        elif route_source == "Manual map route" and not st.session_state.get(route_state_key) and not drawn_route_records:
+            disabled_reason = "Generate Draft is disabled because Manual map route is selected but no route stops or drawn-area stores have been chosen."
         if disabled_reason:
             st.warning(disabled_reason)
         if st.button("Generate Draft Schedule", type="primary", disabled=bool(disabled_reason), key="be_generate_draft"):
             if route_source == "Manual map route":
-                preview = build_manual_brand_preview(st.session_state.get(route_state_key, []), start, end, weekdays, int(stores_per_day))
+                manual_route_records = st.session_state.get(route_state_key, []) or drawn_route_records
+                if not st.session_state.get(route_state_key) and drawn_route_records:
+                    st.session_state[route_state_key] = drawn_route_records
+                preview = build_manual_brand_preview(manual_route_records, start, end, weekdays, int(stores_per_day))
             else:
                 preview = build_schedule_preview(counts["pool"], start, end, weekdays, int(stores_per_day), direction)
             if preview.empty:
