@@ -3278,7 +3278,7 @@ if selected_group:
         [None] + group_teams["id"].tolist() if not group_teams.empty else [None],
         format_func=lambda x: "No area selected" if x is None else group_teams.set_index("id").loc[x, "team_name"],
     )
-    task_options = ["View", "Create Area", "Edit Selected Area", "Auto Assign Stores"] if selected_group == "Brand Enhancement" else ["View", "Edit Assignments"]
+    task_options = ["View", "Create Area", "Edit Selected Area"] if selected_group == "Brand Enhancement" else ["View", "Edit Assignments"]
 else:
     group_teams = pd.DataFrame()
     current_area_id = None
@@ -3286,7 +3286,7 @@ else:
     task_options = ["View"]
 task_index = task_options.index(st.session_state.get("map_task", "View")) if st.session_state.get("map_task", "View") in task_options else 0
 map_task = control_cols[2].selectbox("Task", task_options, index=task_index)
-map_scope_default = "Selected + Unassigned" if map_task in ("Create Area", "Edit Selected Area", "Edit Assignments") else "Selected/Assigned"
+map_scope_default = "Selected + Unassigned" if selected_group == "Brand Enhancement" or map_task in ("Create Area", "Edit Selected Area", "Edit Assignments") else "Selected/Assigned"
 map_scope_options = ["Selected + Unassigned", "Unassigned Only", "Selected/Assigned", "All Stores"]
 map_scope = control_cols[3].selectbox(
     "Map store scope",
@@ -4756,7 +4756,15 @@ a1, a2, a3 = st.columns(3)
 allow_move = a1.checkbox("Allow moving stores from another area in this group", value=False)
 store_options = visible_stores["id"].tolist() if not visible_stores.empty else []
 manual_store = a2.selectbox("Manual store add/remove", store_options, format_func=lambda x: f"{visible_stores.set_index('id').loc[x, 'store_number']} - {visible_stores.set_index('id').loc[x, 'city']}" if store_options else "", key="manual_store")
-selected_target_team = a3.selectbox("Target area", [None] + group_teams["id"].tolist() if not group_teams.empty else [None], format_func=lambda x: "Select area" if x is None else group_teams.set_index("id").loc[x, "team_name"], key="target_area")
+target_area_options = [None] + group_teams["id"].tolist() if not group_teams.empty else [None]
+target_area_default = int(selected_team_id) if selected_team_id and int(selected_team_id) in target_area_options else None
+selected_target_team = a3.selectbox(
+    "Save drawn stores to area",
+    target_area_options,
+    index=target_area_options.index(target_area_default) if target_area_default in target_area_options else 0,
+    format_func=lambda x: "Select area" if x is None else group_teams.set_index("id").loc[x, "team_name"],
+    key=f"target_area_{selected_group}_{selected_team_id or 'none'}",
+)
 target_cols = st.columns([0.22, 0.20, 0.58])
 area_target_count = target_cols[0].number_input(
     "Stores to assign",
@@ -4767,7 +4775,7 @@ area_target_count = target_cols[0].number_input(
     key=f"{selected_group}_area_target_count",
 )
 use_assignment_target = target_cols[1].checkbox("Limit to target count", value=True, key=f"{selected_group}_limit_drawn_assignment")
-target_cols[2].caption("Draw around the city/section, set the store count for this team, then save only that many stores to the target area.")
+target_cols[2].caption("Draw around the city/section, set the store count for this area, then save. The selected area above is the save target.")
 with st.expander("Easy boundary stretch", expanded=False):
     st.caption("Use these if dragging the drawn shape is awkward. North / Up pulls the boundary higher on the map.")
     stretch_cols = st.columns(4)
@@ -4926,6 +4934,13 @@ if b4.button("Clear Saved Polygon", disabled=not clear_polygon_team or not selec
     st.rerun()
 
 st.divider()
+if selected_group == "Brand Enhancement":
+    with st.expander("Advanced bulk auto-assign", expanded=False):
+        st.warning("Bulk Auto Assign can reassign many Brand Enhancement stores across multiple areas. Use the drawn map save above for a single technician/area like Jason.")
+        show_bulk_auto_assign = st.checkbox("Show bulk Auto Assign tools", value=False, key="show_brand_bulk_auto_assign")
+    if not show_bulk_auto_assign:
+        st.stop()
+
 st.subheader("Auto Assign Stores")
 auto_cols = st.columns([0.50, 0.50])
 auto_group = auto_cols[0].selectbox("Auto assign group", ["Brand Enhancement", "PMT", "Calibration"], index=["Brand Enhancement", "PMT", "Calibration"].index(selected_group) if selected_group in GROUPS else 0)
@@ -4936,7 +4951,8 @@ if auto_group == "Calibration":
         st.success(f"Prepared {touched} Calibration technician area(s). Use Preview Auto Assign to split stores across them.")
         st.rerun()
 auto_teams = teams_for_group(team_df, stores_df, auto_group)
-included_team_ids = auto_cols[1].multiselect("Teams to include", auto_teams["id"].tolist() if not auto_teams.empty else [], default=auto_teams["id"].tolist() if not auto_teams.empty else [], format_func=lambda x: auto_teams.set_index("id").loc[x, "team_name"] if not auto_teams.empty else "")
+default_auto_team_ids = [int(selected_team_id)] if selected_group == "Brand Enhancement" and selected_team_id else (auto_teams["id"].tolist() if not auto_teams.empty else [])
+included_team_ids = auto_cols[1].multiselect("Teams to include", auto_teams["id"].tolist() if not auto_teams.empty else [], default=default_auto_team_ids, format_func=lambda x: auto_teams.set_index("id").loc[x, "team_name"] if not auto_teams.empty else "")
 selected_auto_teams = auto_teams[auto_teams["id"].isin(included_team_ids)] if not auto_teams.empty else auto_teams
 anchor_issues = auto_assign_anchor_issues(selected_auto_teams, stores_df)
 st.caption("Auto Assign assigns each store to the nearest selected team city/state anchor. It does not rebalance counts, so stores stay with the closest area instead of jumping across other stores.")
