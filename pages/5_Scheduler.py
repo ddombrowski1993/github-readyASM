@@ -266,6 +266,31 @@ def brand_route_map_stores():
     )
 
 
+def brand_manual_route_pool(exclude_completed, work_type):
+    sql = """
+        select s.id, s.store_number, s.address, s.city, s.state, s.zip, s.latitude, s.longitude,
+               coalesce(s.service_type, 'Standard') as service_type,
+               s.store_status,
+               s.assigned_brand_team_id,
+               coalesce(t.team_name, 'Unassigned') as brand_area
+        from stores s
+        left join teams t on t.id = s.assigned_brand_team_id
+        where s.active = true
+          and coalesce(s.service_type, 'Standard') = 'Standard'
+          and s.latitude is not null and s.longitude is not null
+          and not exists (
+              select 1 from schedule_items si
+              where si.store_id = s.id
+                and si.work_type = :work_type
+                and si.status in ('Scheduled','Completed')
+          )
+    """
+    if exclude_completed:
+        sql += " and coalesce(s.store_status,'') <> 'Completed'"
+    sql += " order by s.store_number"
+    return safe_query(sql, {"work_type": work_type}, use_cache=False)
+
+
 def service_type_value(row):
     value = str(row.get("service_type") or "Standard").strip()
     return value or "Standard"
@@ -1198,7 +1223,7 @@ with tab_build:
             status_badge("Date range", "Valid" if start <= end else "Must fix", "green" if start <= end else "red")
 
         if counts["assigned"] == 0 and not include_unassigned:
-            st.error("No Brand Enhancement stores are assigned to this area. Assign stores in Areas and Maps before building a schedule.")
+            st.warning("No Brand Enhancement stores are assigned to this area yet. Automatic routing needs assigned stores, but Manual map route can still schedule eligible Standard stores you draw/select for this team.")
         if missing_coord_count:
             with st.expander(f"Fix Problems: {missing_coord_count} store(s) missing coordinates", expanded=False):
                 st.dataframe(counts["missing_coords"], use_container_width=True, hide_index=True)
@@ -1246,16 +1271,17 @@ with tab_build:
             key="be_route_source",
         )
         map_stores = brand_route_map_stores()
-        eligible_ids = set(counts["pool"]["id"].dropna().astype(int).tolist()) if not counts["pool"].empty else set()
+        manual_pool = brand_manual_route_pool(exclude_completed, work_type)
+        eligible_ids = set(manual_pool["id"].dropna().astype(int).tolist()) if not manual_pool.empty else set()
         route_records = st.session_state.get(route_state_key, [])
         route_records = [row for row in route_records if int(row.get("id", -1)) in eligible_ids]
         st.session_state[route_state_key] = route_records
 
         route_cols = st.columns([0.18, 0.18, 0.18, 0.46])
         route_cols[0].metric("Map Stores", len(map_stores))
-        route_cols[1].metric("Eligible To Schedule", len(eligible_ids))
+        route_cols[1].metric("Manual Eligible Stores", len(eligible_ids))
         route_cols[2].metric("Route Stops", len(route_records))
-        route_cols[3].caption("Click a store dot to add it as the next stop. Green stores are assigned to this Brand area and eligible. Hollow dashed stores are visible only because their service type is not Standard.")
+        route_cols[3].caption("Click or draw around Standard stores to schedule them to the selected Brand team. They do not have to be preassigned to that Brand area for manual routing.")
 
         auto_cols = st.columns([0.25, 0.25, 0.25, 0.25])
         target_store_count = auto_cols[0].number_input(
@@ -1391,7 +1417,7 @@ with tab_build:
         route_df = route_records_dataframe(route_records)
         route_actions = st.columns([0.25, 0.25, 0.25, 0.25])
         if route_actions[0].button("Load Eligible Stores", disabled=not eligible_ids, key="be_route_load_all"):
-            route_source_df = counts["pool"].copy()
+            route_source_df = manual_pool.copy()
             st.session_state[route_state_key] = stores_to_route_records(route_source_df, selected_label)
             st.rerun()
         if route_actions[1].button("Clear Manual Route", disabled=not route_records, key="be_route_clear"):
@@ -1463,13 +1489,14 @@ with tab_build:
     with st.container(border=True):
         step_header(5, "Generate Draft Schedule", "Generate a draft from the selected area, validation checks, and schedule settings.", "green")
         disabled_reason = ""
-        if must_fix:
+        manual_route_available = route_source == "Manual map route" and bool(st.session_state.get(route_state_key) or drawn_route_records)
+        if must_fix and not manual_route_available:
             disabled_reason = "Generate Draft is disabled because no Brand Enhancement stores are assigned."
         elif start > end:
             disabled_reason = "Generate Draft is disabled because the start date is after the end date."
         elif not weekdays:
             disabled_reason = "Generate Draft is disabled because no work days are selected."
-        elif counts["pool"].empty:
+        elif counts["pool"].empty and not manual_route_available:
             disabled_reason = "Generate Draft is disabled because no eligible stores are available with the current filters."
         elif route_source == "Manual map route" and not st.session_state.get(route_state_key) and not drawn_route_records:
             disabled_reason = "Generate Draft is disabled because Manual map route is selected but no route stops or drawn-area stores have been chosen."
