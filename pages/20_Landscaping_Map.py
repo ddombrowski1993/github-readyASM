@@ -1,5 +1,6 @@
 import importlib
 import io
+import traceback
 from html import escape
 
 import folium
@@ -9,7 +10,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(page_title="Landscaping Map", layout="wide")
 
-from src.database import ensure_runtime_schema_compatibility, log_action
+from src.database import log_action
 from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, sidebar_nav
 
 try:
@@ -182,14 +183,15 @@ def render_landscaping_map(df, show_dots=True, show_territories=True, show_label
 apply_theme()
 sidebar_nav()
 ensure_database_or_stop()
-ensure_runtime_schema_compatibility()
+page_header("Landscaping Map", "Upload landscaping vendor assignments and view vendor coverage by geography.")
 try:
     landscaping.ensure_landscaping_tables()
 except Exception as exc:
-    st.error(f"Landscaping database setup failed: {exc}")
+    st.error("Landscaping database setup failed.")
+    st.code(f"{type(exc).__name__}: {exc}", language="text")
+    with st.expander("Full setup traceback", expanded=True):
+        st.code(traceback.format_exc(), language="text")
     st.stop()
-
-page_header("Landscaping Map", "Upload landscaping vendor assignments and view vendor coverage by geography.")
 
 with st.expander("Import / Update Landscaping Assignments", expanded=True):
     upload = st.file_uploader("Upload Landscaping Assignment File", type=["xlsx", "xls", "xlsm", "csv"], key="landscaping_upload")
