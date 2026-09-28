@@ -1,4 +1,5 @@
 import importlib
+import io
 from html import escape
 
 import folium
@@ -9,8 +10,6 @@ from streamlit_folium import st_folium
 st.set_page_config(page_title="Landscaping Map", layout="wide")
 
 from src.database import ensure_runtime_schema_compatibility, log_action
-from src.exports import csv_bytes, excel_bytes
-from src.maps import center_for, stable_color
 from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, sidebar_nav
 
 try:
@@ -18,6 +17,24 @@ try:
 except Exception as exc:
     st.error(f"Landscaping feature load failed: {exc}")
     st.stop()
+
+
+def excel_bytes(df):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Report")
+    return buffer.getvalue()
+
+
+def csv_bytes(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def center_for(df):
+    valid = df.dropna(subset=["latitude", "longitude"])
+    if valid.empty:
+        return [41.4993, -81.6944]
+    return [float(valid["latitude"].mean()), float(valid["longitude"].mean())]
 
 
 def current_user_label():
@@ -57,7 +74,7 @@ def color_for_row(row):
     if color:
         return color
     vendor = str(row.get("landscaping_vendor") or "").strip()
-    return stable_color(vendor) if vendor else "#9ca3af"
+    return landscaping.stable_color(vendor) if vendor else "#9ca3af"
 
 
 def map_popup(row):

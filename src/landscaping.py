@@ -1,13 +1,11 @@
 import json
+import hashlib
 import re
 from collections import defaultdict, deque
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
-
-from src.imports import clean_store_number
-from src.maps import PALETTE, haversine_miles, stable_color
-from src.smart_import import clean_text, mapped_dataframe, scan_workbook
 
 
 STORE_ALIASES = ["Store Number", "Store #", "Store", "Site Number", "Site #", "Site"]
@@ -19,6 +17,86 @@ LOCATION_ALIASES = {
     "state": ["State", "ST", "Store State", "Location State"],
     "zip": ["ZIP", "Zip Code", "Postal Code", "Postal"],
 }
+PALETTE = [
+    "#2563eb",
+    "#dc2626",
+    "#16a34a",
+    "#7c3aed",
+    "#ea580c",
+    "#0891b2",
+    "#be123c",
+    "#4f46e5",
+    "#0f766e",
+    "#ca8a04",
+    "#9333ea",
+    "#0284c7",
+    "#65a30d",
+    "#c026d3",
+    "#db2777",
+    "#475569",
+]
+
+
+def clean_text(value):
+    text = "" if pd.isna(value) else str(value)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_identifier(value):
+    text = clean_text(value)
+    if text.endswith(".0"):
+        text = text[:-2]
+    return "" if text.lower() == "nan" else text
+
+
+def clean_store_number(value):
+    text = clean_identifier(value)
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+    elif re.fullmatch(r"\d+\.\d+", text):
+        return ""
+    if re.fullmatch(r"\d{4,6}", text):
+        return text
+    match = re.search(r"(?<![\d.])(\d{4,6})(?![\d.])", text)
+    return match.group(1) if match else ""
+
+
+def stable_color(value):
+    if not value:
+        return "#9ca3af"
+    digest = hashlib.md5(str(value).encode("utf-8")).hexdigest()
+    return PALETTE[int(digest[:2], 16) % len(PALETTE)]
+
+
+def haversine_miles(lat1, lon1, lat2, lon2):
+    from math import asin, cos, radians, sin, sqrt
+
+    radius = 3958.8
+    d_lat = radians(float(lat2) - float(lat1))
+    d_lon = radians(float(lon2) - float(lon1))
+    a = sin(d_lat / 2) ** 2 + cos(radians(float(lat1))) * cos(radians(float(lat2))) * sin(d_lon / 2) ** 2
+    return 2 * radius * asin(sqrt(a))
+
+
+def make_unique_columns(columns):
+    counts = {}
+    unique = []
+    for column in columns:
+        name = clean_text(column) or "Column"
+        counts[name] = counts.get(name, 0) + 1
+        unique.append(name if counts[name] == 1 else f"{name} {counts[name]}")
+    return unique
+
+
+def dataframe_from_raw(raw, header_row):
+    if raw is None or raw.empty or int(header_row) >= len(raw.index):
+        return pd.DataFrame()
+    headers = make_unique_columns(raw.iloc[int(header_row)].tolist())
+    df = raw.iloc[int(header_row) + 1 :].copy()
+    df.columns = headers
+    return df.dropna(how="all").fillna("").reset_index(drop=True)
 
 
 def ensure_landscaping_tables():
@@ -120,6 +198,86 @@ def find_column(columns, aliases, fallback_index=None):
     if fallback_index is not None and 0 <= int(fallback_index) < len(columns):
         return list(columns)[int(fallback_index)]
     return ""
+
+
+def _read_raw_upload(uploaded_file, sheet_name=None):
+    uploaded_file.seek(0)
+    suffix = Path(uploaded_file.name or "").suffix.lower()
+    if suffix == ".csv":
+        try:
+            return pd.read_csv(uploaded_file, header=None, dtype=str, sep=None, engine="python").fillna("")
+        except Exception:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, header=None, dtype=str).fillna("")
+    return pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, dtype=str).fillna("")
+
+
+def _sheet_names(uploaded_file):
+    suffix = Path(uploaded_file.name or "").suffix.lower()
+    if suffix == ".csv":
+        return ["CSV file"]
+    uploaded_file.seek(0)
+    return pd.ExcelFile(uploaded_file).sheet_names
+
+
+def _best_header_row(raw):
+    best_row = 0
+    best_score = -1
+    for row_number in range(min(30, len(raw.index))):
+        header_values = [clean_text(value) for value in raw.iloc[row_number].tolist()]
+        header_blob = " ".join(header_values)
+        score = 0
+        if find_column(header_values, STORE_ALIASES):
+            score += 1000
+        if find_column(header_values, LANDSCAPING_ALIASES):
+            score += 1200
+        score += sum(1 for value in header_values if value) * 2
+        score += max(0, min(100, len(raw.index) - row_number))
+        if "landscap" in header_key(header_blob):
+            score += 300
+        if score > best_score:
+            best_score = score
+            best_row = row_number
+    return best_row, max(best_score, 0)
+
+
+def mapped_dataframe(df, mapping):
+    mapped = pd.DataFrame(index=df.index)
+    for field, column in mapping.items():
+        if column and column in df.columns:
+            mapped[field] = df[column].map(clean_text)
+    if "store_number" in mapped.columns:
+        mapped["store_number"] = mapped["store_number"].map(lambda value: clean_store_number(value) or clean_identifier(value))
+    return mapped.fillna("")
+
+
+def scan_workbook(uploaded_file, import_type=None):
+    results = []
+    for sheet_name in _sheet_names(uploaded_file):
+        raw = _read_raw_upload(uploaded_file, sheet_name if sheet_name != "CSV file" else None)
+        if raw.empty:
+            continue
+        header_row, score = _best_header_row(raw)
+        df = dataframe_from_raw(raw, header_row)
+        results.append(
+            {
+                "sheet": sheet_name,
+                "header_row": header_row,
+                "header_confidence": score,
+                "df": df,
+                "mapping": {},
+                "candidates": [],
+                "ambiguous": [],
+                "score": score + len(df),
+                "rows": len(df),
+                "columns": len(df.columns),
+                "warning": "",
+                "error": "",
+                "technical_detail": "",
+            }
+        )
+    results.sort(key=lambda item: item["score"], reverse=True)
+    return results
 
 
 def landscaping_color_for_name(name, used_colors=None):
