@@ -100,15 +100,15 @@ def dataframe_from_raw(raw, header_row):
 
 
 def ensure_landscaping_tables():
-    from src.database import _apply_workspace_search_path, get_database_url, get_engine
+    from src.database import ensure_workspace_schema, get_database_url, get_engine
     from sqlalchemy import text
 
-    engine = get_engine(get_database_url())
+    schema = ensure_workspace_schema()
+    engine = get_engine(get_database_url(), schema=schema)
     vendor_id_type = "integer primary key autoincrement" if engine.dialect.name == "sqlite" else "serial primary key"
     timestamp_type = "timestamp"
     active_default = "1" if engine.dialect.name == "sqlite" else "true"
     with engine.begin() as conn:
-        _apply_workspace_search_path(conn)
         conn.execute(
             text(
                 f"""
