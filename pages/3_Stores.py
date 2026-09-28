@@ -310,7 +310,9 @@ if selected_section == "Store List":
         city_options.extend(city_summary["city"].tolist())
     city = c1.selectbox("City", city_options, key="store_list_city_filter")
     status = c2.selectbox("Status", ["All"] + sorted(stores["store_status"].dropna().unique().tolist()) if not stores.empty else ["All"])
-    service_type_filter = c3.selectbox("Service Type", ["All"] + sorted(stores["service_type"].dropna().unique().tolist()) if not stores.empty else ["All"])
+    existing_service_types = sorted(stores["service_type"].dropna().unique().tolist()) if not stores.empty else []
+    service_type_options = ["All"] + sorted(set(STORE_SERVICE_TYPES + existing_service_types))
+    service_type_filter = c3.selectbox("Service Type", service_type_options)
     filtered = stores.copy()
     if city == "Missing City":
         filtered = filtered[filtered["city"].fillna("").astype(str).str.strip() == ""]
@@ -634,6 +636,7 @@ if selected_section == "Add Individual Store Manually":
         manual_city = c3.text_input("City", key="manual_store_city")
         manual_state = c4.text_input("State", key="manual_store_state")
         manual_zip = c5.text_input("ZIP", key="manual_store_zip")
+        manual_service_type = st.selectbox("Service Type", STORE_SERVICE_TYPES, key="manual_store_service_type")
         submitted = st.form_submit_button("Find Coordinates and Save Store")
 
     cleaned_store_number = clean_store_number(manual_store_number)
@@ -701,7 +704,9 @@ if selected_section == "Add Individual Store Manually":
             store.longitude = float(lookup_result["longitude"])
             store.store_status = store.store_status or "Not Started"
             store.priority = store.priority or "Medium"
-            store.service_type = store.service_type or "Standard"
+            store.service_type = normalize_service_type(manual_service_type)
+            if store.service_type in NON_FIELD_SERVICE_TYPES:
+                clear_field_service_for_store(session, store)
             store.notes = store.notes or ""
             store.active = True
             if created:
