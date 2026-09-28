@@ -1,3 +1,4 @@
+import importlib
 from html import escape
 
 import folium
@@ -9,23 +10,14 @@ st.set_page_config(page_title="Landscaping Map", layout="wide")
 
 from src.database import ensure_runtime_schema_compatibility, log_action
 from src.exports import csv_bytes, excel_bytes
-from src.landscaping import (
-    LANDSCAPING_ALIASES,
-    LOCATION_ALIASES,
-    SCHEDULE_ALIASES,
-    STORE_ALIASES,
-    apply_landscaping_import,
-    build_landscaping_preview,
-    ensure_landscaping_tables,
-    find_column,
-    landscaping_assignments_df,
-    manual_assign_store,
-    scan_landscaping_workbook,
-    territory_shapes,
-    vendor_summary,
-)
 from src.maps import center_for, stable_color
 from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, sidebar_nav
+
+try:
+    landscaping = importlib.import_module("src.landscaping")
+except Exception as exc:
+    st.error(f"Landscaping feature load failed: {exc}")
+    st.stop()
 
 
 def current_user_label():
@@ -113,7 +105,7 @@ def render_landscaping_map(df, show_dots=True, show_territories=True, show_label
         return {}
     fmap = folium.Map(location=center_for(mapped), zoom_start=7, tiles="OpenStreetMap")
     if show_territories:
-        for shape in territory_shapes(mapped):
+        for shape in landscaping.territory_shapes(mapped):
             label = shape["vendor"]
             color = shape["color"]
             if shape["hull"]:
@@ -175,7 +167,7 @@ sidebar_nav()
 ensure_database_or_stop()
 ensure_runtime_schema_compatibility()
 try:
-    ensure_landscaping_tables()
+    landscaping.ensure_landscaping_tables()
 except Exception as exc:
     st.error(f"Landscaping database setup failed: {exc}")
     st.stop()
@@ -185,7 +177,7 @@ page_header("Landscaping Map", "Upload landscaping vendor assignments and view v
 with st.expander("Import / Update Landscaping Assignments", expanded=True):
     upload = st.file_uploader("Upload Landscaping Assignment File", type=["xlsx", "xls", "xlsm", "csv"], key="landscaping_upload")
     if upload:
-        scans = scan_landscaping_workbook(upload)
+        scans = landscaping.scan_landscaping_workbook(upload)
         scan_options = [
             item
             for item in scans
@@ -199,12 +191,12 @@ with st.expander("Import / Update Landscaping Assignments", expanded=True):
         scan = next(item for item in scan_options if item["sheet"] == selected_sheet)
         incoming = scan["df"]
         auto_mapping = {
-            "store_number": scan.get("store_column") or find_column(incoming.columns, STORE_ALIASES, fallback_index=0),
-            "landscaping_vendor": scan.get("landscaping_column") or find_column(incoming.columns, LANDSCAPING_ALIASES, fallback_index=22 if len(incoming.columns) > 22 else None),
-            "landscaping_schedule": scan.get("schedule_column") or find_column(incoming.columns, SCHEDULE_ALIASES),
+            "store_number": scan.get("store_column") or landscaping.find_column(incoming.columns, landscaping.STORE_ALIASES, fallback_index=0),
+            "landscaping_vendor": scan.get("landscaping_column") or landscaping.find_column(incoming.columns, landscaping.LANDSCAPING_ALIASES, fallback_index=22 if len(incoming.columns) > 22 else None),
+            "landscaping_schedule": scan.get("schedule_column") or landscaping.find_column(incoming.columns, landscaping.SCHEDULE_ALIASES),
         }
-        for field, aliases in LOCATION_ALIASES.items():
-            auto_mapping[field] = find_column(incoming.columns, aliases)
+        for field, aliases in landscaping.LOCATION_ALIASES.items():
+            auto_mapping[field] = landscaping.find_column(incoming.columns, aliases)
         st.caption(
             f"Header row detected: {scan['header_row'] + 1}. Rows detected: {scan['rows']:,}. "
             f"Store Number column detected: {auto_mapping.get('store_number') or 'Not detected'}. "
@@ -231,7 +223,7 @@ with st.expander("Import / Update Landscaping Assignments", expanded=True):
         if not auto_mapping.get("store_number") or not auto_mapping.get("landscaping_vendor"):
             st.error("Choose both Store Number and Landscaping Vendor before previewing this file.")
         else:
-            preview, preview_summary = build_landscaping_preview(incoming, auto_mapping)
+            preview, preview_summary = landscaping.build_landscaping_preview(incoming, auto_mapping)
             st.session_state["landscaping_preview"] = preview
             st.session_state["landscaping_preview_summary"] = preview_summary
             st.session_state["landscaping_upload_name"] = upload.name
@@ -251,7 +243,7 @@ with st.expander("Import / Update Landscaping Assignments", expanded=True):
             if preview_summary.get("blank_vendor_rows"):
                 st.info("Safe Update is on. Blank landscaping values in the upload will not erase existing assignments.")
             if st.button("Import Landscaping Assignments", type="primary"):
-                result = apply_landscaping_import(preview, upload.name, imported_by=current_user_label(), safe_update=True)
+                result = landscaping.apply_landscaping_import(preview, upload.name, imported_by=current_user_label(), safe_update=True)
                 st.session_state["landscaping_import_result"] = result
                 log_action(
                     "landscaping import",
@@ -269,7 +261,7 @@ if st.session_state.get("landscaping_import_result"):
             st.subheader("Unmatched Stores")
             st.dataframe(pd.DataFrame(result["unmatched"]), use_container_width=True, hide_index=True)
 
-data = landscaping_assignments_df()
+data = landscaping.landscaping_assignments_df()
 if data.empty:
     st.info("No active stores were found. Upload the master store database before using the Landscaping Map.")
     st.stop()
@@ -278,7 +270,7 @@ data["landscaping_vendor"] = data["landscaping_vendor"].fillna("")
 data["vendor_label"] = data["landscaping_vendor"].replace("", "Unassigned")
 data["dot_color"] = data.apply(color_for_row, axis=1)
 
-summary_df = vendor_summary(data)
+summary_df = landscaping.vendor_summary(data)
 assigned_count = int(data["landscaping_vendor"].astype(str).str.strip().ne("").sum())
 unassigned_count = int(len(data) - assigned_count)
 largest = summary_df[summary_df["Landscaping Vendor"] != "Unassigned"].head(1)
@@ -335,7 +327,7 @@ with left:
     )
 with right:
     colors = data.groupby("vendor_label")["dot_color"].first().to_dict()
-    render_legend(vendor_summary(filtered), colors)
+    render_legend(landscaping.vendor_summary(filtered), colors)
 
 export_cols = [
     "store_number",
@@ -392,7 +384,7 @@ with st.expander("Selected Store / Manual Landscaping Correction", expanded=Fals
         schedule = st.text_input("Landscaping Schedule", value=str(selected_row.get("landscaping_schedule") or ""))
         final_vendor = new_vendor.strip() or selected_vendor
         if st.button("Save Landscaping Assignment"):
-            manual_assign_store(int(selected_store_id), final_vendor, schedule=schedule)
+            landscaping.manual_assign_store(int(selected_store_id), final_vendor, schedule=schedule)
             log_action("landscaping assignment manually updated", "store_landscaping_assignments", int(selected_store_id), f"Store {selected_row['store_number']} set to {final_vendor or 'Unassigned'}.")
             st.success("Landscaping assignment saved.")
             st.rerun()
