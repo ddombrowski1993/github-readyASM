@@ -3529,7 +3529,12 @@ if assignment_editor_message:
         st.warning("PMT Schedule Reconciliation Required. Store ownership was updated, but PMT schedule rows were not changed.")
 
 control_cols = st.columns([0.25, 0.25, 0.25, 0.25])
-view_mode = control_cols[0].selectbox("Select Work Group View", ["All Stores Overview", "Brand Enhancement", "PMT", "Calibration"])
+view_mode = control_cols[0].selectbox("Select Work Group View", ["All Stores Overview", "Brand Enhancement", "PMT", "Calibration", "Landscaping Map"])
+if view_mode == "Landscaping Map":
+    if hasattr(st, "switch_page"):
+        st.switch_page("pages/20_Landscaping_Map.py")
+    st.page_link("pages/20_Landscaping_Map.py", label="Open Landscaping Map")
+    st.stop()
 selected_group = None if view_mode == "All Stores Overview" else view_mode
 config = group_config(selected_group)
 if selected_group:
