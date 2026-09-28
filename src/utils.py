@@ -904,6 +904,7 @@ def sidebar_nav():
         return
     st.sidebar.markdown('<div class="sidebar-app-title">FIELD PLANNER</div>', unsafe_allow_html=True)
     st.sidebar.markdown('<div class="sidebar-app-subtitle">Field work project management</div>', unsafe_allow_html=True)
+    st.sidebar.caption("Build: c131c65 CODO")
     accounts = accessible_accounts_for_current_user()
     account_role = st.session_state.get("account_role", "User")
     managed_accounts = [
