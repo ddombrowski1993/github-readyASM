@@ -2,6 +2,7 @@ import json
 import re
 import uuid
 from datetime import date, datetime, timedelta
+from html import escape
 from math import atan2
 from math import ceil
 from math import cos, radians
@@ -53,6 +54,12 @@ GROUPS = {
     },
 }
 FIELD_SERVICE_STORE_TYPE = "Standard"
+STORE_ASSIGNMENT_EDITOR_GROUPS = ["PMT", "Brand Enhancement", "Calibration"]
+ROLE_MATCHES = {
+    "PMT": {"pmt", "pm technician", "pmt technician", "preventive maintenance technician", "preventative maintenance technician"},
+    "Brand Enhancement": {"brand", "brand enhancement", "brand enhancement technician", "brand technician", "bet", "afm"},
+    "Calibration": {"calibration", "calibration technician", "cal tech", "calibration tech"},
+}
 TECHNICIAN_CONTRAST_PALETTE = [
     "#e11d48",
     "#2563eb",
@@ -1329,19 +1336,7 @@ def render_area_manager_map(
             tooltip_assignment = f"Brand Area: {brand_area}"
         else:
             tooltip_assignment = f"PMT Technician: {pmt_person}"
-        popup = f"""
-        <b>Store {row.get('store_number','')}</b><br>
-        {row.get('address','')}<br>
-        {row.get('city','')}, {row.get('state','')} {row.get('zip','')}<br><br>
-        Service Type: {service_type}<br>
-        {"Not serviced by field teams<br>" if not is_service_store else ""}
-        Brand Enhancement: {brand_area}<br>
-        PMT Technician: {pmt_person}<br>
-        PMT Area: {pmt_area}<br>
-        Calibration Technician: {calibration_person}<br>
-        Calibration Area: {calibration_area}<br><br>
-        Use the manual add/remove controls below the map to change this store.
-        """
+        popup = map_popup_html(row)
         folium.CircleMarker(
             [float(row["latitude"]), float(row["longitude"])],
             radius=8 if store_id in include_ids else 7 if store_id in excluded_ids or state in ("selected", "current_area") else (6 if not is_service_store else 5),
@@ -1383,7 +1378,7 @@ def render_area_manager_map(
             edit_options={"edit": True, "remove": True},
         ).add_to(fmap)
 
-    returned_objects = ["all_drawings"] if enable_draw else []
+    returned_objects = ["last_object_clicked", "all_drawings"] if enable_draw else ["last_object_clicked"]
     return fmap, st_folium(fmap, width=None, height=620, key=key, returned_objects=returned_objects)
 
 
@@ -1723,6 +1718,209 @@ def assign_store_to_group(store, group, team_id=None, employee_id=None, change_s
     setattr(store, config["team_field"], int(team_id) if team_id else None)
     if employee_id:
         setattr(store, config["employee_field"], int(employee_id))
+
+
+def clean_display_value(value, fallback=""):
+    if value is None:
+        return fallback
+    try:
+        if pd.isna(value):
+            return fallback
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "nat", "<na>"}:
+        return fallback
+    return text
+
+
+def employee_option_name(value, employees_df):
+    if value is None or employees_df.empty:
+        return "Unassigned"
+    lookup = employees_df.set_index("id")
+    if value in lookup.index:
+        return clean_display_value(lookup.loc[value, "full_name"], f"Employee {value}")
+    return f"Employee {value}"
+
+
+def employee_role_matches(role, group):
+    normalized = re.sub(r"\s+", " ", str(role or "").strip().lower())
+    if not normalized:
+        return False
+    return normalized in ROLE_MATCHES.get(group, {str(group).lower()})
+
+
+def eligible_employee_ids(employees_df, group):
+    if employees_df is None or employees_df.empty:
+        return []
+    eligible = employees_df[employees_df["role"].apply(lambda value: employee_role_matches(value, group))].copy()
+    return eligible.sort_values("full_name")["id"].tolist()
+
+
+def selected_store_from_map_click(stores_df, map_data):
+    click = (map_data or {}).get("last_object_clicked") or {}
+    if not click or stores_df.empty:
+        return None
+    lat = click.get("lat")
+    lon = click.get("lng")
+    if lat is None or lon is None:
+        return None
+    mapped = stores_df.dropna(subset=["latitude", "longitude"]).copy()
+    if mapped.empty:
+        return None
+    clicked_lat = float(lat)
+    clicked_lon = float(lon)
+    mapped["_click_distance"] = mapped.apply(
+        lambda row: haversine_miles(clicked_lat, clicked_lon, float(row["latitude"]), float(row["longitude"])),
+        axis=1,
+    )
+    nearest = mapped.sort_values("_click_distance").iloc[0]
+    if float(nearest["_click_distance"]) > 0.25:
+        return None
+    return int(nearest["id"])
+
+
+def store_location_display(store_row):
+    address = clean_display_value(store_row.get("address"), "Address unavailable")
+    city = clean_display_value(store_row.get("city"))
+    state = clean_display_value(store_row.get("state"))
+    zip_code = clean_display_value(store_row.get("zip"))
+    city_state = ", ".join([value for value in [city, state] if value])
+    if zip_code:
+        city_state = f"{city_state} {zip_code}".strip()
+    return address, city_state or "Location unavailable"
+
+
+def map_popup_html(row):
+    address, city_state = store_location_display(row)
+    brand = clean_display_value(row.get("brand_person")) or clean_display_value(row.get("brand_area"), "Unassigned")
+    pmt = clean_display_value(row.get("pmt_person")) or clean_display_value(row.get("pmt_area"), "Unassigned")
+    calibration = clean_display_value(row.get("calibration_person")) or clean_display_value(row.get("calibration_area"), "Unassigned")
+    service_type = clean_display_value(row.get("service_type"), FIELD_SERVICE_STORE_TYPE)
+    service_note = "Not serviced by field teams<br>" if not is_field_service_store(row) else ""
+    return f"""
+    <b>Store {escape(clean_display_value(row.get('store_number'), 'Unknown'))}</b><br>
+    {escape(address)}<br>
+    {escape(city_state)}<br><br>
+    Service Type: {escape(service_type)}<br>
+    {service_note}
+    Brand Enhancement: {escape(brand)}<br>
+    PMT Technician: {escape(pmt)}<br>
+    Calibration Technician: {escape(calibration)}<br><br>
+    Click this dot, then use the assignment editor below the map.
+    """
+
+
+def update_store_assignment_layer(session, store, group, new_employee_id, employees_df):
+    config = group_config(group)
+    if not config or store is None:
+        return None
+    employee_field = config["employee_field"]
+    team_field = config["team_field"]
+    original_employee_id = getattr(store, employee_field)
+    normalized_new_id = int(new_employee_id) if new_employee_id else None
+    if original_employee_id == normalized_new_id:
+        return None
+
+    old_name = employee_option_name(original_employee_id, employees_df)
+    if normalized_new_id is None:
+        if group == "PMT":
+            clear_pmt_assignment_change(store, "Store Dot Assignment Editor", "Removed")
+        else:
+            setattr(store, employee_field, None)
+            setattr(store, team_field, None)
+        new_name = "Unassigned"
+    else:
+        employee = session.get(Employee, normalized_new_id)
+        team = ensure_technician_team(session, employee, group)
+        if group == "PMT":
+            apply_pmt_assignment_change(store, normalized_new_id, int(team.id) if team else None, "Store Dot Assignment Editor", "Reassigned")
+        else:
+            setattr(store, employee_field, normalized_new_id)
+            setattr(store, team_field, int(team.id) if team else None)
+        new_name = employee.full_name if employee else f"Employee {normalized_new_id}"
+
+    return {
+        "group": group,
+        "old": old_name,
+        "new": new_name,
+        "old_id": original_employee_id,
+        "new_id": normalized_new_id,
+    }
+
+
+def render_store_assignment_editor(stores_df, map_data, employees_df, key_prefix):
+    clicked_store_id = selected_store_from_map_click(stores_df, map_data)
+    if clicked_store_id:
+        st.session_state["map_selected_store_editor_id"] = clicked_store_id
+    selected_store_id = st.session_state.get("map_selected_store_editor_id")
+    if not selected_store_id:
+        st.info("Click a store dot to edit PMT, Brand Enhancement, and Calibration assignments for that store.")
+        return
+    store_rows = stores_df[stores_df["id"] == int(selected_store_id)]
+    if store_rows.empty:
+        st.session_state.pop("map_selected_store_editor_id", None)
+        st.info("The selected store is no longer visible in the current map filter.")
+        return
+
+    store_row = store_rows.iloc[0]
+    store_number = clean_display_value(store_row.get("store_number"), str(selected_store_id))
+    address, city_state = store_location_display(store_row)
+    st.subheader(f"Store {store_number} Assignment Editor")
+    st.caption(f"{address} | {city_state}")
+
+    original_values = {
+        group: (int(store_row[GROUPS[group]["employee_field"]]) if pd.notna(store_row.get(GROUPS[group]["employee_field"])) else None)
+        for group in STORE_ASSIGNMENT_EDITOR_GROUPS
+    }
+    selections = {}
+    cols = st.columns(3)
+    for index, group in enumerate(STORE_ASSIGNMENT_EDITOR_GROUPS):
+        options = [None] + eligible_employee_ids(employees_df, group)
+        original = original_values[group]
+        if original is not None and original not in options:
+            options.append(original)
+        option_index = options.index(original) if original in options else 0
+        selections[group] = cols[index].selectbox(
+            f"{group} Technician",
+            options,
+            index=option_index,
+            format_func=lambda value, _group=group: "Unassigned" if value is None else employee_option_name(value, employees_df),
+            key=f"{key_prefix}_{group}_store_{selected_store_id}_assignment",
+        )
+
+    changed_groups = [group for group in STORE_ASSIGNMENT_EDITOR_GROUPS if selections[group] != original_values[group]]
+    with st.container(border=True):
+        st.markdown("**Pending Changes**")
+        if changed_groups:
+            for group in changed_groups:
+                st.write(f"{group}: {employee_option_name(original_values[group], employees_df)} -> {employee_option_name(selections[group], employees_df)}")
+        else:
+            st.write("No assignment changes selected.")
+
+    if st.button("Save Assignment Changes", type="primary", disabled=not changed_groups, key=f"{key_prefix}_save_store_{selected_store_id}"):
+        changes = []
+        with session_scope() as session:
+            store = session.get(Store, int(selected_store_id))
+            for group in changed_groups:
+                change = update_store_assignment_layer(session, store, group, selections[group], employees_df)
+                if change:
+                    changes.append(change)
+        for change in changes:
+            log_action(
+                f"{change['group'].lower()} store assignment changed",
+                "stores",
+                record_id=int(selected_store_id),
+                description=f"Store {store_number}: {change['old']} to {change['new']} from map store editor.",
+            )
+        for group in sorted({change["group"] for change in changes}):
+            sync_technician_areas(group, GROUPS[group]["employee_field"], GROUPS[group]["team_field"])
+        st.session_state["map_assignment_editor_message"] = {
+            "store_number": store_number,
+            "changes": changes,
+            "pmt_reconciliation_required": any(change["group"] == "PMT" for change in changes),
+        }
+        st.rerun()
 
 
 def clear_store_group(store, group, change_source="PMT Map", change_action="Removed", batch_id=None):
@@ -3270,12 +3468,23 @@ page_header(
 )
 
 team_df = teams()
+assignment_emp_df = active_employees()
 stores_df = stores_query()
 field_service_stores_df = stores_df[
     field_service_mask(stores_df)
 ].copy() if not stores_df.empty and "service_type" in stores_df.columns else stores_df.copy()
 non_service_stores_df = stores_df[~field_service_mask(stores_df)].copy() if not stores_df.empty else stores_df.iloc[0:0].copy()
 missing_coordinate_stores = stores_df[stores_df[["latitude", "longitude"]].isna().any(axis=1)].copy() if not stores_df.empty else pd.DataFrame()
+
+assignment_editor_message = st.session_state.pop("map_assignment_editor_message", None)
+if assignment_editor_message:
+    change_text = "; ".join(
+        f"{change['group']}: {change['old']} -> {change['new']}"
+        for change in assignment_editor_message.get("changes", [])
+    )
+    st.success(f"Store {assignment_editor_message.get('store_number')} assignments saved. {change_text}")
+    if assignment_editor_message.get("pmt_reconciliation_required"):
+        st.warning("PMT Schedule Reconciliation Required. Store ownership was updated, but PMT schedule rows were not changed.")
 
 control_cols = st.columns([0.25, 0.25, 0.25, 0.25])
 view_mode = control_cols[0].selectbox("Select Work Group View", ["All Stores Overview", "Brand Enhancement", "PMT", "Calibration"])
@@ -3335,7 +3544,7 @@ if view_mode == "All Stores Overview":
     o3.metric("Not Serviced", len(non_service_stores_df))
     o4.metric("PMT Assigned", int(stores_df["assigned_pmt_employee_id"].notna().sum()) if "assigned_pmt_employee_id" in stores_df.columns else 0)
     o5.metric("Calibration Assigned", int(stores_df["assigned_calibration_team_id"].notna().sum()) if "assigned_calibration_team_id" in stores_df.columns else 0)
-    overview_map, _ = render_area_manager_map(
+    overview_map, overview_map_data = render_area_manager_map(
         visible_stores,
         pd.DataFrame(),
         None,
@@ -3348,6 +3557,7 @@ if view_mode == "All Stores Overview":
     )
     if overview_map:
         st.download_button("Export Overview Map", data=map_html(overview_map), file_name="all_stores_overview_map.html")
+    render_store_assignment_editor(stores_df, overview_map_data, assignment_emp_df, "overview_store_editor")
     if not non_service_stores_df.empty:
         with st.expander(f"Stores Marked Not Serviced ({len(non_service_stores_df)})", expanded=False):
             st.dataframe(
@@ -4335,6 +4545,7 @@ if selected_group in ("PMT", "Calibration"):
             st.download_button(f"Export {selected_group} Map", data=map_html(tech_map), file_name=f"{selected_group.lower()}_assignment_map.html")
         else:
             st.caption("PMT map export is available in the PMT Export Center at the bottom of this page.")
+    render_store_assignment_editor(stores_df, tech_map_data, assignment_emp_df, f"{selected_group}_store_editor")
 
     st.subheader(f"{selected_group} Map-Based Assignment Editing")
     drawings = tech_map_data.get("all_drawings") if tech_map_data else []
@@ -4852,6 +5063,7 @@ if fmap:
     st.download_button("Export Map", data=map_html(fmap), file_name="store_area_map.html")
     if st.button("Refresh included/excluded dot colors", type="secondary", key=f"refresh_area_preview_{selected_group}_{selected_team_id or 'none'}"):
         st.rerun()
+render_store_assignment_editor(stores_df, map_data, assignment_emp_df, f"{selected_group}_area_store_editor")
 
 drawings = map_data.get("all_drawings") if map_data else []
 if drawings:
