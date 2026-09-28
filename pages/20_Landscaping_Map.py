@@ -16,6 +16,7 @@ from src.landscaping import (
     STORE_ALIASES,
     apply_landscaping_import,
     build_landscaping_preview,
+    ensure_landscaping_tables,
     find_column,
     landscaping_assignments_df,
     manual_assign_store,
@@ -173,6 +174,11 @@ apply_theme()
 sidebar_nav()
 ensure_database_or_stop()
 ensure_runtime_schema_compatibility()
+try:
+    ensure_landscaping_tables()
+except Exception as exc:
+    st.error(f"Landscaping database setup failed: {exc}")
+    st.stop()
 
 page_header("Landscaping Map", "Upload landscaping vendor assignments and view vendor coverage by geography.")
 

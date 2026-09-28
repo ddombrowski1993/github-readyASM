@@ -21,6 +21,80 @@ LOCATION_ALIASES = {
 }
 
 
+def ensure_landscaping_tables():
+    from src.database import _apply_workspace_search_path, get_database_url, get_engine
+    from sqlalchemy import text
+
+    engine = get_engine(get_database_url())
+    vendor_id_type = "integer primary key autoincrement" if engine.dialect.name == "sqlite" else "serial primary key"
+    timestamp_type = "timestamp"
+    active_default = "1" if engine.dialect.name == "sqlite" else "true"
+    with engine.begin() as conn:
+        _apply_workspace_search_path(conn)
+        conn.execute(
+            text(
+                f"""
+                create table if not exists landscaping_vendors (
+                    id {vendor_id_type},
+                    vendor_name varchar(180) not null unique,
+                    normalized_name varchar(180) not null unique,
+                    display_color varchar(20),
+                    notes text,
+                    active boolean not null default {active_default},
+                    created_at {timestamp_type} not null default current_timestamp,
+                    updated_at {timestamp_type} not null default current_timestamp
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                create table if not exists landscaping_import_runs (
+                    id {vendor_id_type},
+                    file_name varchar(255) not null,
+                    imported_at {timestamp_type} not null default current_timestamp,
+                    imported_by varchar(220),
+                    source varchar(180) default 'Landscaping upload',
+                    rows_found integer default 0,
+                    unique_stores integer default 0,
+                    matched_stores integer default 0,
+                    unmatched_stores integer default 0,
+                    updated_assignments integer default 0,
+                    unchanged_assignments integer default 0,
+                    new_vendors_created integer default 0,
+                    blank_vendor_rows integer default 0,
+                    unmatched_json text,
+                    changes_json text,
+                    created_at {timestamp_type} not null default current_timestamp,
+                    updated_at {timestamp_type} not null default current_timestamp
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                create table if not exists store_landscaping_assignments (
+                    id {vendor_id_type},
+                    store_id integer not null unique,
+                    landscaping_vendor_id integer,
+                    landscaping_schedule varchar(180),
+                    source varchar(180),
+                    import_run_id integer,
+                    active boolean not null default {active_default},
+                    created_at {timestamp_type} not null default current_timestamp,
+                    updated_at {timestamp_type} not null default current_timestamp
+                )
+                """
+            )
+        )
+        conn.execute(text("create index if not exists ix_landscaping_vendors_normalized on landscaping_vendors (normalized_name)"))
+        conn.execute(text("create index if not exists ix_store_landscaping_store on store_landscaping_assignments (store_id)"))
+        conn.execute(text("create index if not exists ix_store_landscaping_vendor on store_landscaping_assignments (landscaping_vendor_id)"))
+        conn.execute(text("create index if not exists ix_landscaping_import_runs_uploaded on landscaping_import_runs (imported_at)"))
+
+
 def header_key(value):
     return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
 
@@ -87,6 +161,7 @@ def scan_landscaping_workbook(uploaded_file):
 def _existing_store_lookup():
     from src.database import safe_query
 
+    ensure_landscaping_tables()
     stores = safe_query(
         """
         select id, store_number, store_name, address, city, state, zip, latitude, longitude,
@@ -193,6 +268,7 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
     from sqlalchemy import select
     from src.models import LandscapingImportRun, LandscapingVendor, StoreLandscapingAssignment
 
+    ensure_landscaping_tables()
     with session_scope(action_label="Landscaping assignments imported") as session:
         existing_vendors = {
             vendor.normalized_name: vendor
@@ -279,6 +355,7 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
 def landscaping_assignments_df():
     from src.database import safe_query
 
+    ensure_landscaping_tables()
     return safe_query(
         """
         select s.id as store_id, s.store_number, s.store_name, s.address, s.city, s.state, s.zip,
@@ -311,6 +388,7 @@ def manual_assign_store(store_id, vendor_name, schedule="", source="Manual corre
     from sqlalchemy import select
     from src.models import LandscapingVendor, StoreLandscapingAssignment
 
+    ensure_landscaping_tables()
     clean_name = normalize_vendor_name(vendor_name)
     key = vendor_key(clean_name)
     with session_scope(action_label="Landscaping assignment manually updated") as session:
