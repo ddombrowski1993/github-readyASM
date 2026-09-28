@@ -312,7 +312,7 @@ if selected_section == "Store List":
     status = c2.selectbox("Status", ["All"] + sorted(stores["store_status"].dropna().unique().tolist()) if not stores.empty else ["All"])
     existing_service_types = sorted(stores["service_type"].dropna().unique().tolist()) if not stores.empty else []
     service_type_options = ["All"] + sorted(set(STORE_SERVICE_TYPES + existing_service_types))
-    service_type_filter = c3.selectbox("Service Type", service_type_options)
+    service_type_filter = c3.selectbox("Service Type", service_type_options, key="store_list_service_type_filter_v2_codo")
     filtered = stores.copy()
     if city == "Missing City":
         filtered = filtered[filtered["city"].fillna("").astype(str).str.strip() == ""]
@@ -587,8 +587,10 @@ if selected_section == "Store Details":
                     "Service Type",
                     STORE_SERVICE_TYPES,
                     index=STORE_SERVICE_TYPES.index(current_service_type),
+                    key=f"store_service_type_select_{int(selected)}_v2_codo",
                     help="COCM and CODO stores remain active in your store list but cannot be assigned to PMT, Brand Enhancement, or Calibration schedules.",
                 )
+                st.caption("Available store types: Standard, COCM, CODO.")
                 st.caption("COCM and CODO clear PMT, Brand Enhancement, and Calibration assignments and remove open field-service schedule rows for this store.")
                 save_service_type = st.form_submit_button("Save Store Type", type="primary")
             if save_service_type:
@@ -636,7 +638,8 @@ if selected_section == "Add Individual Store Manually":
         manual_city = c3.text_input("City", key="manual_store_city")
         manual_state = c4.text_input("State", key="manual_store_state")
         manual_zip = c5.text_input("ZIP", key="manual_store_zip")
-        manual_service_type = st.selectbox("Service Type", STORE_SERVICE_TYPES, key="manual_store_service_type")
+        manual_service_type = st.selectbox("Service Type", STORE_SERVICE_TYPES, key="manual_store_service_type_v2_codo")
+        st.caption("Available store types: Standard, COCM, CODO.")
         submitted = st.form_submit_button("Find Coordinates and Save Store")
 
     cleaned_store_number = clean_store_number(manual_store_number)
