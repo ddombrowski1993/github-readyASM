@@ -237,6 +237,7 @@ def init_db():
 def ensure_runtime_schema_compatibility():
     schema = ensure_workspace_schema()
     engine = get_engine(get_database_url(), schema=schema or None)
+    Base.metadata.create_all(engine)
     ensure_schema_updates(engine)
     return True
 
@@ -383,6 +384,10 @@ def ensure_performance_indexes(engine):
         "create index if not exists ix_employees_active_role_name on employees (active, role, full_name)",
         "create index if not exists ix_pmt_assignment_changes_changed_at on pmt_assignment_changes (changed_at)",
         "create index if not exists ix_pmt_assignment_changes_store on pmt_assignment_changes (store_id, changed_at)",
+        "create index if not exists ix_landscaping_vendors_normalized on landscaping_vendors (normalized_name)",
+        "create index if not exists ix_store_landscaping_store on store_landscaping_assignments (store_id)",
+        "create index if not exists ix_store_landscaping_vendor on store_landscaping_assignments (landscaping_vendor_id)",
+        "create index if not exists ix_landscaping_import_runs_uploaded on landscaping_import_runs (imported_at)",
     ]
     with engine.begin() as conn:
         for statement in index_statements:
