@@ -3557,11 +3557,12 @@ map_scope = control_cols[3].selectbox(
     key=f"{selected_group or 'overview'}_{map_task}_map_store_scope",
 )
 
-nav_cols = st.columns(4)
+nav_cols = st.columns(5)
 nav_cols[0].page_link("pages/3_Stores.py", label="Stores")
 nav_cols[1].page_link("pages/5_Scheduler.py", label="Brand Scheduler")
 nav_cols[2].page_link("pages/13_PMT_Monthly_Scheduler.py", label="PMT Scheduler")
 nav_cols[3].page_link("pages/14_Calibration_Scheduler.py", label="Calibration Scheduler")
+nav_cols[4].page_link("pages/20_Landscaping_Map.py", label="Landscaping Map")
 
 areas_df = active_areas(None if view_mode == "All Stores Overview" else selected_group)
 visible_stores = stores_df.copy()

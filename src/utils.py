@@ -776,6 +776,7 @@ def _workflow_target_page(target):
         "/Reports": "pages/9_Reports.py",
         "/PMT_Monthly_Scheduler": "pages/13_PMT_Monthly_Scheduler.py",
         "/Calibration_Scheduler": "pages/14_Calibration_Scheduler.py",
+        "/Landscaping_Map": "pages/20_Landscaping_Map.py",
     }
     return route_map.get(str(target), str(target)), {}
 
