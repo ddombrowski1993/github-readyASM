@@ -7,10 +7,11 @@ import folium
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
+from sqlalchemy import text
 
 st.set_page_config(page_title="Landscaping Map", layout="wide")
 
-from src.database import log_action
+from src.database import ensure_workspace_schema, get_database_url, get_engine, log_action
 from src.utils import apply_theme, ensure_database_or_stop, metric_help_card, page_header, sidebar_nav
 
 try:
@@ -36,6 +37,76 @@ def center_for(df):
     if valid.empty:
         return [41.4993, -81.6944]
     return [float(valid["latitude"].mean()), float(valid["longitude"].mean())]
+
+
+def ensure_landscaping_tables():
+    schema = ensure_workspace_schema()
+    engine = get_engine(get_database_url(), schema=schema)
+    id_type = "integer primary key autoincrement" if engine.dialect.name == "sqlite" else "serial primary key"
+    active_default = "1" if engine.dialect.name == "sqlite" else "true"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                create table if not exists landscaping_vendors (
+                    id {id_type},
+                    vendor_name varchar(180) not null unique,
+                    normalized_name varchar(180) not null unique,
+                    display_color varchar(20),
+                    notes text,
+                    active boolean not null default {active_default},
+                    created_at timestamp not null default current_timestamp,
+                    updated_at timestamp not null default current_timestamp
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                create table if not exists landscaping_import_runs (
+                    id {id_type},
+                    file_name varchar(255) not null,
+                    imported_at timestamp not null default current_timestamp,
+                    imported_by varchar(220),
+                    source varchar(180) default 'Landscaping upload',
+                    rows_found integer default 0,
+                    unique_stores integer default 0,
+                    matched_stores integer default 0,
+                    unmatched_stores integer default 0,
+                    updated_assignments integer default 0,
+                    unchanged_assignments integer default 0,
+                    new_vendors_created integer default 0,
+                    blank_vendor_rows integer default 0,
+                    unmatched_json text,
+                    changes_json text,
+                    created_at timestamp not null default current_timestamp,
+                    updated_at timestamp not null default current_timestamp
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                create table if not exists store_landscaping_assignments (
+                    id {id_type},
+                    store_id integer not null unique,
+                    landscaping_vendor_id integer,
+                    landscaping_schedule varchar(180),
+                    source varchar(180),
+                    import_run_id integer,
+                    active boolean not null default {active_default},
+                    created_at timestamp not null default current_timestamp,
+                    updated_at timestamp not null default current_timestamp
+                )
+                """
+            )
+        )
+        conn.execute(text("create index if not exists ix_landscaping_vendors_normalized on landscaping_vendors (normalized_name)"))
+        conn.execute(text("create index if not exists ix_store_landscaping_store on store_landscaping_assignments (store_id)"))
+        conn.execute(text("create index if not exists ix_store_landscaping_vendor on store_landscaping_assignments (landscaping_vendor_id)"))
+        conn.execute(text("create index if not exists ix_landscaping_import_runs_uploaded on landscaping_import_runs (imported_at)"))
 
 
 def current_user_label():
@@ -185,7 +256,7 @@ sidebar_nav()
 ensure_database_or_stop()
 page_header("Landscaping Map", "Upload landscaping vendor assignments and view vendor coverage by geography.")
 try:
-    landscaping.ensure_landscaping_tables()
+    ensure_landscaping_tables()
 except Exception as exc:
     st.error("Landscaping database setup failed.")
     st.code(f"{type(exc).__name__}: {exc}", language="text")
