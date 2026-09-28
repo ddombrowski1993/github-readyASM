@@ -4,11 +4,9 @@ from collections import defaultdict, deque
 from datetime import datetime
 
 import pandas as pd
-from sqlalchemy import select
 
 from src.imports import clean_store_number
 from src.maps import PALETTE, haversine_miles, stable_color
-from src.models import LandscapingImportRun, LandscapingVendor, StoreLandscapingAssignment
 from src.smart_import import clean_text, mapped_dataframe, scan_workbook
 
 
@@ -192,6 +190,8 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
         "unmatched": [],
     }
     from src.database import session_scope
+    from sqlalchemy import select
+    from src.models import LandscapingImportRun, LandscapingVendor, StoreLandscapingAssignment
 
     with session_scope(action_label="Landscaping assignments imported") as session:
         existing_vendors = {
@@ -308,6 +308,8 @@ def vendor_summary(df):
 
 def manual_assign_store(store_id, vendor_name, schedule="", source="Manual correction"):
     from src.database import session_scope
+    from sqlalchemy import select
+    from src.models import LandscapingVendor, StoreLandscapingAssignment
 
     clean_name = normalize_vendor_name(vendor_name)
     key = vendor_key(clean_name)
