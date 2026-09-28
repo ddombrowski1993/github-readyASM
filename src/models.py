@@ -92,6 +92,49 @@ class Store(Base, TimestampMixin):
     active = Column(Boolean, default=True, nullable=False)
 
 
+class LandscapingVendor(Base, TimestampMixin):
+    __tablename__ = "landscaping_vendors"
+    id = Column(Integer, primary_key=True)
+    vendor_name = Column(String(180), unique=True, nullable=False)
+    normalized_name = Column(String(180), unique=True, nullable=False)
+    display_color = Column(String(20))
+    notes = Column(Text)
+    active = Column(Boolean, default=True, nullable=False)
+
+
+class StoreLandscapingAssignment(Base, TimestampMixin):
+    __tablename__ = "store_landscaping_assignments"
+    __table_args__ = (UniqueConstraint("store_id", name="uq_store_landscaping_assignment_store"),)
+    id = Column(Integer, primary_key=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False)
+    landscaping_vendor_id = Column(Integer, ForeignKey("landscaping_vendors.id"))
+    landscaping_schedule = Column(String(180))
+    source = Column(String(180))
+    import_run_id = Column(Integer, ForeignKey("landscaping_import_runs.id"))
+    active = Column(Boolean, default=True, nullable=False)
+    store = relationship("Store")
+    vendor = relationship("LandscapingVendor")
+
+
+class LandscapingImportRun(Base, TimestampMixin):
+    __tablename__ = "landscaping_import_runs"
+    id = Column(Integer, primary_key=True)
+    file_name = Column(String(255), nullable=False)
+    imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    imported_by = Column(String(220))
+    source = Column(String(180), default="Landscaping upload")
+    rows_found = Column(Integer, default=0)
+    unique_stores = Column(Integer, default=0)
+    matched_stores = Column(Integer, default=0)
+    unmatched_stores = Column(Integer, default=0)
+    updated_assignments = Column(Integer, default=0)
+    unchanged_assignments = Column(Integer, default=0)
+    new_vendors_created = Column(Integer, default=0)
+    blank_vendor_rows = Column(Integer, default=0)
+    unmatched_json = Column(Text)
+    changes_json = Column(Text)
+
+
 class StoreAssignment(Base, TimestampMixin):
     __tablename__ = "store_assignments"
     id = Column(Integer, primary_key=True)
