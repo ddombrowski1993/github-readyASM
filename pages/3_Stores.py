@@ -27,7 +27,8 @@ from src.utils import apply_theme, df_search, effective_rollup_user_id, ensure_d
 
 
 LOCAL_STORE_CSV = "data/stores.csv"
-STORE_SERVICE_TYPES = ["Standard", "COCM"]
+STORE_SERVICE_TYPES = ["Standard", "COCM", "CODO"]
+NON_FIELD_SERVICE_TYPES = {"COCM", "CODO"}
 FIELD_SERVICE_WORK_TYPES = ["PMT", "Brand Enhancement", "Calibration"]
 OPEN_SCHEDULE_STATUSES = [
     "Scheduled",
@@ -123,8 +124,8 @@ def render_store_import_summary(summary):
 
 def normalize_service_type(value):
     cleaned = str(value or "").strip().upper()
-    if cleaned == "COCM":
-        return "COCM"
+    if cleaned in NON_FIELD_SERVICE_TYPES:
+        return cleaned
     return "Standard"
 
 
@@ -327,7 +328,7 @@ if selected_section == "Upload Stores":
     with st.expander("Recommended store upload layout", expanded=True):
         st.warning(
             "For the smoothest import, include one header row with these columns: "
-            "Store Number, Address, City, State, ZIP, Latitude, Longitude. "
+            "Store Number, Address, City, State, ZIP, Latitude, Longitude, Service Type. "
             "Store Number must be the actual 4-6 digit store/site number, not latitude, ZIP, WO number, or row number."
         )
         st.markdown(
@@ -338,6 +339,7 @@ Good column names the app understands:
 - Latitude / Longitude: `Latitude`, `Lat`, `Longitude`, `Lon`, `Lng`
 - Address: `Address`, `Street Address`, `Store Address`, `Location Address`
 - City / State / ZIP: `City`, `State`, `ST`, `ZIP`, `Zip Code`
+- Service Type: `Service Type`, `Store Type` with values such as `Standard`, `COCM`, `CODO`
 
 Avoid merged title rows, blank header rows, pivot tables, hidden-only sheets, and putting `Lat` or `Lon` in the store number field.
             """
@@ -428,6 +430,7 @@ Avoid merged title rows, blank header rows, pivot tables, hidden-only sheets, an
                 "market",
                 "zone",
                 "area",
+                "service_type",
                 "active",
             ]
             for start in range(0, len(fields), 3):
@@ -465,7 +468,7 @@ Avoid merged title rows, blank header rows, pivot tables, hidden-only sheets, an
         with upload_count_cols[3]:
             metric_help_card("Needs Review", f"{summary['needs_review']:,}", "Rows with warnings or mapping/data issues that should be checked before import.")
         st.subheader("Import Preview")
-        preview_cols = [col for col in ["store_number", "address", "city", "state", "zip", "latitude", "longitude", "assigned_pmt", "assigned_brand", "assigned_calibration"] if col in mapped.columns]
+        preview_cols = [col for col in ["store_number", "address", "city", "state", "zip", "latitude", "longitude", "service_type", "assigned_pmt", "assigned_brand", "assigned_calibration"] if col in mapped.columns]
         st.dataframe(mapped[preview_cols].head(50) if preview_cols else mapped.head(50), use_container_width=True, hide_index=True)
         if "assigned_pmt" in mapped.columns:
             pmt_values = mapped["assigned_pmt"].fillna("").astype(str).str.strip()
@@ -582,9 +585,9 @@ if selected_section == "Store Details":
                     "Service Type",
                     STORE_SERVICE_TYPES,
                     index=STORE_SERVICE_TYPES.index(current_service_type),
-                    help="COCM stores remain active in your store list but cannot be assigned to PMT, Brand Enhancement, or Calibration schedules.",
+                    help="COCM and CODO stores remain active in your store list but cannot be assigned to PMT, Brand Enhancement, or Calibration schedules.",
                 )
-                st.caption("COCM clears PMT, Brand Enhancement, and Calibration assignments and removes open field-service schedule rows for this store.")
+                st.caption("COCM and CODO clear PMT, Brand Enhancement, and Calibration assignments and remove open field-service schedule rows for this store.")
                 save_service_type = st.form_submit_button("Save Store Type", type="primary")
             if save_service_type:
                 with session_scope(action_label="Store service type updated") as session:
@@ -595,7 +598,7 @@ if selected_section == "Store Details":
                     store.service_type = service_type
                     removed_schedule_count = 0
                     removed_backlog_count = 0
-                    if service_type == "COCM":
+                    if service_type in NON_FIELD_SERVICE_TYPES:
                         removed_schedule_count, removed_backlog_count = clear_field_service_for_store(session, store)
                     saved_store_number = store.store_number
                 log_action(
@@ -604,8 +607,8 @@ if selected_section == "Store Details":
                     int(selected),
                     f"Store {saved_store_number} set to {service_type}; removed {removed_schedule_count} open schedule row(s) and {removed_backlog_count} PMT backlog row(s).",
                 )
-                if service_type == "COCM":
-                    st.success(f"Store {saved_store_number} is now COCM. Removed {removed_schedule_count} open schedule row(s) and cleared field-service assignments.")
+                if service_type in NON_FIELD_SERVICE_TYPES:
+                    st.success(f"Store {saved_store_number} is now {service_type}. Removed {removed_schedule_count} open schedule row(s) and cleared field-service assignments.")
                 else:
                     st.success(f"Store {saved_store_number} is now Standard.")
                 st.rerun()

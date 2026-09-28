@@ -7,10 +7,52 @@ from sqlalchemy import select
 
 from src.database import log_action, session_scope
 from src.geocoding import geocode_address, reverse_geocode_coordinates
-from src.models import DeferredWorkOrder, Employee, Store, Team
+from src.models import DeferredWorkOrder, Employee, PMTScheduleBacklog, ScheduleItem, Store, Team
 
 
 EMPLOYEE_ROLES = {"HRT", "PMT", "Brand Enhancement", "MST", "Calibration"}
+FIELD_SERVICE_WORK_TYPES = {"PMT", "Brand Enhancement", "Calibration"}
+NON_FIELD_SERVICE_TYPES = {"COCM", "CODO"}
+OPEN_FIELD_SERVICE_STATUSES = {
+    "Scheduled",
+    "Needs Rescheduled",
+    "Rescheduled",
+    "Rain Delay",
+    "Not Completed",
+    "Carryover",
+    "Overdue",
+    "Skipped",
+}
+
+
+def normalize_service_type(value):
+    cleaned = str(value or "").strip().upper()
+    if cleaned in NON_FIELD_SERVICE_TYPES:
+        return cleaned
+    return "Standard"
+
+
+def clear_field_service_assignments(session, store):
+    store.assigned_pmt_employee_id = None
+    store.assigned_brand_employee_id = None
+    store.assigned_calibration_employee_id = None
+    store.assigned_pmt_team_id = None
+    store.assigned_brand_team_id = None
+    store.assigned_calibration_team_id = None
+
+    if store.id:
+        for item in session.query(ScheduleItem).filter(
+            ScheduleItem.store_id == int(store.id),
+            ScheduleItem.work_type.in_(FIELD_SERVICE_WORK_TYPES),
+            ScheduleItem.status.in_(OPEN_FIELD_SERVICE_STATUSES),
+        ).all():
+            session.delete(item)
+
+        for item in session.query(PMTScheduleBacklog).filter(
+            PMTScheduleBacklog.store_id == int(store.id),
+            PMTScheduleBacklog.status.in_(["Not Scheduled", "Not Completed", "Carryover", "Overdue", "Skipped"]),
+        ).all():
+            session.delete(item)
 
 
 def extract_store_number(value):
@@ -75,6 +117,11 @@ def normalize_columns(df):
         "store_info": "store_number",
         "store_information": "store_number",
         "store_": "store_number",
+        "service_type": "service_type",
+        "service type": "service_type",
+        "store_service_type": "service_type",
+        "store_type": "service_type",
+        "location_type": "service_type",
         "number": "store_number",
         "no": "store_number",
         "num": "store_number",
@@ -521,6 +568,14 @@ def import_stores(df, replace_active=False, update_mode="fill_missing", geocode_
                 assign_if_allowed(store, "market", first_value(row, "market"), update_mode)
                 assign_if_allowed(store, "district", first_value(row, "district", "zone"), update_mode)
                 assign_if_allowed(store, "area", first_value(row, "area"), update_mode)
+                uploaded_service_type = first_value(row, "service_type", "type")
+                if uploaded_service_type:
+                    normalized_uploaded_service_type = normalize_service_type(uploaded_service_type)
+                    if (
+                        should_update(store.service_type, normalized_uploaded_service_type, update_mode)
+                        or normalized_uploaded_service_type in NON_FIELD_SERVICE_TYPES
+                    ):
+                        store.service_type = normalized_uploaded_service_type
                 if has_pmt_team:
                     store.assigned_pmt_team_id = pmt_team.id if pmt_team else None
                 if has_brand_team:
@@ -542,6 +597,10 @@ def import_stores(df, replace_active=False, update_mode="fill_missing", geocode_
                 assign_if_allowed(store, "store_status", first_value(row, "store_status", "status", "active"), update_mode)
                 assign_if_allowed(store, "priority", first_value(row, "priority"), update_mode)
                 assign_if_allowed(store, "notes", first_value(row, "notes"), update_mode)
+                store.service_type = normalize_service_type(store.service_type)
+                if store.service_type in NON_FIELD_SERVICE_TYPES:
+                    clear_field_service_assignments(session, store)
+                    summary["review"].append(f"Row {idx + 2}: store {number} marked {store.service_type}; cleared field-service assignments.")
                 store.store_status = store.store_status or "Not Started"
                 store.priority = store.priority or "Medium"
                 store.notes = store.notes or ""

@@ -85,7 +85,7 @@ FIELD_ALIASES = {
     "longitude": ["longitude", "lon", "lng", "long", "x", "x coordinate", "gps lon", "gps lng", "store longitude", "location longitude", "site longitude"],
     "market": ["market", "region"],
     "zone": ["zone"],
-    "type": ["type", "store type", "location type"],
+    "service_type": ["service type", "store service type", "store type", "location type", "ownership type", "operating type"],
     "active": ["active", "active status", "status", "store status"],
     "first_name": ["first name", "firstname", "given name"],
     "last_name": ["last name", "lastname", "surname", "family name"],
@@ -108,7 +108,7 @@ FIELD_ALIASES = {
 }
 
 TARGET_FIELDS = {
-    "stores": ["store_number", "address", "city", "state", "zip", "latitude", "longitude", "market", "zone", "type", "active", "assigned_pmt", "assigned_brand", "assigned_calibration", "area"],
+    "stores": ["store_number", "address", "city", "state", "zip", "latitude", "longitude", "market", "zone", "service_type", "active", "assigned_pmt", "assigned_brand", "assigned_calibration", "area"],
     "employees": ["full_name", "first_name", "last_name", "employee_number", "role", "team", "phone", "email", "home_address", "home_city", "home_state", "home_zip", "home_latitude", "home_longitude", "active"],
     "assignments": ["store_number", "full_name", "employee_number", "email", "phone", "assigned_pmt", "assigned_brand", "assigned_calibration", "team", "area", "address", "city", "state", "zip", "latitude", "longitude", "home_address", "home_city", "home_state", "home_zip", "home_latitude", "home_longitude"],
 }
@@ -215,6 +215,8 @@ def pattern_score(series, field):
         return int(ratio(series, lambda value: normalize_state(value) in US_STATES) * 85)
     if field == "store_number":
         return int(ratio(series, lambda value: bool(clean_store_number(value)) or bool(re.fullmatch(r"\d{4,6}", clean_identifier(value)))) * 88)
+    if field == "service_type":
+        return int(ratio(series, lambda value: clean_text(value).strip().upper() in {"STANDARD", "COCM", "CODO"}) * 90)
     if field == "email":
         return int(ratio(series, lambda value: "@" in clean_text(value)) * 95)
     if field == "phone":
