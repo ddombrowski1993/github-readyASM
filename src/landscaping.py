@@ -63,6 +63,10 @@ def clean_store_number(value):
     return match.group(1) if match else ""
 
 
+def normalize_store_number(value):
+    return clean_store_number(value)
+
+
 def stable_color(value):
     if not value:
         return "#9ca3af"
@@ -354,10 +358,16 @@ def build_landscaping_preview(incoming, mapping):
     for field in ["store_number", "landscaping_vendor", "landscaping_schedule", "address", "city", "state", "zip"]:
         if field not in source.columns:
             source[field] = ""
-    source["store_number"] = source["store_number"].apply(clean_store_number)
+    source["raw_store_number"] = source["store_number"].map(clean_text)
+    source["store_number"] = source["store_number"].apply(normalize_store_number)
     source["landscaping_vendor"] = source["landscaping_vendor"].apply(normalize_vendor_name)
     source["vendor_key"] = source["landscaping_vendor"].apply(vendor_key)
     source["landscaping_schedule"] = source["landscaping_schedule"].apply(clean_text)
+    blank_store_rows = int(source["store_number"].astype(str).str.strip().eq("").sum())
+    invalid_store_rows = int(
+        source["raw_store_number"].astype(str).str.strip().ne("").sum()
+        - source["store_number"].astype(str).str.strip().ne("").sum()
+    )
     source = source[source["store_number"].astype(str).str.strip().ne("")].copy()
 
     _, store_lookup = _existing_store_lookup()
@@ -377,6 +387,8 @@ def build_landscaping_preview(incoming, mapping):
         rows.append(
             {
                 "Store": store_number,
+                "Raw Uploaded Store Number": row.get("raw_store_number", ""),
+                "Normalized Uploaded Store Number": store_number,
                 "Landscaping Vendor": vendor,
                 "Landscaping Schedule": row.get("landscaping_schedule", ""),
                 "Match Status": "Matched" if store is not None else "Unmatched",
@@ -391,17 +403,23 @@ def build_landscaping_preview(incoming, mapping):
                 "ZIP From Upload": row.get("zip", ""),
                 "store_id": int(store.get("id")) if store is not None else None,
                 "Blank Landscaping Vendor": not bool(vendor),
+                "Reason": "" if store is not None else "No active master store matched this normalized store number.",
             }
         )
     preview = pd.DataFrame(rows)
+    rows_with_vendor = int(source["landscaping_vendor"].astype(str).str.strip().ne("").sum()) if not source.empty else 0
     summary = {
         "rows_found": int(len(source)),
+        "uploaded_rows": int(len(incoming)),
+        "rows_with_vendor": rows_with_vendor,
         "unique_stores": int(len(preview)),
         "matched_stores": int((preview["Match Status"] == "Matched").sum()) if not preview.empty else 0,
         "unmatched_stores": int((preview["Match Status"] == "Unmatched").sum()) if not preview.empty else 0,
         "landscaping_vendors": int(preview.loc[~preview["Blank Landscaping Vendor"], "Landscaping Vendor"].nunique()) if not preview.empty else 0,
         "blank_vendor_rows": int(preview["Blank Landscaping Vendor"].sum()) if not preview.empty else 0,
         "duplicate_store_rows_skipped": int(duplicate_rows),
+        "blank_store_rows": blank_store_rows,
+        "invalid_store_rows": max(0, invalid_store_rows),
     }
     return preview, summary
 
@@ -428,6 +446,7 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
     ensure_landscaping_tables()
     engine = get_engine(get_database_url(), schema=ensure_workspace_schema())
     with engine.begin() as conn:
+        now = datetime.utcnow()
         existing_vendors = {
             row["normalized_name"]: dict(row)
             for row in conn.execute(text("select id, vendor_name, normalized_name, display_color from landscaping_vendors")).mappings().all()
@@ -437,25 +456,28 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
             text(
                 """
                 insert into landscaping_import_runs (
-                    file_name, imported_at, imported_by, rows_found, unique_stores,
-                    matched_stores, unmatched_stores, blank_vendor_rows
+                    file_name, imported_at, imported_by, source, rows_found, unique_stores,
+                    matched_stores, unmatched_stores, blank_vendor_rows, created_at, updated_at
                 )
                 values (
-                    :file_name, :imported_at, :imported_by, :rows_found, :unique_stores,
-                    :matched_stores, :unmatched_stores, :blank_vendor_rows
+                    :file_name, :imported_at, :imported_by, :source, :rows_found, :unique_stores,
+                    :matched_stores, :unmatched_stores, :blank_vendor_rows, :created_at, :updated_at
                 )
                 returning id
                 """
             ),
             {
                 "file_name": file_name,
-                "imported_at": datetime.utcnow(),
+                "imported_at": now,
                 "imported_by": imported_by,
+                "source": "Landscaping upload",
                 "rows_found": summary["rows_found"],
                 "unique_stores": summary["unique_stores"],
                 "matched_stores": summary["matched_stores"],
                 "unmatched_stores": summary["unmatched_stores"],
                 "blank_vendor_rows": summary["blank_vendor_rows"],
+                "created_at": now,
+                "updated_at": now,
             },
         ).scalar()
         for _, row in preview.iterrows():
@@ -480,15 +502,26 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
                     vendor_id = int(vendor["id"])
                 else:
                     display_color = landscaping_color_for_name(vendor_name, used_colors)
+                    vendor_created_at = datetime.utcnow()
                     vendor_id = conn.execute(
                         text(
                             """
-                            insert into landscaping_vendors (vendor_name, normalized_name, display_color)
-                            values (:vendor_name, :normalized_name, :display_color)
+                            insert into landscaping_vendors (
+                                vendor_name, normalized_name, display_color, created_at, updated_at
+                            )
+                            values (
+                                :vendor_name, :normalized_name, :display_color, :created_at, :updated_at
+                            )
                             returning id
                             """
                         ),
-                        {"vendor_name": vendor_name, "normalized_name": key, "display_color": display_color},
+                        {
+                            "vendor_name": vendor_name,
+                            "normalized_name": key,
+                            "display_color": display_color,
+                            "created_at": vendor_created_at,
+                            "updated_at": vendor_created_at,
+                        },
                     ).scalar()
                     existing_vendors[key] = {
                         "id": vendor_id,
@@ -512,6 +545,7 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
             previous_name = assignment["vendor_name"] if assignment else ""
             previous_schedule = assignment["landscaping_schedule"] if assignment else ""
             new_schedule = clean_text(row.get("Landscaping Schedule", ""))
+            assignment_updated_at = datetime.utcnow()
             changed = (
                 assignment is None
                 or assignment["landscaping_vendor_id"] != vendor_id
@@ -522,10 +556,12 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
                     text(
                         """
                         insert into store_landscaping_assignments (
-                            store_id, landscaping_vendor_id, landscaping_schedule, source, import_run_id, active, updated_at
+                            store_id, landscaping_vendor_id, landscaping_schedule, source, import_run_id,
+                            active, created_at, updated_at
                         )
                         values (
-                            :store_id, :vendor_id, :schedule, :source, :import_run_id, true, :updated_at
+                            :store_id, :vendor_id, :schedule, :source, :import_run_id,
+                            true, :created_at, :updated_at
                         )
                         """
                     ),
@@ -535,7 +571,8 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
                         "schedule": new_schedule or None,
                         "source": file_name,
                         "import_run_id": run_id,
-                        "updated_at": datetime.utcnow(),
+                        "created_at": assignment_updated_at,
+                        "updated_at": assignment_updated_at,
                     },
                 )
             else:
@@ -559,7 +596,7 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
                         "schedule": new_schedule or None,
                         "source": file_name,
                         "import_run_id": run_id,
-                        "updated_at": datetime.utcnow(),
+                        "updated_at": assignment_updated_at,
                     },
                 )
             if changed:
@@ -652,11 +689,16 @@ def manual_assign_store(store_id, vendor_name, schedule="", source="Manual corre
             if existing:
                 vendor_id = int(existing["id"])
             else:
+                vendor_created_at = datetime.utcnow()
                 vendor_id = conn.execute(
                     text(
                         """
-                        insert into landscaping_vendors (vendor_name, normalized_name, display_color)
-                        values (:vendor_name, :normalized_name, :display_color)
+                        insert into landscaping_vendors (
+                            vendor_name, normalized_name, display_color, created_at, updated_at
+                        )
+                        values (
+                            :vendor_name, :normalized_name, :display_color, :created_at, :updated_at
+                        )
                         returning id
                         """
                     ),
@@ -664,6 +706,8 @@ def manual_assign_store(store_id, vendor_name, schedule="", source="Manual corre
                         "vendor_name": clean_name,
                         "normalized_name": key,
                         "display_color": landscaping_color_for_name(clean_name, used_colors),
+                        "created_at": vendor_created_at,
+                        "updated_at": vendor_created_at,
                     },
                 ).scalar()
         existing_assignment = conn.execute(
@@ -697,12 +741,16 @@ def manual_assign_store(store_id, vendor_name, schedule="", source="Manual corre
                 text(
                     """
                     insert into store_landscaping_assignments (
-                        store_id, landscaping_vendor_id, landscaping_schedule, source, active, updated_at
+                        store_id, landscaping_vendor_id, landscaping_schedule, source,
+                        active, created_at, updated_at
                     )
-                    values (:store_id, :vendor_id, :schedule, :source, true, :updated_at)
+                    values (
+                        :store_id, :vendor_id, :schedule, :source,
+                        true, :created_at, :updated_at
+                    )
                     """
                 ),
-                params,
+                {**params, "created_at": params["updated_at"]},
             )
 
 

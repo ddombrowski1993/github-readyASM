@@ -121,13 +121,18 @@ def metric_int(value):
 
 
 def render_preview_metrics(summary):
-    cols = st.columns(6)
-    cols[0].metric("Rows Found", metric_int(summary.get("rows_found")))
-    cols[1].metric("Unique Stores", metric_int(summary.get("unique_stores")))
-    cols[2].metric("Matched Stores", metric_int(summary.get("matched_stores")))
-    cols[3].metric("Unmatched Stores", metric_int(summary.get("unmatched_stores")))
-    cols[4].metric("Landscaping Vendors", metric_int(summary.get("landscaping_vendors")))
-    with cols[5]:
+    cols = st.columns(5)
+    cols[0].metric("Uploaded Rows", metric_int(summary.get("uploaded_rows", summary.get("rows_found"))))
+    cols[1].metric("Rows With Vendor", metric_int(summary.get("rows_with_vendor")))
+    cols[2].metric("Unique Stores", metric_int(summary.get("unique_stores")))
+    cols[3].metric("Matched Stores", metric_int(summary.get("matched_stores")))
+    cols[4].metric("Unmatched Stores", metric_int(summary.get("unmatched_stores")))
+    cols2 = st.columns(5)
+    cols2[0].metric("Landscaping Vendors", metric_int(summary.get("landscaping_vendors")))
+    cols2[1].metric("Duplicate Stores", metric_int(summary.get("duplicate_store_rows_skipped")))
+    cols2[2].metric("Blank Store #", metric_int(summary.get("blank_store_rows")))
+    cols2[3].metric("Invalid Store #", metric_int(summary.get("invalid_store_rows")))
+    with cols2[4]:
         metric_help_card("Blank Vendor", metric_int(summary.get("blank_vendor_rows")), "Blank landscaping cells are ignored in Safe Update mode.")
 
 
@@ -322,19 +327,47 @@ with st.expander("Import / Update Landscaping Assignments", expanded=True):
             render_preview_metrics(preview_summary)
             preview_cols = [
                 "Store",
+                "Raw Uploaded Store Number",
+                "Normalized Uploaded Store Number",
                 "Landscaping Vendor",
                 "Landscaping Schedule",
                 "Match Status",
                 "Location",
+                "Reason",
                 "Address From Upload",
                 "City From Upload",
                 "State From Upload",
             ]
-            st.dataframe(preview[preview_cols].head(100), use_container_width=True, hide_index=True)
+            st.dataframe(preview[[column for column in preview_cols if column in preview.columns]].head(100), use_container_width=True, hide_index=True)
+            unmatched_preview = preview[preview["Match Status"] == "Unmatched"].copy() if "Match Status" in preview.columns else pd.DataFrame()
+            if not unmatched_preview.empty:
+                with st.expander("Unmatched Store Diagnostic", expanded=True):
+                    diagnostic_cols = [
+                        "Raw Uploaded Store Number",
+                        "Normalized Uploaded Store Number",
+                        "Landscaping Vendor",
+                        "Address From Upload",
+                        "City From Upload",
+                        "State From Upload",
+                        "Reason",
+                    ]
+                    st.dataframe(
+                        unmatched_preview[[column for column in diagnostic_cols if column in unmatched_preview.columns]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
             if preview_summary.get("blank_vendor_rows"):
                 st.info("Safe Update is on. Blank landscaping values in the upload will not erase existing assignments.")
             if st.button("Import Landscaping Assignments", type="primary"):
-                result = landscaping.apply_landscaping_import(preview, upload.name, imported_by=current_user_label(), safe_update=True)
+                try:
+                    result = landscaping.apply_landscaping_import(preview, upload.name, imported_by=current_user_label(), safe_update=True)
+                except Exception as exc:
+                    st.error("Landscaping import was not applied.")
+                    st.warning("Database validation failed before the import could be committed.")
+                    st.code(f"{type(exc).__name__}: {exc}", language="text")
+                    with st.expander("Technical import traceback", expanded=False):
+                        st.code(traceback.format_exc(), language="text")
+                    st.stop()
                 st.session_state["landscaping_import_result"] = result
                 log_action(
                     "landscaping import",
