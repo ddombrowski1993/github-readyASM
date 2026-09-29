@@ -175,6 +175,9 @@ def ensure_landscaping_tables():
         conn.execute(text("create index if not exists ix_store_landscaping_store on store_landscaping_assignments (store_id)"))
         conn.execute(text("create index if not exists ix_store_landscaping_vendor on store_landscaping_assignments (landscaping_vendor_id)"))
         conn.execute(text("create index if not exists ix_landscaping_import_runs_uploaded on landscaping_import_runs (imported_at)"))
+        if engine.dialect.name != "sqlite":
+            conn.execute(text("alter table landscaping_vendors alter column active set default true"))
+            conn.execute(text("alter table store_landscaping_assignments alter column active set default true"))
 
 
 def header_key(value):
@@ -507,10 +510,10 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
                         text(
                             """
                             insert into landscaping_vendors (
-                                vendor_name, normalized_name, display_color, created_at, updated_at
+                                vendor_name, normalized_name, display_color, active, created_at, updated_at
                             )
                             values (
-                                :vendor_name, :normalized_name, :display_color, :created_at, :updated_at
+                                :vendor_name, :normalized_name, :display_color, true, :created_at, :updated_at
                             )
                             returning id
                             """
@@ -694,10 +697,10 @@ def manual_assign_store(store_id, vendor_name, schedule="", source="Manual corre
                     text(
                         """
                         insert into landscaping_vendors (
-                            vendor_name, normalized_name, display_color, created_at, updated_at
+                            vendor_name, normalized_name, display_color, active, created_at, updated_at
                         )
                         values (
-                            :vendor_name, :normalized_name, :display_color, :created_at, :updated_at
+                            :vendor_name, :normalized_name, :display_color, true, :created_at, :updated_at
                         )
                         returning id
                         """
