@@ -6,8 +6,8 @@ from html import escape
 import folium
 import pandas as pd
 import streamlit as st
-from streamlit_folium import st_folium
 from sqlalchemy import text
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Landscaping Map", layout="wide")
 
@@ -248,7 +248,8 @@ def render_landscaping_map(df, show_dots=True, show_territories=True, show_label
                 tooltip=tooltip,
                 popup=folium.Popup(map_popup(row), max_width=340),
             ).add_to(fmap)
-    return st_folium(fmap, width=None, height=720, key=key)
+    components.html(fmap.get_root().render(), height=720, scrolling=False)
+    return {}
 
 
 apply_theme()

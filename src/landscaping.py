@@ -422,29 +422,42 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
         "changes": [],
         "unmatched": [],
     }
-    from src.database import session_scope
-    from sqlalchemy import select
-    from src.models import LandscapingImportRun, LandscapingVendor, StoreLandscapingAssignment
+    from src.database import ensure_workspace_schema, get_database_url, get_engine
+    from sqlalchemy import text
 
     ensure_landscaping_tables()
-    with session_scope(action_label="Landscaping assignments imported") as session:
+    engine = get_engine(get_database_url(), schema=ensure_workspace_schema())
+    with engine.begin() as conn:
         existing_vendors = {
-            vendor.normalized_name: vendor
-            for vendor in session.scalars(select(LandscapingVendor)).all()
+            row["normalized_name"]: dict(row)
+            for row in conn.execute(text("select id, vendor_name, normalized_name, display_color from landscaping_vendors")).mappings().all()
         }
-        used_colors.update(vendor.display_color for vendor in existing_vendors.values() if vendor.display_color)
-        run = LandscapingImportRun(
-            file_name=file_name,
-            imported_at=datetime.utcnow(),
-            imported_by=imported_by,
-            rows_found=summary["rows_found"],
-            unique_stores=summary["unique_stores"],
-            matched_stores=summary["matched_stores"],
-            unmatched_stores=summary["unmatched_stores"],
-            blank_vendor_rows=summary["blank_vendor_rows"],
-        )
-        session.add(run)
-        session.flush()
+        used_colors.update(row.get("display_color") for row in existing_vendors.values() if row.get("display_color"))
+        run_id = conn.execute(
+            text(
+                """
+                insert into landscaping_import_runs (
+                    file_name, imported_at, imported_by, rows_found, unique_stores,
+                    matched_stores, unmatched_stores, blank_vendor_rows
+                )
+                values (
+                    :file_name, :imported_at, :imported_by, :rows_found, :unique_stores,
+                    :matched_stores, :unmatched_stores, :blank_vendor_rows
+                )
+                returning id
+                """
+            ),
+            {
+                "file_name": file_name,
+                "imported_at": datetime.utcnow(),
+                "imported_by": imported_by,
+                "rows_found": summary["rows_found"],
+                "unique_stores": summary["unique_stores"],
+                "matched_stores": summary["matched_stores"],
+                "unmatched_stores": summary["unmatched_stores"],
+                "blank_vendor_rows": summary["blank_vendor_rows"],
+            },
+        ).scalar()
         for _, row in preview.iterrows():
             if row["Match Status"] != "Matched" or not row.get("store_id"):
                 summary["unmatched"].append(
@@ -459,38 +472,96 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
             vendor_name = normalize_vendor_name(row.get("Landscaping Vendor", ""))
             if not vendor_name and safe_update:
                 continue
-            vendor = None
+            vendor_id = None
             if vendor_name:
                 key = vendor_key(vendor_name)
                 vendor = existing_vendors.get(key)
-                if vendor is None:
-                    vendor = LandscapingVendor(
-                        vendor_name=vendor_name,
-                        normalized_name=key,
-                        display_color=landscaping_color_for_name(vendor_name, used_colors),
-                    )
-                    session.add(vendor)
-                    session.flush()
-                    existing_vendors[key] = vendor
-                    used_colors.add(vendor.display_color)
+                if vendor:
+                    vendor_id = int(vendor["id"])
+                else:
+                    display_color = landscaping_color_for_name(vendor_name, used_colors)
+                    vendor_id = conn.execute(
+                        text(
+                            """
+                            insert into landscaping_vendors (vendor_name, normalized_name, display_color)
+                            values (:vendor_name, :normalized_name, :display_color)
+                            returning id
+                            """
+                        ),
+                        {"vendor_name": vendor_name, "normalized_name": key, "display_color": display_color},
+                    ).scalar()
+                    existing_vendors[key] = {
+                        "id": vendor_id,
+                        "vendor_name": vendor_name,
+                        "normalized_name": key,
+                        "display_color": display_color,
+                    }
+                    used_colors.add(display_color)
                     summary["new_vendors_created"] += 1
-            assignment = session.scalar(
-                select(StoreLandscapingAssignment).where(StoreLandscapingAssignment.store_id == int(row["store_id"]))
-            )
-            previous_name = assignment.vendor.vendor_name if assignment and assignment.vendor else ""
-            previous_schedule = assignment.landscaping_schedule if assignment else ""
-            new_vendor_id = vendor.id if vendor else None
+            assignment = conn.execute(
+                text(
+                    """
+                    select a.id, a.landscaping_vendor_id, a.landscaping_schedule, v.vendor_name
+                    from store_landscaping_assignments a
+                    left join landscaping_vendors v on v.id = a.landscaping_vendor_id
+                    where a.store_id = :store_id
+                    """
+                ),
+                {"store_id": int(row["store_id"])},
+            ).mappings().first()
+            previous_name = assignment["vendor_name"] if assignment else ""
+            previous_schedule = assignment["landscaping_schedule"] if assignment else ""
             new_schedule = clean_text(row.get("Landscaping Schedule", ""))
+            changed = (
+                assignment is None
+                or assignment["landscaping_vendor_id"] != vendor_id
+                or (new_schedule and previous_schedule != new_schedule)
+            )
             if assignment is None:
-                assignment = StoreLandscapingAssignment(store_id=int(row["store_id"]))
-                session.add(assignment)
-            changed = assignment.landscaping_vendor_id != new_vendor_id or (new_schedule and previous_schedule != new_schedule)
-            assignment.landscaping_vendor_id = new_vendor_id
-            if new_schedule:
-                assignment.landscaping_schedule = new_schedule
-            assignment.source = file_name
-            assignment.import_run_id = run.id
-            assignment.active = True
+                conn.execute(
+                    text(
+                        """
+                        insert into store_landscaping_assignments (
+                            store_id, landscaping_vendor_id, landscaping_schedule, source, import_run_id, active, updated_at
+                        )
+                        values (
+                            :store_id, :vendor_id, :schedule, :source, :import_run_id, true, :updated_at
+                        )
+                        """
+                    ),
+                    {
+                        "store_id": int(row["store_id"]),
+                        "vendor_id": vendor_id,
+                        "schedule": new_schedule or None,
+                        "source": file_name,
+                        "import_run_id": run_id,
+                        "updated_at": datetime.utcnow(),
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        update store_landscaping_assignments
+                        set landscaping_vendor_id = :vendor_id,
+                            landscaping_schedule = coalesce(:schedule, landscaping_schedule),
+                            source = :source,
+                            import_run_id = :import_run_id,
+                            active = true,
+                            updated_at = :updated_at
+                        where store_id = :store_id
+                        """
+                    )
+                    ,
+                    {
+                        "store_id": int(row["store_id"]),
+                        "vendor_id": vendor_id,
+                        "schedule": new_schedule or None,
+                        "source": file_name,
+                        "import_run_id": run_id,
+                        "updated_at": datetime.utcnow(),
+                    },
+                )
             if changed:
                 summary["updated_assignments"] += 1
                 summary["changes"].append(
@@ -502,11 +573,29 @@ def apply_landscaping_import(preview, file_name, imported_by="", safe_update=Tru
                 )
             else:
                 summary["unchanged_assignments"] += 1
-        run.updated_assignments = summary["updated_assignments"]
-        run.unchanged_assignments = summary["unchanged_assignments"]
-        run.new_vendors_created = summary["new_vendors_created"]
-        run.unmatched_json = json.dumps(summary["unmatched"])
-        run.changes_json = json.dumps(summary["changes"])
+        conn.execute(
+            text(
+                """
+                update landscaping_import_runs
+                set updated_assignments = :updated_assignments,
+                    unchanged_assignments = :unchanged_assignments,
+                    new_vendors_created = :new_vendors_created,
+                    unmatched_json = :unmatched_json,
+                    changes_json = :changes_json,
+                    updated_at = :updated_at
+                where id = :run_id
+                """
+            ),
+            {
+                "run_id": run_id,
+                "updated_assignments": summary["updated_assignments"],
+                "unchanged_assignments": summary["unchanged_assignments"],
+                "new_vendors_created": summary["new_vendors_created"],
+                "unmatched_json": json.dumps(summary["unmatched"]),
+                "changes_json": json.dumps(summary["changes"]),
+                "updated_at": datetime.utcnow(),
+            },
+        )
     return summary
 
 
@@ -542,35 +631,79 @@ def vendor_summary(df):
 
 
 def manual_assign_store(store_id, vendor_name, schedule="", source="Manual correction"):
-    from src.database import session_scope
-    from sqlalchemy import select
-    from src.models import LandscapingVendor, StoreLandscapingAssignment
+    from src.database import ensure_workspace_schema, get_database_url, get_engine
+    from sqlalchemy import text
 
     ensure_landscaping_tables()
     clean_name = normalize_vendor_name(vendor_name)
     key = vendor_key(clean_name)
-    with session_scope(action_label="Landscaping assignment manually updated") as session:
-        used_colors = {color for (color,) in session.query(LandscapingVendor.display_color).all() if color}
-        vendor = None
+    engine = get_engine(get_database_url(), schema=ensure_workspace_schema())
+    with engine.begin() as conn:
+        used_colors = {
+            row["display_color"]
+            for row in conn.execute(text("select display_color from landscaping_vendors where display_color is not null")).mappings().all()
+        }
+        vendor_id = None
         if clean_name:
-            vendor = session.scalar(select(LandscapingVendor).where(LandscapingVendor.normalized_name == key))
-            if vendor is None:
-                vendor = LandscapingVendor(
-                    vendor_name=clean_name,
-                    normalized_name=key,
-                    display_color=landscaping_color_for_name(clean_name, used_colors),
-                )
-                session.add(vendor)
-                session.flush()
-        assignment = session.scalar(select(StoreLandscapingAssignment).where(StoreLandscapingAssignment.store_id == int(store_id)))
-        if assignment is None:
-            assignment = StoreLandscapingAssignment(store_id=int(store_id))
-            session.add(assignment)
-        assignment.landscaping_vendor_id = vendor.id if vendor else None
-        if schedule:
-            assignment.landscaping_schedule = clean_text(schedule)
-        assignment.source = source
-        assignment.active = True
+            existing = conn.execute(
+                text("select id from landscaping_vendors where normalized_name = :normalized_name"),
+                {"normalized_name": key},
+            ).mappings().first()
+            if existing:
+                vendor_id = int(existing["id"])
+            else:
+                vendor_id = conn.execute(
+                    text(
+                        """
+                        insert into landscaping_vendors (vendor_name, normalized_name, display_color)
+                        values (:vendor_name, :normalized_name, :display_color)
+                        returning id
+                        """
+                    ),
+                    {
+                        "vendor_name": clean_name,
+                        "normalized_name": key,
+                        "display_color": landscaping_color_for_name(clean_name, used_colors),
+                    },
+                ).scalar()
+        existing_assignment = conn.execute(
+            text("select id from store_landscaping_assignments where store_id = :store_id"),
+            {"store_id": int(store_id)},
+        ).mappings().first()
+        params = {
+            "store_id": int(store_id),
+            "vendor_id": vendor_id,
+            "schedule": clean_text(schedule) or None,
+            "source": source,
+            "updated_at": datetime.utcnow(),
+        }
+        if existing_assignment:
+            conn.execute(
+                text(
+                    """
+                    update store_landscaping_assignments
+                    set landscaping_vendor_id = :vendor_id,
+                        landscaping_schedule = coalesce(:schedule, landscaping_schedule),
+                        source = :source,
+                        active = true,
+                        updated_at = :updated_at
+                    where store_id = :store_id
+                    """
+                ),
+                params,
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    insert into store_landscaping_assignments (
+                        store_id, landscaping_vendor_id, landscaping_schedule, source, active, updated_at
+                    )
+                    values (:store_id, :vendor_id, :schedule, :source, true, :updated_at)
+                    """
+                ),
+                params,
+            )
 
 
 def _cluster_points(points, max_gap_miles=85):
