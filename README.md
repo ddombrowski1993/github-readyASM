@@ -4,6 +4,24 @@ A Streamlit field-operations app for employees, stores, maps, schedules, call of
 
 This version runs as a Streamlit app. Account and workspace data require one external PostgreSQL database through `DATABASE_URL`; the app will not create or use SQLite storage for live data.
 
+## Which folder to edit
+
+Use `NEWFOLDERSSASM/github-ready` for future website changes. Add that folder
+as a local repository in GitHub Desktop, then commit changes and push to the
+existing `github-readyASM` repository. The parent folder is a separate checkout;
+changes made there do not automatically appear in `github-ready`.
+
+The app needs `app.py`, `src/`, `pages/`, `requirements.txt`, `data/`, and
+`sample_data/`. Keep `scripts/`, `.github/`, and `database_migrations/` for
+validation and maintenance. The start scripts support running locally.
+`uploads/` and `reports/` hold generated files.
+
+Local databases and cleanup backups stay out of Git. The October 26 cleanup
+archive is in the parent folder at `_cleanup_backup_20261026`; its manifest
+records how to restore archived files. The original local login and workspace
+databases remain in the parent folder. This cleanup does not restore hosted
+accounts or change the website's database connection.
+
 ## Folder Structure
 
 ```text
