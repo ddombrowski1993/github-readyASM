@@ -197,7 +197,7 @@ def render_landscaping_map(df, show_dots=True, show_territories=True, show_label
     if mapped.empty:
         st.warning("No stores with coordinates match the current filters.")
         return {}
-    fmap = folium.Map(location=center_for(mapped), zoom_start=7, tiles="OpenStreetMap")
+    fmap = folium.Map(location=center_for(mapped), zoom_start=14 if len(mapped) == 1 else 7, tiles="OpenStreetMap")
     if show_territories:
         for shape in landscaping.territory_shapes(mapped):
             label = shape["vendor"]
@@ -440,6 +440,20 @@ elif status_filter == "Unassigned":
 if not show_unassigned:
     filtered = filtered[filtered["landscaping_vendor"].astype(str).str.strip().ne("")]
 
+store_search = st.text_input(
+    "Find store on map",
+    key="landscaping_find_store_number",
+    help="Search all active stores in this workspace, across vendor and location filters.",
+).strip()
+if store_search:
+    filtered = data[
+        data["store_number"].astype(str).str.contains(store_search, case=False, na=False, regex=False)
+    ].copy()
+    st.caption("Store search takes priority over vendor, location, and assignment filters.")
+    if filtered.empty:
+        st.warning("No active store matches that number in this workspace.")
+    show_dots = True
+
 left, right = st.columns([4, 1])
 with left:
     st.subheader("Interactive Landscaping Map")
@@ -448,6 +462,7 @@ with left:
         show_dots=show_dots,
         show_territories=show_territories,
         show_labels=show_labels,
+        key=f"landscaping_map_{store_search}",
     )
 with right:
     colors = data.groupby("vendor_label")["dot_color"].first().to_dict()

@@ -1233,7 +1233,7 @@ def render_area_manager_map(
         st.info("No mapped stores found. Upload stores with latitude and longitude first.")
         return None, {}
 
-    fmap = folium.Map(location=center_for(valid), zoom_start=8, tiles="OpenStreetMap")
+    fmap = folium.Map(location=center_for(valid), zoom_start=14 if len(valid) == 1 else 8, tiles="OpenStreetMap")
     if adjusted_bounds:
         min_lat, max_lat, min_lon, max_lon = adjusted_bounds
         folium.Rectangle(
@@ -3528,6 +3528,27 @@ if assignment_editor_message:
     if assignment_editor_message.get("pmt_reconciliation_required"):
         st.warning("PMT Schedule Reconciliation Required. Store ownership was updated, but PMT schedule rows were not changed.")
 
+find_store_number = st.text_input(
+    "Find store on map",
+    key="map_find_store_number",
+    help="Search all active stores in this workspace, across team and technician filters.",
+).strip()
+if find_store_number:
+    found_stores = stores_df[
+        stores_df["store_number"].astype(str).str.contains(find_store_number, case=False, na=False, regex=False)
+    ].copy()
+    if found_stores.empty:
+        st.warning("No active store matches that number in this workspace.")
+    else:
+        st.caption("Store search takes priority over map filters. Assignments shown below are the saved assignments.")
+        st.dataframe(
+            found_stores[["store_number", "address", "city", "state", "pmt_person", "brand_area", "calibration_person"]].rename(
+                columns={"pmt_person": "Assigned PMT", "brand_area": "Assigned Brand Area", "calibration_person": "Assigned Calibration"}
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
 control_cols = st.columns([0.25, 0.25, 0.25, 0.25])
 view_mode = control_cols[0].selectbox("Select Work Group View", ["All Stores Overview", "Brand Enhancement", "PMT", "Calibration", "Landscaping Map"])
 if view_mode == "Landscaping Map":
@@ -3584,6 +3605,9 @@ if view_mode != "All Stores Overview" and config:
     else:
         visible_stores = visible_stores[selected_mask | non_service_mask]
 
+if find_store_number:
+    visible_stores = found_stores.copy()
+
 if view_mode == "All Stores Overview":
     st.subheader("All Stores Overview")
     o1, o2, o3, o4, o5 = st.columns(5)
@@ -3599,7 +3623,7 @@ if view_mode == "All Stores Overview":
         selected_team_id=None,
         selected_ids=set(),
         enable_draw=False,
-        key="all_stores_overview_map",
+        key=f"all_stores_overview_map_{find_store_number}",
         teams_df=team_df,
         team_anchor_stores_df=stores_df,
     )
@@ -4576,8 +4600,13 @@ if selected_group in ("PMT", "Calibration"):
         tech_visible = tech_visible[(tech_visible[tech_config["employee_field"]] == int(selected_tech_employee)) | tech_non_service_mask]
     elif not show_unassigned_tech:
         tech_visible = tech_visible[tech_visible[tech_config["employee_field"]].notna() | tech_non_service_mask]
-    if search_store.strip():
-        tech_visible = tech_visible[tech_visible["store_number"].astype(str).str.contains(search_store.strip(), case=False, na=False)]
+    map_store_search = find_store_number or search_store.strip()
+    if map_store_search:
+        # A store lookup must not silently fail because another technician is selected.
+        tech_visible = stores_df[
+            stores_df["store_number"].astype(str).str.contains(map_store_search, case=False, na=False, regex=False)
+        ].copy()
+        st.caption("Searching all active stores in this workspace, regardless of the technician filter.")
     tech_map, tech_map_data = render_area_manager_map(
         tech_visible,
         pd.DataFrame(),
@@ -4585,7 +4614,7 @@ if selected_group in ("PMT", "Calibration"):
         selected_team_id=None,
         selected_ids=set(),
         enable_draw=True,
-        key=f"{selected_group}_assignment_map_{selected_tech_employee or 'all'}_{show_unassigned_tech}_{search_store}",
+        key=f"{selected_group}_assignment_map_{selected_tech_employee or 'all'}_{show_unassigned_tech}_{map_store_search}",
         technicians_df=tech_summary,
     )
     if tech_map:
@@ -5100,7 +5129,7 @@ fmap, map_data = render_area_manager_map(
     selected_team_id=int(selected_team_id) if selected_team_id else None,
     selected_ids=selected_store_ids,
     enable_draw=map_task in ("Create Area", "Edit Selected Area"),
-    key=f"area_manager_{selected_group}_{map_task}_{selected_team_id or 'none'}",
+    key=f"area_manager_{selected_group}_{map_task}_{selected_team_id or 'none'}_{find_store_number}",
     teams_df=group_teams,
     team_anchor_stores_df=stores_df,
     adjusted_bounds=adjusted_bounds,
