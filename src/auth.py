@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import re
@@ -12,6 +13,8 @@ import streamlit as st
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
+
+from src.auth_diagnostics import diagnose
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -388,11 +391,38 @@ def _verify_database_identity(engine):
             )
 
 
+def _verify_existing_accounts(engine):
+    """An existing hosted deployment must not silently become a new installation."""
+    if engine.dialect.name != "postgresql":
+        return
+    if _secret_or_env("FIELD_PLANNER_ALLOW_FIRST_ACCOUNT_SETUP").lower() == "true":
+        return
+    with engine.connect() as conn:
+        exists = inspect(conn).has_table("app_users", schema="public")
+        count = conn.execute(text("select count(*) from public.app_users")).scalar() if exists else 0
+    if not count:
+        try:
+            report = diagnose(engine, _secret_or_env("FIELD_PLANNER_DATABASE_INSTANCE_ID"))
+            LOGGER.error("Account storage diagnostic: %s", json.dumps(report))
+        except Exception as exc:
+            LOGGER.error("Account storage diagnostic failed (%s)", type(exc).__name__)
+        raise DatabaseUnavailable(
+            "The connected PostgreSQL database has no login accounts in public.app_users. "
+            "This does not establish that your accounts were deleted: DATABASE_URL may point "
+            "to a different database, or older accounts may be in another schema. "
+            "First-account setup is blocked to avoid replacing an existing installation. "
+            "Check Manage app logs for Account storage diagnostic, or run "
+            "python scripts/diagnose_accounts.py in the hosting environment. Check "
+            "the configured database against your original provider project and backup."
+        )
+
+
 def init_auth_db():
     if not using_hosted_database():
         ACCOUNT_DATABASE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         engine = _engine()
+        _verify_existing_accounts(engine)
         _verify_database_identity(engine)
         users_table = _public_table("app_users")
         with engine.begin() as conn:

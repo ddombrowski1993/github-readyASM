@@ -4,6 +4,24 @@ A Streamlit field-operations app for employees, stores, maps, schedules, call of
 
 This version runs as a Streamlit app. Account and workspace data require one external PostgreSQL database through `DATABASE_URL`; the app will not create or use SQLite storage for live data.
 
+## Which folder to edit
+
+Use `NEWFOLDERSSASM/github-ready` for future website changes. Add that folder
+as a local repository in GitHub Desktop, then commit changes and push to the
+existing `github-readyASM` repository. The parent folder is a separate checkout;
+changes made there do not automatically appear in `github-ready`.
+
+The app needs `app.py`, `src/`, `pages/`, `requirements.txt`, `data/`, and
+`sample_data/`. Keep `scripts/`, `.github/`, and `database_migrations/` for
+validation and maintenance. The start scripts support running locally.
+`uploads/` and `reports/` hold generated files.
+
+Local databases and cleanup backups stay out of Git. The October 26 cleanup
+archive is in the parent folder at `_cleanup_backup_20261026`; its manifest
+records how to restore archived files. The original local login and workspace
+databases remain in the parent folder. This cleanup does not restore hosted
+accounts or change the website's database connection.
+
 ## Folder Structure
 
 ```text
@@ -80,6 +98,38 @@ Recommended hosted database backup process:
 - Restore provider backups through the database provider first; use Settings > Backup restore only for workspace-level merge recovery.
 
 ## Clean Upload Package
+
+### Recovering a missing-account login
+
+The login code reads accounts from `public.app_users`. Existing July login fixes
+are included. An empty or missing hosted account table now stops startup before
+creating account tables or metadata, instead of suggesting a new first account.
+This check does not recover missing records or select a different database.
+
+When no hosted accounts are found, a read-only diagnostic runs automatically
+and writes `Account storage diagnostic` to the private Streamlit Cloud logs.
+Open **Manage app** to view those logs after pushing this update.
+
+You can also run `python scripts/diagnose_accounts.py` with the deployed app's secrets or
+environment. It runs a read-only transaction, reports account counts across
+accessible schemas, and checks the configured database identifier. It prints
+no passwords, connection strings, email addresses, or password hashes. Keep its
+host and schema details private. A local run without the deployed configuration
+cannot diagnose the live database.
+
+If accounts exist outside `public`, review the original schema before planning
+a migration. If none exist, check the original database provider project,
+database name, and provider backups. Do not create replacement accounts to
+recover an existing workspace.
+
+For an intentionally new installation only, temporarily set
+`FIELD_PLANNER_ALLOW_FIRST_ACCOUNT_SETUP = "true"` along with any required
+database metadata bootstrap setting. Remove these settings after creating the
+first account. Existing installations with accounts need neither setting.
+
+Run storage regression checks with
+`python -m unittest discover -s tests -v`. These use simulated database responses;
+live PostgreSQL verification still requires the deployment configuration.
 
 For deployment, upload the cleaned project folder or the generated zip package from the parent folder. Do not upload local database files:
 
