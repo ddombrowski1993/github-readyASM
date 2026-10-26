@@ -1,0 +1,3 @@
+[client]
+# The app renders its own role-aware navigation after login.
+showSidebarNavigation = false

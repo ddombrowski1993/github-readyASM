@@ -83,7 +83,7 @@ def apply_theme():
             background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%);
             border-right: 1px solid #cbd5e1;
         }
-        div[data-testid="stSidebarNav"] {
+        [data-testid="stSidebarNav"] {
             display: none;
         }
         div[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
@@ -880,6 +880,9 @@ def step_flow(steps, hint=""):
 
 
 def sidebar_nav():
+    if not st.session_state.get("authenticated"):
+        return
+
     from src.database import latest_undo_snapshot, restore_latest_undo_snapshot, workspace_context_diagnostics
 
     if st.session_state.get("authenticated"):
@@ -1162,6 +1165,17 @@ def require_login():
         return True
     if st.session_state.get("authenticated") and not st.session_state.get("account_slug"):
         sign_out()
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     try:
         init_auth_db()
         first_account = user_count() == 0
