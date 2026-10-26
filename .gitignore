@@ -29,3 +29,6 @@ _cleanup_backup*/
 ASMready/
 account_databases/.streamlit/
 database_backups/
+
+# Private Streamlit deployment credentials
+.streamlit/secrets.toml
