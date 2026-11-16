@@ -503,7 +503,6 @@ def test_workspace_adapter_routes_shared_save_and_read_to_effective_schema(db,mo
     monkeypatch.setattr(adapter,'get_database_url',lambda:str(engine.url))
     monkeypatch.setattr(adapter,'get_engine',lambda url,schema=None:engine)
     monkeypatch.setattr(adapter.st,'session_state',{})
-    adapter._ensure_workspace_bet_tables.clear()
     created=adapter.save_store_services(store_id=1,service_year=2026,services=['power_washing'],completed_date=TODAY,today=TODAY)
     assert len(created)==1
     assert service_status_rows(adapter.load_bet_services(2026))[0]['power_washing_complete']

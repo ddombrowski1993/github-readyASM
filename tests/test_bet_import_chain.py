@@ -26,8 +26,8 @@ def forbidden(*args, **kwargs):
 sqlalchemy.create_engine = forbidden
 Engine.connect = forbidden
 from src.models import BetServiceCompletion, BetServiceExpectation, AuditLog, Employee, MapArea, Store, Team
-assert BetServiceCompletion.__module__ == 'src.models'
-assert BetServiceExpectation.__module__ == 'src.models'
+assert BetServiceCompletion.__module__ == 'src.bet_models'
+assert BetServiceExpectation.__module__ == 'src.bet_models'
 print('models ok')
 from src.bet_services import SERVICES, service_status_rows
 from src.bet_service_types import SERVICES as shared_services
@@ -49,23 +49,19 @@ assert assignment_status_color('other_same_group') == '#dc2626'
 ''')
 
 
-def test_stale_model_module_cannot_break_existing_map_helpers():
-    # Reproduce an old already-loaded models module without changing any source or tables.
-    output = run_fresh('''
+def test_services_use_canonical_models_when_legacy_exports_are_stale():
+    run_fresh("""
 import src.models as models
-for name in ['BetServiceCompletion','BetServiceExpectation']:
+from src.bet_models import BetServiceCompletion, BetServiceExpectation
+assert models.BetServiceCompletion is BetServiceCompletion
+assert models.BetServiceExpectation is BetServiceExpectation
+for name in ['BetServiceCompletion', 'BetServiceExpectation']:
     delattr(models, name)
-from src.bet_service_map import assignment_status_color, add_completion_halo, add_completion_legend, completion_popup, clicked_store_id
-print('existing map helpers still import')
-try:
-    from src.bet_services import service_status_rows
-except ImportError as exc:
-    assert "cannot import name 'BetServiceCompletion'" in str(exc)
-    print(type(exc).__name__ + ': ' + str(exc))
-else:
-    raise AssertionError('The intentionally stale model module should reject tracker import')
-''')
-    assert 'existing map helpers still import' in output
+from src.bet_services import working_today
+from src.bet_service_store import load_bet_services
+from src.bet_service_map import assignment_status_color
+print('canonical imports ok')
+""")
 
 
 def test_optional_layer_reports_import_failure_and_leaves_no_partial_overlay():

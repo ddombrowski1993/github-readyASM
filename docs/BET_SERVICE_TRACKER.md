@@ -45,11 +45,28 @@ The applicability model is ready for power-wash-only or striping-only stores;
 there is no applicability administration screen in Version 1.
 
 Both tables live in the app's existing effective account PostgreSQL schema.
-Initialization is additive and uses the normal model metadata plus a targeted,
-workspace-keyed initializer. Production requires the existing PostgreSQL setup;
-this feature does not introduce a SQLite fallback or change authentication.
-Deploying the code and opening the app creates the new tables; no production test
-records or territory changes were made during development.
+BET tables are excluded from runtime schema initialization. Data loading validates
+that both tables and their expected columns exist and reports a migration error
+without creating tables. Production keeps the existing PostgreSQL configuration;
+authentication and workspace selection are unchanged.
+
+Run the controlled migration for each existing effective workspace schema using
+the deployed database configuration (replace `workspace_schema`):
+
+```bash
+python scripts/migrate_bet_services.py --schema workspace_schema --apply
+python scripts/migrate_bet_services.py --schema workspace_schema
+```
+
+The command defaults to a read-only check. `--apply` creates only missing BET
+tables in one transaction under a PostgreSQL advisory lock. Repeated execution
+preserves existing tables and completion data. It never creates workspace schemas,
+drops/recreates tables, seeds rows, or changes assignments. Existing tables missing
+required columns produce an error for explicit review rather than destructive repair.
+
+The canonical classes are in `src/bet_models.py`, sharing the SQLAlchemy registry
+in `src/model_base.py`. `src.models` re-exports the identical classes for compatibility.
+The service and schema adapter import BET classes from their canonical module.
 
 The shared core writer is `save_bet_service_completion` in `src/bet_services.py`.
 `save_store_services` in `src/bet_service_store.py` provides the authenticated,
@@ -185,3 +202,26 @@ and `README.md` (feature entry).
 Checkpoint branches were created before the overall feature and before entry,
 overview, map halos, and dashboard phases. Each completed phase is committed
 separately for review and rollback.
+
+## Dependency and controlled-schema repair — November 16, 2026
+
+Checkpoint: `checkpoint-before-bet-schema-fix-20261116` (`5a6cecc`).
+Both original direct imports passed before this repair; the production ImportError
+was not reproduced locally. The service now imports BET models directly from
+`src.bet_models`, and regression coverage removes the compatibility exports from
+an already-loaded `src.models` to verify that this no longer blocks the service.
+The shared base has no service, database, authentication, or page dependencies.
+There is one mapping per table; model columns and constraints are unchanged.
+
+Confirmed schema defect: normal BET data loading created tables, and three broad
+runtime metadata initializers could also create them. All runtime paths now exclude
+BET DDL. The explicit migration was applied twice to the six existing `fp_`
+workspace schemas containing stores in the configured PostgreSQL database. Both
+runs and subsequent schema checks succeeded. No application rows were inserted,
+updated, or deleted; no existing tables were dropped or recreated.
+
+Local verification: full suite **50 passed, 27 skipped** (disposable PostgreSQL
+server not configured). Final targeted migration/import/page tests **12 passed,
+1 skipped**. Map Center import and the full four-tab tracker passed Streamlit
+AppTest with isolated fixtures. Direct model/service/map imports, SQL safety, and
+whitespace checks passed. Streamlit Cloud deployment itself was not inspected.

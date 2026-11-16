@@ -46,5 +46,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -r requirements.txt pytest
+      - name: Direct BET dependency imports
+        run: |
+          python -c "from src.models import AuditLog, BetServiceCompletion, BetServiceExpectation, Employee, MapArea, Store, Team; print('BET model imports OK')"
+          python -c "from src.bet_services import working_today; print('BET services import OK')"
+          python -c "from src.bet_service_map import assignment_status_color, add_completion_halo; print('BET map imports OK')"
       - name: BET acceptance and existing account regression tests
         run: python -m pytest tests -q

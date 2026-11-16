@@ -5,8 +5,8 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from src.models import (AuditLog, BetServiceCompletion, BetServiceExpectation,
-                        Employee, MapArea, Store, Team)
+from src.bet_models import BetServiceCompletion, BetServiceExpectation
+from src.models import AuditLog, Employee, MapArea, Store, Team
 from src.bet_service_types import SERVICES
 
 WORK_TIMEZONE = "America/New_York"

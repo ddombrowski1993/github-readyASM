@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from src.auth import authenticated_user_id, current_account_schema, using_hosted_database
 from src.database import get_database_url, get_engine, _apply_workspace_search_path
-from src.models import BetServiceCompletion, BetServiceExpectation
+from src.bet_schema import require_bet_schema
 from src.bet_services import ServiceActor, read_bet_service_data, save_bet_service_completion, void_bet_service_completion
 
 
@@ -19,18 +19,6 @@ def current_service_actor():
                         st.session_state.get("account_role", "User"))
 
 
-def ensure_bet_service_tables(engine):
-    # Only additive BET tables; no seed data, territory creation, or schedule changes.
-    BetServiceCompletion.__table__.create(engine, checkfirst=True)
-    BetServiceExpectation.__table__.create(engine, checkfirst=True)
-
-
-@st.cache_resource(show_spinner=False)
-def _ensure_workspace_bet_tables(url, schema):
-    ensure_bet_service_tables(get_engine(url, schema=schema))
-    return True
-
-
 @contextmanager
 def bet_service_session():
     current_service_actor()
@@ -40,10 +28,11 @@ def bet_service_session():
     if st.session_state.get("manager_rollup_active"):
         raise PermissionError("Select one workspace instead of All Managed Users to use BET Service Tracker.")
     engine = get_engine(get_database_url(), schema=schema)
-    _ensure_workspace_bet_tables(get_database_url(), schema)
     with Session(engine) as session:
         with session.begin():
-            _apply_workspace_search_path(session.connection(), schema)
+            connection = session.connection()
+            _apply_workspace_search_path(connection, schema)
+            require_bet_schema(connection, schema)
             yield session
 
 

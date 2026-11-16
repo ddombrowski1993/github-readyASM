@@ -237,7 +237,10 @@ def init_db():
 def ensure_runtime_schema_compatibility():
     schema = ensure_workspace_schema()
     engine = get_engine(get_database_url(), schema=schema or None)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, tables=[
+        table for table in Base.metadata.sorted_tables
+        if table.name not in {"bet_service_completions", "bet_service_expectations"}
+    ])
     ensure_schema_updates(engine)
     return True
 
@@ -245,7 +248,10 @@ def ensure_runtime_schema_compatibility():
 @st.cache_resource(show_spinner=False)
 def _init_db_for_schema(url, schema):
     engine = get_engine(url, schema=schema or None)
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, tables=[
+        table for table in Base.metadata.sorted_tables
+        if table.name not in {"bet_service_completions", "bet_service_expectations"}
+    ])
     ensure_undo_table(engine)
     ensure_pmt_assignment_changes_table(engine)
     ensure_pm_work_order_analytics_tables(engine)
@@ -343,7 +349,10 @@ def _ensure_pm_work_order_analytics_tables_for_schema(url, schema):
 
 
 def _ensure_pm_work_order_analytics_tables_for_engine(engine):
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine, tables=[
+        table for table in Base.metadata.sorted_tables
+        if table.name not in {"bet_service_completions", "bet_service_expectations"}
+    ])
     index_statements = [
         "create index if not exists ix_pm_wo_runs_workspace_uploaded on pm_work_order_upload_runs (workspace_key, uploaded_at)",
         "create index if not exists ix_pm_wo_snapshot_workspace_status on pm_work_order_snapshots (workspace_key, normalized_status)",
