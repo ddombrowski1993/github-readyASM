@@ -107,18 +107,25 @@ def render_completion_form(row, data, key_prefix="search", source="Store search"
                     st.error("Could not correct this entry. Please retry.")
 
 
-def render_store_search(data):
+def render_store_search(data, rows=None, key_prefix="search"):
+    """Find a store within the supplied area or the entire workspace."""
     st.subheader("Find Store")
-    query = st.text_input("Store Number", key="bet_store_search", placeholder="45555").strip()
+    search_key = "bet_store_search" if key_prefix == "search" else f"bet_store_search_{key_prefix}"
+    query = st.text_input("Store Number", key=search_key, placeholder="45555").strip()
     if not query:
         st.info("Search a store number to log Power Washing and/or Lot Striping.")
         return
-    rows = service_status_rows(data)
+    rows = service_status_rows(data) if rows is None else rows
     exact = [r for r in rows if str(r["store_number"]).strip().casefold() == query.casefold()]
     matches = exact or [r for r in rows if query.casefold() in str(r["store_number"]).casefold()]
     if not matches:
-        st.warning("No active master store matches that number in this workspace.")
+        st.warning("No store matches that number in this area." if key_prefix != "search"
+                   else "No active master store matches that number in this workspace.")
         return
     lookup = {r["id"]: r for r in matches}
-    sid = st.selectbox("Matching store", list(lookup), format_func=lambda i: f"{lookup[i]['store_number']} — {lookup[i].get('city') or ''}")
-    render_completion_form(lookup[sid], data)
+    if len(matches) == 1:
+        sid = matches[0]["id"]
+    else:
+        sid = st.selectbox("Matching store", list(lookup), key=search_key + "_match",
+            format_func=lambda i: f"{lookup[i]['store_number']} — {lookup[i].get('city') or ''}")
+    render_completion_form(lookup[sid], data, key_prefix=key_prefix)

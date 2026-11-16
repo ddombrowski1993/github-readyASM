@@ -528,3 +528,42 @@ def test_hosted_tracker_rejects_missing_workspace_before_engine_access(monkeypat
     with pytest.raises(PermissionError):
         with adapter.bet_service_session():pass
     get_engine.assert_not_called()
+
+
+def test_area_overview_search_opens_checkboxes_and_saves_only_selected_store(db, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from src import bet_service_store as store, bet_service_ui as ui
+    factory, _ = db
+    with factory.begin() as session:
+        other = session.get(Store, 2)
+        other.assigned_brand_team_id = 2
+        other.assigned_brand_employee_id = 2
+    monkeypatch.setattr(store, 'load_bet_services', lambda year: data(factory, year))
+    monkeypatch.setattr(ui, 'current_service_actor', lambda: JASON)
+    monkeypatch.setattr(ui, 'working_today', lambda: TODAY)
+    monkeypatch.setattr(ui, 'save_store_services', lambda **kwargs: save(factory, **kwargs))
+    app = AppTest.from_string("""
+from src.bet_service_store import load_bet_services
+from src.bet_service_reporting import render_overview
+render_overview(load_bet_services(2026))
+""", default_timeout=20).run()
+    assert not app.exception
+    area = next(e for e in app.expander if e.label.startswith('Jason Area —'))
+    search_key = area.text_input[0].key
+    app.text_input(key=search_key).set_value('45556').run()
+    assert any('No store matches' in w.value for w in app.warning)
+    assert not any(c.label == 'Power Washing Completed' for c in app.checkbox)
+    app.text_input(key=search_key).set_value('45555').run()
+    assert not app.exception
+    assert any(h.value == 'Store 45555' for h in app.subheader)
+    assert not any(s.label == 'Matching store' for s in app.selectbox)
+    next(c for c in app.checkbox if c.label == 'Power Washing Completed').check()
+    next(c for c in app.checkbox if c.label == 'Lot Striping Completed').check()
+    next(b for b in app.button if b.label == 'Save Service Completion').click().run()
+    assert not app.exception
+    rows = {r['id']: r for r in service_status_rows(data(factory))}
+    assert rows[1]['power_washing_complete'] and rows[1]['lot_striping_complete']
+    assert not rows[2]['power_washing_complete'] and not rows[2]['lot_striping_complete']
+    for label in ['Power Washing Completed', 'Lot Striping Completed']:
+        checkbox = next(c for c in app.checkbox if c.label == label)
+        assert checkbox.value and checkbox.disabled

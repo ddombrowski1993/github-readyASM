@@ -71,6 +71,8 @@ def render_progress_metrics(rows):
 
 
 def render_overview(data):
+    from src.bet_service_ui import render_store_search
+
     rows = [r for r in service_status_rows(data) if r['bet_assigned'] and r['field_service']]
     st.subheader('Current Territory Progress')
     st.caption('Current assignments define workload. A completed service stays complete for this year after reassignment; historical worker credit is shown separately below.')
@@ -91,6 +93,9 @@ def render_overview(data):
                 ratio = applicable_done / expected if expected else 0
                 st.write(f"{label}: {applicable_done} / {expected} ({ratio:.1%}) · {team[service + '_remaining']} remaining")
             st.write(f"Services completed: {team['applicable_services_completed']} / {team['expected_services']} applicable services")
+            st.caption('Enter a store number in this area, check completed services, and save.')
+            render_store_search(data, rows=owned,
+                key_prefix=f"area_{group_by}_{team['owner_key']}")
             show = st.selectbox('Show stores behind these counts', STATUS_FILTERS, key='bet_drill_' + team['owner_key'])
             st.dataframe(status_table(filter_status(owned, show)), use_container_width=True, hide_index=True)
     st.subheader('Completed Today — Historical Work Credit')
