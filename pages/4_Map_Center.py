@@ -20,6 +20,7 @@ from folium.plugins import Draw, FastMarkerCluster, MarkerCluster
 from streamlit_folium import st_folium
 
 from src.anchor_store import app_city_center_for
+from src.bet_service_map import assignment_status_color, add_completion_halo, add_completion_legend, completion_popup, clicked_store_id
 from src.database import active_employees, ensure_pmt_assignment_changes_table, log_action, safe_query, session_scope, teams
 from src.employee_deactivation import clear_technician_store_assignments
 from src.exports import csv_bytes, excel_bytes
@@ -1066,13 +1067,7 @@ def store_status_for_map(row, group, selected_team_id=None, selected_ids=None):
 
 
 def marker_color(status):
-    return {
-        "unassigned": "#9ca3af",
-        "current_area": "#16a34a",
-        "selected": "#f59e0b",
-        "other_same_group": "#dc2626",
-        "different_group": "#2563eb",
-    }.get(status, "#2563eb")
+    return assignment_status_color(status)
 
 
 def service_type_counts(df):
@@ -1224,6 +1219,8 @@ def render_area_manager_map(
     adjusted_bounds=None,
     include_ids=None,
     excluded_ids=None,
+    bet_completion_status=None,
+    bet_completion_mode="Overall Completion",
 ):
     selected_ids = set(selected_ids or [])
     include_ids = set(include_ids or [])
@@ -1248,6 +1245,8 @@ def render_area_manager_map(
         ).add_to(fmap)
     tech_color_lookup = technician_color_lookup(valid, group)
     add_area_overlays(fmap, colorized_technician_areas(areas_df, tech_color_lookup, group))
+    if group == "Brand Enhancement" and bet_completion_status is not None:
+        add_completion_legend(fmap, bet_completion_mode)
     non_service_count = int((~field_service_mask(valid)).sum())
     if non_service_count:
         legend_html = (
@@ -1337,6 +1336,12 @@ def render_area_manager_map(
         else:
             tooltip_assignment = f"PMT Technician: {pmt_person}"
         popup = map_popup_html(row)
+        if group == "Brand Enhancement" and bet_completion_status is not None:
+            completion = bet_completion_status.get(store_id)
+            if completion:
+                radius = 8 if store_id in include_ids else 7 if store_id in excluded_ids or state in ("selected", "current_area") else (6 if not is_service_store else 5)
+                add_completion_halo(fmap, completion, bet_completion_mode, inner_radius=radius)
+                popup += f'<br><span data-bet-store-id="{store_id}"></span>' + completion_popup(completion)
         folium.CircleMarker(
             [float(row["latitude"]), float(row["longitude"])],
             radius=8 if store_id in include_ids else 7 if store_id in excluded_ids or state in ("selected", "current_area") else (6 if not is_service_store else 5),
@@ -1379,6 +1384,8 @@ def render_area_manager_map(
         ).add_to(fmap)
 
     returned_objects = ["last_object_clicked", "all_drawings"] if enable_draw else ["last_object_clicked"]
+    if group == "Brand Enhancement" and bet_completion_status is not None:
+        returned_objects.append("last_object_clicked_popup")
     return fmap, st_folium(fmap, width=None, height=620, key=key, returned_objects=returned_objects)
 
 
@@ -3557,6 +3564,8 @@ if view_mode == "Landscaping Map":
     st.page_link("pages/20_Landscaping_Map.py", label="Open Landscaping Map")
     st.stop()
 selected_group = None if view_mode == "All Stores Overview" else view_mode
+if selected_group == "Brand Enhancement":
+    st.page_link("pages/21_BET_Service_Tracker.py", label="BET Service Completion — Overview, Log Work, Service Map, History")
 config = group_config(selected_group)
 if selected_group:
     group_teams = teams_for_group(team_df, stores_df, selected_group)
@@ -5122,6 +5131,20 @@ if not preview_selected.empty and selected_target_team:
     preview_excluded_ids = set(preview_selected["id"].astype(int).tolist()) - preview_include_ids
 st.caption("Draw a polygon or rectangle to select stores. Red dots are assigned to another area in the same group. The orange dashed box shows the stretched boundary when stretch miles are used.")
 st.caption("Green outlined dots will be saved. Red outlined/dashed dots are inside the drawing but excluded by target count, service type, or move rules.")
+bet_completion_status = None
+bet_completion_mode = "Overall Completion"
+bet_service_data = None
+if selected_group == "Brand Enhancement":
+    if st.checkbox("Show BET service completion halos", value=False, key="brand_service_halos"):
+        from src.bet_services import service_status_rows, working_today
+        from src.bet_service_store import load_bet_services
+        bet_year = int(st.number_input("BET Service Year", min_value=2000, max_value=2200, value=working_today().year))
+        bet_completion_mode = st.selectbox("BET Completion Display", ["Overall Completion", "Power Washing", "Lot Striping"])
+        try:
+            bet_service_data = load_bet_services(bet_year)
+            bet_completion_status = {r["id"]: r for r in service_status_rows(bet_service_data)}
+        except Exception:
+            st.error("Service completion data could not be loaded. Territory assignments are still shown.")
 fmap, map_data = render_area_manager_map(
     visible_stores,
     map_areas,
@@ -5135,12 +5158,20 @@ fmap, map_data = render_area_manager_map(
     adjusted_bounds=adjusted_bounds,
     include_ids=preview_include_ids,
     excluded_ids=preview_excluded_ids,
+    bet_completion_status=bet_completion_status,
+    bet_completion_mode=bet_completion_mode,
 )
 if fmap:
     st.download_button("Export Map", data=map_html(fmap), file_name="store_area_map.html")
     if st.button("Refresh included/excluded dot colors", type="secondary", key=f"refresh_area_preview_{selected_group}_{selected_team_id or 'none'}"):
         st.rerun()
 render_store_assignment_editor(stores_df, map_data, assignment_emp_df, team_df, f"{selected_group}_area_store_editor")
+if selected_group == "Brand Enhancement" and bet_service_data is not None:
+    from src.bet_service_ui import render_completion_form
+    clicked_id = clicked_store_id(map_data, list(bet_completion_status.values()))
+    if clicked_id:
+        st.subheader("BET Service Changes")
+        render_completion_form(bet_completion_status[clicked_id], bet_service_data, key_prefix="area_map", source="Map entry")
 
 drawings = map_data.get("all_drawings") if map_data else []
 if drawings:

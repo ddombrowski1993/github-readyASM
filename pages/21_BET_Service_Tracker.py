@@ -8,6 +8,7 @@ from src.bet_services import working_today
 from src.bet_service_store import load_bet_services
 from src.bet_service_ui import render_store_search
 from src.bet_service_reporting import render_overview, render_history
+from src.bet_service_map import render_service_map
 from src.utils import apply_theme, sidebar_nav, require_login, ensure_database_or_stop, is_all_managed_view
 
 apply_theme()
@@ -36,10 +37,12 @@ except Exception:
     logging.getLogger(__name__).exception("BET tracker could not load workspace data")
     st.error("BET service data could not be loaded. Check the database connection and retry.")
     st.stop()
-overview, log, history = st.tabs(["Overview", "Log Service Completion", "Completed Stores / History"])
+overview, log, service_map, history = st.tabs(["Overview", "Log Service Completion", "Service Map", "Completed Stores / History"])
 with overview:
     render_overview(data)
 with log:
     render_store_search(data)
+with service_map:
+    render_service_map(data)
 with history:
     render_history(data)

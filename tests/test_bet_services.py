@@ -315,3 +315,60 @@ render_history(snapshot)
     assert not app.exception
     # The team's drilldown contains precisely the completed store, not 10 assigned rows.
     assert any(list(df.value.get('Store',[])) == ['45555'] for df in app.dataframe)
+
+
+def test_halo_acceptance_preserves_base_marker_colors_and_click_identity(db):
+    import folium
+    from src.bet_service_map import (build_service_map, completion_halo_color, clicked_store_id,
+                                    assignment_status_color)
+    factory,_=db
+    def markers():
+        row=service_status_rows(data(factory))[0]
+        fmap=build_service_map([row],data(factory)['areas'])
+        assert fmap is not None
+        circles=[c for c in fmap._children.values() if isinstance(c,folium.CircleMarker)]
+        html=fmap.get_root().render()
+        assert 'BET Service Status' in html and 'BET Territory Assignment' in html
+        return row,circles,html
+    row,circles,_=markers()
+    baseline=circles[-1].options['fillColor']
+    assert baseline==assignment_status_color('other_same_group')
+    assert len(circles)==1 and completion_halo_color(row) is None
+    save(factory)
+    row,circles,html=markers()
+    assert len(circles)==2 and circles[0].options['color']=='#eab308'
+    assert circles[0].options['fill'] is False
+    assert circles[-1].options['fillColor']==baseline
+    assert 'Power Washing: Completed' in html
+    assert completion_halo_color(row,'Power Washing')=='#16a34a'
+    assert completion_halo_color(row,'Lot Striping') is None
+    save(factory,services=('lot_striping',))
+    row,circles,_=markers()
+    assert circles[0].options['color']=='#16a34a'
+    assert circles[-1].options['fillColor']==baseline
+    assert clicked_store_id({'last_object_clicked_popup':'<span data-bet-store-id="1"></span>'},[row])==1
+    assert clicked_store_id({'last_object_clicked_popup':'<span data-bet-store-id="999"></span>'},[row]) is None
+
+
+def test_map_entry_uses_same_save_backend(db,monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from src import bet_service_store as store,bet_service_map as service_map,bet_service_ui as ui
+    factory,_=db
+    monkeypatch.setattr(store,'load_bet_services',lambda year:data(factory,year))
+    monkeypatch.setattr(ui,'current_service_actor',lambda:JASON)
+    monkeypatch.setattr(ui,'working_today',lambda:TODAY)
+    monkeypatch.setattr(ui,'save_store_services',lambda **kwargs:save(factory,**kwargs))
+    monkeypatch.setattr(service_map,'st_folium',lambda *a,**kw:{'last_object_clicked_popup':'<span data-bet-store-id="1"></span>'})
+    app=AppTest.from_string('''
+from src.bet_service_map import render_service_map
+from src.bet_service_store import load_bet_services
+render_service_map(load_bet_services(2026))
+''',default_timeout=20).run()
+    assert not app.exception
+    assert any(x.value=='Store 45555' for x in app.subheader)
+    next(x for x in app.checkbox if x.label=='Power Washing Completed').check()
+    next(x for x in app.button if x.label=='Save Service Changes').click().run()
+    assert not app.exception
+    row=service_status_rows(data(factory))[0]
+    assert row['power_washing_complete'] and not row['lot_striping_complete']
+    assert data(factory)['completions'][0]['source']=='Map entry'

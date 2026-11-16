@@ -34,7 +34,8 @@ def render_completion_form(row, data, key_prefix="search", source="Store search"
         return
     st.write(f"Credit new completion to: **{row['bet_employee_name'] or row['bet_team_name']}**")
     version = "_".join(str(row[s + "_record_id"] or 0) for s in SERVICES)
-    key = f"bet_{key_prefix}_{year}_{row['id']}_{version}"
+    scope = st.session_state.get("effective_account_slug") or st.session_state.get("active_account_slug") or st.session_state.get("account_slug") or "workspace"
+    key = f"bet_{scope}_{key_prefix}_{year}_{row['id']}_{version}"
     with st.form(key):
         selected = []
         for service, label in SERVICES.items():

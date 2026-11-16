@@ -39,14 +39,15 @@ def _assignment_catalog(session):
     employees = {e.id: e for e in session.scalars(select(Employee)).all()}
     teams = {t.id: t for t in session.scalars(select(Team)).all()}
     area_people = {}
-    for area in session.scalars(select(MapArea).where(MapArea.active.is_(True), MapArea.area_type == "Brand Enhancement")).all():
+    areas = session.scalars(select(MapArea).where(MapArea.active.is_(True), MapArea.area_type == "Brand Enhancement")).all()
+    for area in areas:
         if area.employee_id:
             area_people.setdefault(area.team_id, set()).add(area.employee_id)
-    return employees, teams, area_people
+    return employees, teams, area_people, areas
 
 
 def _assignment(store, catalog):
-    employees, teams, area_people = catalog
+    employees, teams, area_people = catalog[:3]
     team = teams.get(store.assigned_brand_team_id)
     employee_id = store.assigned_brand_employee_id
     if not employee_id and team:
@@ -84,7 +85,8 @@ def read_bet_service_data(session, service_year):
         BetServiceExpectation.service_year == service_year)).all()}
     return {"year": service_year, "stores": stores, "completions": completions, "expectations": expectations,
             "employees": [{"id": e.id, "name": e.full_name, "role": e.role, "active": e.active} for e in catalog[0].values()],
-            "teams": [{"id": t.id, "name": t.team_name, "type": t.team_type, "active": t.active} for t in catalog[1].values()]}
+            "teams": [{"id": t.id, "name": t.team_name, "type": t.team_type, "active": t.active} for t in catalog[1].values()],
+            "areas": [{"team_id": a.team_id, "area_name": a.area_name, "geometry_json": a.geometry_json, "color": a.color} for a in catalog[3]]}
 
 
 def service_status_rows(data):
