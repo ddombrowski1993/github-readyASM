@@ -276,3 +276,42 @@ render_store_search(load_bet_services(2026))
     next(x for x in app.button if x.label=='Void Completion').click().run()
     assert not app.exception
     assert not data(factory)['completions'][0]['active']
+
+
+def test_drilldown_rows_match_each_dashboard_count(db):
+    from src.bet_service_reporting import filter_status, status_table
+    factory,_=db
+    for i in range(1,8): save(factory,i)
+    for i in [1,2,3,4,8]: save(factory,i,('lot_striping',))
+    rows=service_status_rows(data(factory))
+    assert len(filter_status(rows,'Power Washing Completed')) == 7
+    assert len(filter_status(rows,'Lot Striping Completed')) == 5
+    assert len(filter_status(rows,'Both Complete')) == 4
+    assert len(filter_status(rows,'Power Wash Only')) == 3
+    assert len(filter_status(rows,'Lot Striping Only')) == 1
+    assert len(filter_status(rows,'No Services Complete')) == 2
+    assert len(filter_status(rows,'Power Washing Remaining')) == 3
+    assert len(filter_status(rows,'Lot Striping Remaining')) == 5
+    assert len(status_table(filter_status(rows,'Both Complete'))) == 4
+
+
+def test_streamlit_overview_and_history_render(db,monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from src import bet_service_store as store, bet_service_reporting as reporting
+    factory,_=db
+    save(factory)
+    monkeypatch.setattr(store,'load_bet_services',lambda year:data(factory,year))
+    monkeypatch.setattr(reporting,'working_today',lambda:TODAY)
+    app=AppTest.from_string('''
+from src.bet_service_store import load_bet_services
+from src.bet_service_reporting import render_overview,render_history
+snapshot=load_bet_services(2026)
+render_overview(snapshot)
+render_history(snapshot)
+''',default_timeout=20).run()
+    assert not app.exception
+    assert any(x.label=='Power Washing' and x.value=='1 / 10' for x in app.metric)
+    app.selectbox(key='bet_drill_team:1').select('Power Washing Completed').run()
+    assert not app.exception
+    # The team's drilldown contains precisely the completed store, not 10 assigned rows.
+    assert any(list(df.value.get('Store',[])) == ['45555'] for df in app.dataframe)
