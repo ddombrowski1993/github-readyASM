@@ -124,7 +124,10 @@ def render_service_map(data):
     mode = f2.selectbox('Completion Display',['Overall Completion',*SERVICES.values()])
     status = f3.selectbox('Completion Status',STATUS_FILTERS,key='bet_map_status')
     number = f4.text_input('Find Store Number',key='bet_map_number').strip()
+    technicians = {r['technician_key']:r['technician_label'] for r in rows}
+    technician = st.selectbox('BET Technician', ['All']+sorted(technicians),format_func=lambda key:technicians.get(key,key),key='bet_map_technician')
     filtered = filter_status([r for r in rows if (owner=='All' or owner==r['owner_key'])
+        and (technician=='All' or technician==r['technician_key'])
         and (not number or number.casefold() in str(r['store_number']).casefold())],status)
     if not filtered:
         st.info('No current BET stores match these filters.')
@@ -139,7 +142,7 @@ def render_service_map(data):
         st.caption(f'{missing} matching stores have no coordinates; use Log Service Completion for these stores.')
     # Change the key with filters to reset old viewport/clicks. Saved data rebuilds halos on rerun.
     scope = st.session_state.get("effective_account_slug") or st.session_state.get("active_account_slug") or st.session_state.get("account_slug") or "workspace"
-    key = f"bet_service_map_{scope}_{data['year']}_{owner}_{mode}_{status}_{number}"
+    key = f"bet_service_map_{scope}_{data['year']}_{owner}_{technician}_{mode}_{status}_{number}"
     map_data = st_folium(fmap,key=key,height=620,width=None,
         returned_objects=['last_object_clicked','last_object_clicked_popup'])
     st.download_button('Export BET Service Map',map_html(fmap),file_name=f"bet_service_map_{data['year']}.html",mime='text/html')

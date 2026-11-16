@@ -175,3 +175,12 @@ Download templates from the Employees and Stores pages, or use:
 Uploaded files are saved to `uploads/` and database records are written to `uploaded_files`. This is intentionally simple for local use and can later be swapped for cloud object storage.
 
 For sensitive company or employee data, create individual accounts and deploy behind appropriate access controls.
+
+## BET Service Tracker
+
+Use **BET Service Tracker** in the sidebar for independent Power Washing and Lot
+Striping completion by service year, team/technician progress, history/corrections,
+and assignment-preserving map halos. Existing BET territory ownership and routing
+remain in Areas & Maps and Brand Enhancement Scheduler.
+
+See [BET Service Tracker implementation and acceptance checks](docs/BET_SERVICE_TRACKER.md).

@@ -63,8 +63,8 @@ def history_table(records):
 def render_progress_metrics(rows):
     totals = service_totals(rows)
     cols = st.columns(4)
-    cols[0].metric('Power Washing', f"{totals['power_washing']} / {totals['power_washing_expected']}")
-    cols[1].metric('Lot Striping', f"{totals['lot_striping']} / {totals['lot_striping_expected']}")
+    cols[0].metric('Power Washing', f"{totals['power_washing_applicable_completed']} / {totals['power_washing_expected']}")
+    cols[1].metric('Lot Striping', f"{totals['lot_striping_applicable_completed']} / {totals['lot_striping_expected']}")
     cols[2].metric('Both Services Complete', totals['both_complete'])
     cols[3].metric('Total Services Completed', totals['total_services_completed'])
     st.caption(f"{totals['assigned_stores']} current BET stores · {totals['remaining_services']} applicable services remaining. Store counts and service counts are separate.")
@@ -75,20 +75,22 @@ def render_overview(data):
     st.subheader('Current Territory Progress')
     st.caption('Current assignments define workload. A completed service stays complete for this year after reassignment; historical worker credit is shown separately below.')
     render_progress_metrics(rows)
-    summary = team_progress(rows)
+    group_by = st.radio('Group progress by', ['BET Team / Area', 'BET Technician'], horizontal=True)
+    summary = team_progress(rows, by='technician' if group_by == 'BET Technician' else 'team')
     table = pd.DataFrame([{'BET Technician / Team': r['owner_label'], 'Assigned Stores': r['assigned_stores'],
         'Power Washed': r['power_washing'], 'Lot Striped': r['lot_striping'], 'Both Complete': r['both_complete'],
         'Total Services Completed': r['total_services_completed'], 'Remaining Services': r['remaining_services']} for r in summary])
     st.dataframe(table, use_container_width=True, hide_index=True)
     for team in summary:
         with st.expander(f"{team['owner_label']} — {team['assigned_stores']} assigned stores"):
-            owned = [r for r in rows if r['owner_key'] == team['owner_key']]
+            owned = [r for r in rows if r['technician_key' if group_by == 'BET Technician' else 'owner_key'] == team['owner_key']]
             render_progress_metrics(owned)
             for service, label in SERVICES.items():
                 expected = team[service + '_expected']
-                ratio = team[service] / expected if expected else 0
-                st.write(f"{label}: {team[service]} / {expected} ({ratio:.1%}) · {team[service + '_remaining']} remaining")
-            st.write(f"Services completed: {team['total_services_completed']} / {team['expected_services']} applicable services")
+                applicable_done = team[service + '_applicable_completed']
+                ratio = applicable_done / expected if expected else 0
+                st.write(f"{label}: {applicable_done} / {expected} ({ratio:.1%}) · {team[service + '_remaining']} remaining")
+            st.write(f"Services completed: {team['applicable_services_completed']} / {team['expected_services']} applicable services")
             show = st.selectbox('Show stores behind these counts', STATUS_FILTERS, key='bet_drill_' + team['owner_key'])
             st.dataframe(status_table(filter_status(owned, show)), use_container_width=True, hide_index=True)
     st.subheader('Completed Today — Historical Work Credit')
@@ -119,6 +121,10 @@ def render_history(data):
     selected = [r for r in rows if (owner == 'All' or r['owner_key'] == owner)
                 and (not number or number.casefold() in str(r['store_number']).casefold())]
     selected = filter_status(selected,status)
+    technicians = {r['technician_key']: r['technician_label'] for r in rows}
+    technician = st.selectbox('Current BET Technician', ['All'] + sorted(technicians), format_func=lambda key:technicians.get(key,key))
+    if technician != 'All':
+        selected = [r for r in selected if r['technician_key'] == technician]
     service_filter = st.selectbox('Service', ['All', *SERVICES.values()], key='bet_status_service')
     if service_filter != 'All':
         service = next(s for s,label in SERVICES.items() if label == service_filter)

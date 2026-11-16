@@ -109,6 +109,8 @@ def service_status_rows(data):
         row["owner_key"] = (f"team:{row['bet_team_id']}" if row["bet_team_id"] else
                             f"employee:{row['bet_employee_id']}" if row["bet_employee_id"] else "unassigned")
         row["owner_label"] = row["bet_team_name"] or row["bet_employee_name"] or "Unassigned"
+        row["technician_key"] = f"employee:{row['bet_employee_id']}" if row["bet_employee_id"] else row["owner_key"]
+        row["technician_label"] = row["bet_employee_name"] or ("Team attribution: " + row["owner_label"])
         rows.append(row)
     return rows
 
@@ -122,16 +124,19 @@ def service_totals(rows):
     for service in SERVICES:
         result[service] = sum(r[service + "_complete"] for r in rows)
         result[service + "_expected"] = sum(r[service + "_applicable"] for r in rows)
+        result[service + "_applicable_completed"] = sum(r[service + "_applicable"] and r[service + "_complete"] for r in rows)
         result[service + "_remaining"] = sum(r[service + "_applicable"] and not r[service + "_complete"] for r in rows)
+    result["applicable_services_completed"] = sum(result[s + "_applicable_completed"] for s in SERVICES)
     return result
 
 
-def team_progress(rows):
+def team_progress(rows, by="team"):
     groups = {}
     for row in rows:
         if row["bet_assigned"] and row["field_service"]:
-            groups.setdefault(row["owner_key"], []).append(row)
-    return [{"owner_key": key, "owner_label": items[0]["owner_label"], **service_totals(items)} for key, items in sorted(groups.items())]
+            groups.setdefault(row["technician_key"] if by == "technician" else row["owner_key"], []).append(row)
+    return [{"owner_key": key, "owner_label": items[0]["technician_label"] if by == "technician" else items[0]["owner_label"],
+             **service_totals(items)} for key, items in sorted(groups.items())]
 
 
 def completion_report(data, start, end, include_voided=False):

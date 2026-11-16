@@ -138,7 +138,7 @@ class BetServiceExpectation(Base, TimestampMixin):
         CheckConstraint("service_type in ('power_washing', 'lot_striping')", name="ck_bet_expected_service_type"),
     )
     id = Column(Integer, primary_key=True)
-    store_id = Column(Integer, ForeignKey("stores.id", ondelete="CASCADE"), nullable=False)
+    store_id = Column(Integer, nullable=False, index=True)
     service_type = Column(String(40), nullable=False)
     service_year = Column(Integer, nullable=False)
     applicable = Column(Boolean, nullable=False, default=True)

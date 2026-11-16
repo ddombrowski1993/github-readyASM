@@ -25,6 +25,12 @@ def ensure_bet_service_tables(engine):
     BetServiceExpectation.__table__.create(engine, checkfirst=True)
 
 
+@st.cache_resource(show_spinner=False)
+def _ensure_workspace_bet_tables(url, schema):
+    ensure_bet_service_tables(get_engine(url, schema=schema))
+    return True
+
+
 @contextmanager
 def bet_service_session():
     current_service_actor()
@@ -34,7 +40,7 @@ def bet_service_session():
     if st.session_state.get("manager_rollup_active"):
         raise PermissionError("Select one workspace instead of All Managed Users to use BET Service Tracker.")
     engine = get_engine(get_database_url(), schema=schema)
-    ensure_bet_service_tables(engine)
+    _ensure_workspace_bet_tables(get_database_url(), schema)
     with Session(engine) as session:
         with session.begin():
             _apply_workspace_search_path(session.connection(), schema)

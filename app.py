@@ -209,6 +209,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+from src.bet_service_dashboard import render_bet_service_dashboard
+render_bet_service_dashboard()
+
 today = date.today()
 week_start = today - timedelta(days=today.weekday())
 week_end = week_start + timedelta(days=7)

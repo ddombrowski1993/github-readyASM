@@ -1,6 +1,5 @@
 """Shared store-search and map-click entry controls for BET services."""
 import logging
-from datetime import date
 
 import streamlit as st
 
@@ -44,12 +43,13 @@ def render_completion_form(row, data, key_prefix="search", source="Store search"
             if checked:
                 selected.append(service)
         st.caption("Completed services stay checked. Use Undo / Correct Completion below to fix an entry.")
-        default_date = min(working_today(), date(year, 12, 31))
+        default_date = working_today()
         if default_date.year != year:
-            default_date = date(year, 1, 1)
+            st.caption(f"Choose the actual completion date within service year {year}.")
         completed_date = st.date_input("Completed Date", value=default_date, key=key + "date")
         with st.expander("Optional details / attribution"):
-            work_order = st.text_input("Work Order Number (optional)", key=key + "wo")
+            work_order = st.text_input("Work Order Number (optional)", key=key + "wo",
+                help="Applies only to newly checked services. Save each service separately if they have different work orders.")
             notes = st.text_area("Notes (optional)", key=key + "notes")
             override = False
             override_credit = None

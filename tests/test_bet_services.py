@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from src.models import (Base, BetServiceCompletion, BetServiceExpectation, Employee,
-                        MapArea, Store, Team, ScheduleItem)
+                        MapArea, Store, Team, ScheduleItem, Schedule)
 from src.bet_services import (ServiceActor, save_bet_service_completion, void_bet_service_completion,
     read_bet_service_data, service_status_rows, service_totals, team_progress, daily_productivity,
     completion_report, reporting_range, working_today)
@@ -372,3 +372,160 @@ render_service_map(load_bet_services(2026))
     row=service_status_rows(data(factory))[0]
     assert row['power_washing_complete'] and not row['lot_striping_complete']
     assert data(factory)['completions'][0]['source']=='Map entry'
+
+
+def test_dashboard_service_and_store_totals_are_distinct(db,monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from src import bet_service_dashboard as dashboard
+    factory,_=db
+    for i in range(1,5):save(factory,i)
+    for i in [1,2,5]:save(factory,i,('lot_striping',))
+    monkeypatch.setattr(dashboard,'working_today',lambda:TODAY)
+    monkeypatch.setattr(dashboard,'load_bet_services',lambda year:data(factory,year))
+    # Standalone AppTest has no registered multipage destinations.
+    monkeypatch.setattr(dashboard.st,'page_link',lambda *a,**kw:None)
+    app=AppTest.from_string('''
+from src.bet_service_dashboard import render_bet_service_dashboard
+render_bet_service_dashboard()
+''',default_timeout=20).run()
+    assert not app.exception
+    assert any('7 services completed across 5 stores' in x.value for x in app.markdown)
+    assert any(x.label=='Power Washing' and x.value=='4 / 10' for x in app.metric)
+    assert any(x.label=='Lot Striping' and x.value=='3 / 10' for x in app.metric)
+    assert any(x.label=='Both Services Complete' and x.value=='2' for x in app.metric)
+    assert any(x.label=='Total Services Completed' and x.value=='7' for x in app.metric)
+
+
+def test_bulk_reader_query_count_does_not_grow_with_marker_count(db):
+    from sqlalchemy import event
+    factory,engine=db
+    queries=[]
+    def count(conn,cursor,statement,params,context,executemany):
+        if statement.lstrip().lower().startswith('select'):queries.append(statement)
+    event.listen(engine,'before_cursor_execute',count)
+    try:
+        data(factory)
+        small=len(queries);queries.clear()
+        with factory.begin() as s:
+            for i in range(100,200):
+                s.add(Store(id=i,store_number=str(45000+i),assigned_brand_team_id=1,latitude=41,longitude=-81,active=True))
+        data(factory)
+        assert len(queries)==small and small<=6
+    finally:event.remove(engine,'before_cursor_execute',count)
+
+
+def test_full_tracker_page_has_four_tabs_and_shared_entries(db,monkeypatch):
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+    from src import utils, bet_service_store as store, bet_service_map as service_map, bet_service_ui as ui
+    factory,_=db
+    monkeypatch.setattr(utils,'apply_theme',lambda:None)
+    monkeypatch.setattr(utils,'sidebar_nav',lambda:None)
+    monkeypatch.setattr(utils,'require_login',lambda:True)
+    monkeypatch.setattr(utils,'ensure_database_or_stop',lambda:None)
+    monkeypatch.setattr(utils,'is_all_managed_view',lambda:False)
+    monkeypatch.setattr(store,'load_bet_services',lambda year:data(factory,year))
+    monkeypatch.setattr(ui,'current_service_actor',lambda:JASON)
+    monkeypatch.setattr(ui,'working_today',lambda:TODAY)
+    monkeypatch.setattr(service_map,'st_folium',lambda *a,**kw:{})
+    from streamlit.delta_generator import DeltaGenerator
+    monkeypatch.setattr(DeltaGenerator,'page_link',lambda *a,**kw:None)
+    path=Path(__file__).resolve().parents[1]/'pages/21_BET_Service_Tracker.py'
+    app=AppTest.from_file(str(path),default_timeout=30).run()
+    assert not app.exception
+    assert [tab.label for tab in app.tabs] == ['Overview','Log Service Completion','Service Map','Completed Stores / History']
+
+
+def test_technician_and_team_rollups_share_current_assignment(db):
+    factory,_=db
+    with factory.begin() as s:
+        # Two technicians sharing one existing team, with no new territory model.
+        s.get(Store,2).assigned_brand_employee_id=2
+    save(factory,1)
+    save(factory,2,('lot_striping',))
+    rows=service_status_rows(data(factory))
+    teams=team_progress(rows)
+    techs=team_progress(rows,by='technician')
+    assert len(teams)==1 and teams[0]['assigned_stores']==10
+    assert len(techs)==2
+    assert next(r for r in techs if r['owner_label']=='Jason')['power_washing']==1
+    assert next(r for r in techs if r['owner_label']=='New BET')['lot_striping']==1
+
+
+def test_applicability_override_preserves_history_without_overstating_percent(db):
+    factory,_=db
+    save(factory,services=('power_washing','lot_striping'))
+    with factory.begin() as s:
+        s.add(BetServiceExpectation(store_id=1,service_type='lot_striping',service_year=2026,applicable=False))
+    totals=service_totals(service_status_rows(data(factory)))
+    assert totals['total_services_completed']==2  # Actual work remains in history.
+    assert totals['applicable_services_completed']==1
+    assert totals['lot_striping_applicable_completed']==0 and totals['lot_striping_expected']==9
+    assert len(data(factory)['completions'])==2
+
+
+def test_master_store_deletion_does_not_erase_completion_snapshot(db):
+    factory,_=db
+    save(factory)
+    with factory.begin() as s:
+        s.delete(s.get(Store,1))
+    records=data(factory)['completions']
+    assert len(records)==1 and records[0]['store_number']=='45555'
+    assert records[0]['bet_employee_name']=='Jason'
+
+
+def test_failed_two_service_save_is_atomic(db):
+    factory,_=db
+    with factory.begin() as s:
+        s.add(BetServiceExpectation(store_id=1,service_type='lot_striping',service_year=2026,applicable=False))
+    with pytest.raises(ValueError):save(factory,services=('power_washing','lot_striping'))
+    assert data(factory)['completions']==[]
+
+
+def test_rejected_unauthenticated_actor_and_schedule_dates_never_add_completions(db):
+    factory,_=db
+    with pytest.raises(PermissionError):save(factory,actor=ServiceActor(0,'','User'))
+    with factory.begin() as s:
+        schedule=Schedule(schedule_name='Existing BET route',start_date=date(2026,11,1),end_date=date(2026,11,1))
+        s.add(schedule);s.flush()
+        s.add(ScheduleItem(schedule_id=schedule.id,store_id=1,work_type='Brand Enhancement',schedule_date=date(2026,11,1),status='Completed'))
+    assert data(factory)['completions']==[]
+
+
+def test_workspace_adapter_routes_shared_save_and_read_to_effective_schema(db,monkeypatch):
+    from src import bet_service_store as adapter
+    factory,engine=db
+    with engine.connect() as c:
+        schema=c.execute(text('select current_schema()')).scalar() if engine.dialect.name=='postgresql' else None
+    monkeypatch.setattr(adapter,'current_service_actor',lambda:JASON)
+    monkeypatch.setattr(adapter,'current_account_schema',lambda:schema)
+    monkeypatch.setattr(adapter,'using_hosted_database',lambda:engine.dialect.name=='postgresql')
+    monkeypatch.setattr(adapter,'get_database_url',lambda:str(engine.url))
+    monkeypatch.setattr(adapter,'get_engine',lambda url,schema=None:engine)
+    monkeypatch.setattr(adapter.st,'session_state',{})
+    adapter._ensure_workspace_bet_tables.clear()
+    created=adapter.save_store_services(store_id=1,service_year=2026,services=['power_washing'],completed_date=TODAY,today=TODAY)
+    assert len(created)==1
+    assert service_status_rows(adapter.load_bet_services(2026))[0]['power_washing_complete']
+    assert len(data(factory)['completions'])==1
+
+
+def test_actor_uses_authenticated_identity_while_impersonating(monkeypatch):
+    from src import bet_service_store as adapter
+    monkeypatch.setattr(adapter.st,'session_state',dict(authenticated=True,authenticated_user_id=1,effective_user_id=2,
+        first_name='Daniel',last_name='Admin',account_role='Admin'))
+    actor=adapter.current_service_actor()
+    assert actor.user_id==1 and actor.name=='Daniel Admin' and actor.role=='Admin'
+
+
+def test_hosted_tracker_rejects_missing_workspace_before_engine_access(monkeypatch):
+    from unittest.mock import Mock
+    from src import bet_service_store as adapter
+    monkeypatch.setattr(adapter,'current_service_actor',lambda:JASON)
+    monkeypatch.setattr(adapter,'current_account_schema',lambda:None)
+    monkeypatch.setattr(adapter,'using_hosted_database',lambda:True)
+    get_engine=Mock()
+    monkeypatch.setattr(adapter,'get_engine',get_engine)
+    with pytest.raises(PermissionError):
+        with adapter.bet_service_session():pass
+    get_engine.assert_not_called()
