@@ -8,9 +8,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
-from src.bet_services import SERVICES, service_status_rows
-from src.bet_service_reporting import STATUS_FILTERS, filter_status
-from src.bet_service_ui import render_completion_form
+from src.bet_service_types import SERVICES
 from src.maps import add_area_overlays, map_html
 
 # Shared unchanged with Areas and Maps. No completion status appears in this palette.
@@ -117,6 +115,12 @@ def clicked_store_id(map_data, rows):
 
 
 def render_service_map(data):
+    # Map Center imports the display helpers above. Load tracker/ORM dependencies
+    # only when the tracker itself is rendered, not when an existing map opens.
+    from src.bet_services import service_status_rows
+    from src.bet_service_reporting import STATUS_FILTERS, filter_status
+    from src.bet_service_ui import render_completion_form
+
     rows = [r for r in service_status_rows(data) if r['bet_assigned'] and r['field_service']]
     f1,f2,f3,f4 = st.columns(4)
     owners = {r['owner_key']:r['owner_label'] for r in rows}

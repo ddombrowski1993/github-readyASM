@@ -5136,15 +5136,21 @@ bet_completion_mode = "Overall Completion"
 bet_service_data = None
 if selected_group == "Brand Enhancement":
     if st.checkbox("Show BET service completion halos", value=False, key="brand_service_halos"):
-        from src.bet_services import service_status_rows, working_today
-        from src.bet_service_store import load_bet_services
-        bet_year = int(st.number_input("BET Service Year", min_value=2000, max_value=2200, value=working_today().year))
-        bet_completion_mode = st.selectbox("BET Completion Display", ["Overall Completion", "Power Washing", "Lot Striping"])
         try:
+            from src.bet_services import service_status_rows, working_today
+            from src.bet_service_store import load_bet_services
+            bet_year = int(st.number_input("BET Service Year", min_value=2000, max_value=2200, value=working_today().year))
+            bet_completion_mode = st.selectbox("BET Completion Display", ["Overall Completion", "Power Washing", "Lot Striping"])
             bet_service_data = load_bet_services(bet_year)
             bet_completion_status = {r["id"]: r for r in service_status_rows(bet_service_data)}
-        except Exception:
-            st.error("Service completion data could not be loaded. Territory assignments are still shown.")
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Optional BET completion layer failed")
+            bet_service_data = None
+            bet_completion_status = None
+            st.error("BET service completion is unavailable. The existing territory map remains available.")
+            if isinstance(exc, ImportError):
+                st.code(f"{type(exc).__name__}: {exc}")
 fmap, map_data = render_area_manager_map(
     visible_stores,
     map_areas,

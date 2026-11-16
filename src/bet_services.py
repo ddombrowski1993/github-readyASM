@@ -7,8 +7,8 @@ from sqlalchemy import select
 
 from src.models import (AuditLog, BetServiceCompletion, BetServiceExpectation,
                         Employee, MapArea, Store, Team)
+from src.bet_service_types import SERVICES
 
-SERVICES = {"power_washing": "Power Washing", "lot_striping": "Lot Striping"}
 WORK_TIMEZONE = "America/New_York"
 
 
