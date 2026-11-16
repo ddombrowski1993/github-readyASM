@@ -1125,6 +1125,7 @@ def sidebar_nav():
         st.sidebar.page_link("pages/4_Map_Center.py", label="Areas and Maps")
         st.sidebar.page_link("pages/20_Landscaping_Map.py", label="Landscaping Map")
         st.sidebar.page_link("pages/5_Scheduler.py", label="Brand Enhancement Scheduler")
+        st.sidebar.page_link("pages/21_BET_Service_Tracker.py", label="BET Service Tracker")
         st.sidebar.page_link("pages/13_PMT_Monthly_Scheduler.py", label="PMT Monthly Scheduler")
         st.sidebar.page_link("pages/14_Calibration_Scheduler.py", label="Calibration Scheduler")
         st.sidebar.page_link("pages/12_View_Schedule.py", label="View Schedule")

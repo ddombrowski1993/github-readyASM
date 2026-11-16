@@ -214,3 +214,65 @@ def test_postgresql_concurrent_save_is_idempotent(db):
 
 def test_working_date_uses_eastern_not_server_utc():
     assert working_today(datetime(2026,11,17,2,0,tzinfo=timezone.utc)) == date(2026,11,16)
+
+
+def test_streamlit_store_search_form_saves_independent_services(db, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from src import bet_service_ui as ui, bet_service_store as store
+    factory, _ = db
+    monkeypatch.setattr(store, 'load_bet_services', lambda year: data(factory, year))
+    monkeypatch.setattr(ui, 'current_service_actor', lambda: JASON)
+    monkeypatch.setattr(ui, 'working_today', lambda: TODAY)
+    monkeypatch.setattr(ui, 'save_store_services', lambda **kwargs: save(factory, **kwargs))
+    script = '''
+import streamlit as st
+from src.bet_service_ui import render_store_search
+from src.bet_service_store import load_bet_services
+render_store_search(load_bet_services(2026))
+'''
+    app = AppTest.from_string(script, default_timeout=20).run()
+    assert not app.exception
+    app.text_input(key='bet_store_search').set_value('45555').run()
+    assert not app.exception
+    assert any('Jason' in x.value for x in app.markdown)
+    power = next(x for x in app.checkbox if x.label == 'Power Washing Completed')
+    power.check()
+    next(x for x in app.button if x.label == 'Save Service Completion').click().run()
+    assert not app.exception
+    row=service_status_rows(data(factory))[0]
+    assert row['power_washing_complete'] and not row['lot_striping_complete']
+    power = next(x for x in app.checkbox if x.label == 'Power Washing Completed')
+    assert power.value and power.disabled
+    next(x for x in app.checkbox if x.label == 'Lot Striping Completed').check()
+    next(x for x in app.button if x.label == 'Save Service Completion').click().run()
+    assert not app.exception
+    assert service_status_rows(data(factory))[0]['both_complete']
+    next(x for x in app.button if x.label == 'Save Service Completion').click().run()
+    assert len(data(factory)['completions']) == 2
+
+
+def test_streamlit_correction_requires_confirmation(db, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    from src import bet_service_ui as ui, bet_service_store as store
+    factory, _=db
+    save(factory)
+    monkeypatch.setattr(store,'load_bet_services',lambda year:data(factory,year))
+    monkeypatch.setattr(ui,'current_service_actor',lambda:JASON)
+    monkeypatch.setattr(ui,'working_today',lambda:TODAY)
+    def correct(rid,reason,confirmed):
+        with factory.begin() as s:
+            return void_bet_service_completion(s,completion_id=rid,actor=JASON,reason=reason,confirmed=confirmed)
+    monkeypatch.setattr(ui,'correct_store_service',correct)
+    app=AppTest.from_string('''
+from src.bet_service_ui import render_store_search
+from src.bet_service_store import load_bet_services
+render_store_search(load_bet_services(2026))
+''',default_timeout=20).run()
+    app.text_input(key='bet_store_search').set_value('45555').run()
+    next(x for x in app.button if x.label=='Void Completion').click().run()
+    assert app.error and data(factory)['completions'][0]['active']
+    next(x for x in app.text_input if x.label=='Correction reason').set_value('Wrong checkbox')
+    next(x for x in app.checkbox if x.label=='I confirm this completion should be voided').check()
+    next(x for x in app.button if x.label=='Void Completion').click().run()
+    assert not app.exception
+    assert not data(factory)['completions'][0]['active']

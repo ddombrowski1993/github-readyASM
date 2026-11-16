@@ -82,7 +82,9 @@ def read_bet_service_data(session, service_year):
         BetServiceCompletion.service_year == service_year)).all()]
     expectations = {(r.store_id, r.service_type): r.applicable for r in session.scalars(select(BetServiceExpectation).where(
         BetServiceExpectation.service_year == service_year)).all()}
-    return {"year": service_year, "stores": stores, "completions": completions, "expectations": expectations}
+    return {"year": service_year, "stores": stores, "completions": completions, "expectations": expectations,
+            "employees": [{"id": e.id, "name": e.full_name, "role": e.role, "active": e.active} for e in catalog[0].values()],
+            "teams": [{"id": t.id, "name": t.team_name, "type": t.team_type, "active": t.active} for t in catalog[1].values()]}
 
 
 def service_status_rows(data):
