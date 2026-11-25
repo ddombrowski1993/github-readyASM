@@ -12,6 +12,7 @@ st.set_page_config(
 
 import plotly.express as px
 
+from src.pmt_carryover_ui import render_dashboard_carryover
 from src.database import apply_automatic_schedule_completion, dashboard_counts, get_database_status, init_db, log_action, safe_query, session_scope, show_database_setup, teams
 from src.exports import download_table
 from src.maps import render_plain_table
@@ -710,6 +711,7 @@ if not pmt_status.empty:
     with p4:
         metric_help_card("Unscheduled PMT Stores", int(row["unscheduled_pmt_stores"] or 0), "Assigned PMT stores that do not appear on any PMT schedule item yet.")
     st.page_link("pages/13_PMT_Monthly_Scheduler.py", label="Open PMT Monthly Scheduler")
+    render_dashboard_carryover()
 
 latest_pm_week = safe_query("select max(report_week) as report_week from pm_completion_report_rows")
 if not latest_pm_week.empty and latest_pm_week.iloc[0]["report_week"]:

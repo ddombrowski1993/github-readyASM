@@ -21,7 +21,7 @@ from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Image as ReportLabImage
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, text
 
 from src.database import active_employees, log_action, safe_query, session_scope
 from src.auth import configured_database_url, current_account_schema, get_effective_account_context, is_postgresql_url, is_sqlite_url
@@ -32,6 +32,30 @@ from src.imports import normalize_columns
 from src.maps import map_html, render_plain_table, render_route_preview, render_store_map, stable_color
 from src.models import Employee, MapArea, PMTScheduleBacklog, PMTScheduleRun, Schedule, ScheduleItem, Store, Team
 from src.pdf_reports import REPORT_DIR, pdf_bytes
+from src.pmt_carryover import (
+    REASON as CANCELLED_WO_REASON,
+    carryover_records, coordinates_available, lock_import_writes, priority_store_ids, validate_route_store_set,
+)
+from src.pmt_carryover_ui import render_cancelled_carryover, render_priority_route
+from src.pmt_schedule_reader import (
+    current_pmt_run,
+    editable_pmt_runs,
+    PMT_ACTIVE_STATUSES,
+    PMT_CANCELED_STATUSES,
+    PMT_COMPLETED_STATUSES,
+    PMT_NON_EDITABLE_RUN_STATUSES,
+    clean,
+    current_assignments_from_database,
+    ensure_pmt_schedule_columns,
+    get_current_active_pmt_schedule_rows,
+    month_label,
+    normalize_pmt_schedule_rows,
+    normalize_schedule_status,
+    pmt_active_item_mask,
+    pmt_canceled_item_mask,
+    pmt_completed_item_mask,
+    to_float,
+)
 from src.scheduler import haversine_miles, is_company_holiday
 from src.smart_import import scan_issue_rows, scan_workbook
 from src.utils import apply_theme, effective_rollup_user_id, ensure_database_or_stop, is_all_managed_view, metric_help_card, page_header, section_header, sidebar_nav, step_flow
@@ -85,10 +109,6 @@ step_flow(
     ["Load assignments", "Validate", "Set targets", "Generate draft", "Review routes", "Publish"],
     hint="Build Schedule tab: create a new PMT schedule. Then use Carryover & Backlog, Manage, and Export tabs as needed.",
 )
-
-
-def clean(value):
-    return str(value or "").strip()
 
 
 def key(value):
@@ -167,10 +187,6 @@ def add_months(value, months):
     year = value.year + month // 12
     month = month % 12 + 1
     return date(year, month, 1)
-
-
-def month_label(value):
-    return value.strftime("%B %Y")
 
 
 def first_workday(value, avoid_weekends=True, avoid_holidays=True, employee_id=None, avoid_pto=True):
@@ -545,32 +561,6 @@ def ensure_uploaded_pmt_employees(mapped_df):
     return {"created": created, "updated": len(updated)}
 
 
-def to_float(value):
-    try:
-        if clean(value) == "":
-            return None
-        return float(value)
-    except ValueError:
-        return None
-
-
-def current_assignments_from_database():
-    return safe_query(
-        """
-        select e.id as employee_id, e.full_name as technician_name, e.home_address, e.home_city, e.home_state, e.home_zip,
-               e.home_latitude, e.home_longitude, coalesce(e.monthly_pmt_store_target, 10) as monthly_target,
-               s.id as store_id, s.store_number, s.address as store_address, s.city as store_city, s.state as store_state,
-               s.zip as store_zip, s.latitude, s.longitude
-        from employees e
-        join stores s on s.assigned_pmt_employee_id = e.id
-        where e.active = true
-          and s.active = true
-          and coalesce(s.service_type, 'Standard') = 'Standard'
-        order by e.full_name, s.store_number
-        """
-    )
-
-
 def active_pmt_employee_summary():
     return safe_query(
         """
@@ -834,11 +824,17 @@ def build_route_rows_for_group(group, route_type):
     group = route_source_columns(group)
     home_lat, home_lon = home_coordinates_for_group(group)
     has_store_coordinates = group[["latitude", "longitude"]].notna().all().all() if {"latitude", "longitude"}.issubset(group.columns) else False
+    imported = group.get("imported_carryover", pd.Series(False, index=group.index)).fillna(False)
     if route_type == SAVED_ROUTE:
         ordered_rows = [
             row.copy()
             for _, row in group.sort_values(["sequence_number", "store_number"], ascending=[True, True]).iterrows()
         ]
+    elif imported.any() and route_type in {HOME_ROUTE, NEXT_ROUTE} and home_lat is not None and home_lon is not None and has_store_coordinates:
+        route_group = nearest_neighbor_route if route_type == NEXT_ROUTE else home_distance_route
+        ordered_rows = route_group(group[imported], home_lat, home_lon)
+        start = (ordered_rows[-1]["latitude"], ordered_rows[-1]["longitude"]) if route_type == NEXT_ROUTE else (home_lat, home_lon)
+        ordered_rows.extend(route_group(group[~imported], *start))
     elif route_type == NEXT_ROUTE and home_lat is not None and home_lon is not None and has_store_coordinates:
         ordered_rows = nearest_neighbor_route(group, home_lat, home_lon)
     elif route_type == HOME_ROUTE and home_lat is not None and home_lon is not None and has_store_coordinates:
@@ -1582,183 +1578,6 @@ def render_pmt_export_controls(export_draft, key_prefix, canonical_draft=None):
         pdf_file = f"pmt_schedule_{key(selected_export_tech) or 'technician'}_{export_name}_{export_stamp}.pdf"
         path = build_pmt_schedule_pdf(individual, pdf_file, "PMT Individual Schedule", selected_export_tech, route_filter)
         st.download_button("Download Individual PDF", data=pdf_bytes(path), file_name=pdf_file, key=f"{key_prefix}_individual_pdf_download")
-
-
-def normalize_pmt_schedule_rows(df):
-    if df.empty:
-        return ensure_pmt_schedule_columns(df)
-    df = df.copy()
-    df["schedule_date"] = pd.to_datetime(df["schedule_date"], errors="coerce")
-    df = df.dropna(subset=["schedule_date"])
-    if df.empty:
-        return ensure_pmt_schedule_columns(df)
-    df["month_start"] = df["schedule_date"].dt.to_period("M").dt.to_timestamp().dt.date
-    df["month"] = df["month_start"].apply(month_label)
-    df["schedule_date"] = df["schedule_date"].dt.date
-    if "original_schedule_date" in df.columns:
-        df["original_schedule_date"] = pd.to_datetime(df.get("original_schedule_date"), errors="coerce").dt.date
-    for column in [
-        "schedule_item_id",
-        "schedule_id",
-        "pmt_schedule_run_id",
-        "employee_id",
-        "store_id",
-        "sequence_number",
-        "assigned_pmt_employee_id",
-    ]:
-        if column in df.columns:
-            df[column] = pd.to_numeric(df[column], errors="coerce")
-    if "work_type" not in df.columns:
-        df["work_type"] = "PMT"
-    if "estimated_drive_time" not in df.columns:
-        df["estimated_drive_time"] = ""
-    if {"home_latitude", "home_longitude", "latitude", "longitude"}.issubset(df.columns):
-        df["distance_from_home"] = df.apply(
-            lambda row: round(
-                haversine_miles(float(row["home_latitude"]), float(row["home_longitude"]), float(row["latitude"]), float(row["longitude"])),
-                1,
-            )
-            if pd.notna(row.get("home_latitude"))
-            and pd.notna(row.get("home_longitude"))
-            and pd.notna(row.get("latitude"))
-            and pd.notna(row.get("longitude"))
-            else None,
-            axis=1,
-        )
-    elif "distance_from_home" not in df.columns:
-        df["distance_from_home"] = None
-    previous_distances = {}
-    if {"employee_id", "month", "sequence_number", "store_number", "latitude", "longitude"}.issubset(df.columns):
-        for _, group in df.sort_values(["employee_id", "month_start", "sequence_number", "store_number"]).groupby(["employee_id", "month"], dropna=False):
-            prev_lat = to_float(group.iloc[0].get("home_latitude"))
-            prev_lon = to_float(group.iloc[0].get("home_longitude"))
-            for idx, row in group.iterrows():
-                lat = to_float(row.get("latitude"))
-                lon = to_float(row.get("longitude"))
-                if prev_lat is not None and prev_lon is not None and lat is not None and lon is not None:
-                    previous_distances[idx] = round(haversine_miles(prev_lat, prev_lon, lat, lon), 1)
-                    prev_lat = lat
-                    prev_lon = lon
-                else:
-                    previous_distances[idx] = None
-    df["miles_from_previous_stop"] = df.index.map(previous_distances) if previous_distances else df.get("miles_from_previous_stop", "")
-    return ensure_pmt_schedule_columns(df)
-
-
-def pmt_inactive_source_mask(df):
-    if df.empty or "schedule_source" not in df.columns:
-        return pd.Series(False, index=df.index)
-    source = df["schedule_source"].fillna("").astype(str).str.lower()
-    return (
-        source.str.contains("superseded", regex=False)
-        | source.str.contains("old schedule snapshot", regex=False)
-        | source.str.contains("overflow removed", regex=False)
-        | source.str.contains("rebuild removed", regex=False)
-        | source.str.contains("out-of-period cleanup", regex=False)
-    )
-
-
-def canonicalize_current_pmt_rows(df, include_completed=False):
-    if df.empty or "store_id" not in df.columns:
-        return ensure_pmt_schedule_columns(df)
-    scoped = df.copy()
-    scoped = scoped[~pmt_inactive_source_mask(scoped)].copy()
-    if scoped.empty:
-        return ensure_pmt_schedule_columns(scoped)
-    if not include_completed:
-        scoped = scoped[pmt_active_item_mask(scoped)].copy()
-    else:
-        keep_mask = pmt_active_item_mask(scoped) | pmt_completed_item_mask(scoped)
-        scoped = scoped[keep_mask].copy()
-    if scoped.empty:
-        return ensure_pmt_schedule_columns(scoped)
-
-    scoped["_status_rank"] = 2
-    scoped.loc[pmt_completed_item_mask(scoped), "_status_rank"] = 1
-    scoped.loc[pmt_active_item_mask(scoped), "_status_rank"] = 0
-    scoped["_assigned_rank"] = 1
-    if {"employee_id", "assigned_pmt_employee_id"}.issubset(scoped.columns):
-        employee_ids = pd.to_numeric(scoped["employee_id"], errors="coerce").astype("Int64")
-        assigned_ids = pd.to_numeric(scoped["assigned_pmt_employee_id"], errors="coerce").astype("Int64")
-        scoped.loc[employee_ids.eq(assigned_ids), "_assigned_rank"] = 0
-    scoped["_updated_sort"] = pd.to_datetime(scoped.get("updated_at"), errors="coerce")
-    scoped["_created_sort"] = pd.to_datetime(scoped.get("created_at"), errors="coerce")
-    scoped["_item_sort"] = pd.to_numeric(scoped.get("schedule_item_id"), errors="coerce").fillna(0)
-    sort_cols = [
-        "store_id",
-        "_status_rank",
-        "_assigned_rank",
-        "_updated_sort",
-        "_created_sort",
-        "_item_sort",
-    ]
-    scoped = scoped.sort_values(
-        sort_cols,
-        ascending=[True, True, True, False, False, False],
-        na_position="last",
-    )
-    keep_indices = scoped.groupby("store_id", dropna=False).head(1).index
-    scoped = scoped.loc[keep_indices].copy()
-    return ensure_pmt_schedule_columns(scoped.drop(columns=["_status_rank", "_assigned_rank", "_updated_sort", "_created_sort", "_item_sort"], errors="ignore"))
-
-
-def get_current_active_pmt_schedule_rows(run_id, employee_id=None, start_date=None, end_date=None, include_completed=False):
-    params = {
-        "run_id": int(run_id),
-        "include_completed": bool(include_completed),
-    }
-    optional_filters = []
-    if employee_id is not None:
-        optional_filters.append("and si.employee_id = :employee_id")
-        params["employee_id"] = int(employee_id)
-    if start_date is not None:
-        optional_filters.append("and date(si.schedule_date) >= date(:start_date)")
-        params["start_date"] = start_date
-    if end_date is not None:
-        optional_filters.append("and date(si.schedule_date) <= date(:end_date)")
-        params["end_date"] = end_date
-    optional_filter_sql = "\n          ".join(optional_filters)
-    if optional_filter_sql:
-        optional_filter_sql = f"\n          {optional_filter_sql}"
-    df = safe_query(
-        f"""
-        select si.id as schedule_item_id, si.schedule_id, si.pmt_schedule_run_id,
-               si.schedule_date, si.sequence_number, si.status, si.completion_notes as notes,
-               si.created_at, si.updated_at,
-               e.id as employee_id, e.full_name as technician, e.home_latitude, e.home_longitude,
-               s.id as store_id, s.store_number, s.address, s.city, s.state, s.zip,
-               s.assigned_pmt_employee_id, owner.full_name as assigned_technician,
-               s.latitude, s.longitude, si.work_type, si.cycle_label, si.schedule_source, si.original_schedule_date
-        from schedule_items si
-        left join pmt_schedule_runs r on r.id = si.pmt_schedule_run_id
-        left join employees e on e.id = si.employee_id
-        left join stores s on s.id = si.store_id
-        left join employees owner on owner.id = s.assigned_pmt_employee_id
-        where si.pmt_schedule_run_id = :run_id
-          and si.work_type = 'PMT'
-          and coalesce(lower(trim(r.status)), '') not in ('deleted','snapshot','archived','historical')
-          {optional_filter_sql}
-          and (
-              (
-                  :include_completed = true
-                  and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('cancelled','canceled','skipped','deleted','transferred','superseded','archived')
-              )
-              or (
-                  :include_completed = false
-                  and coalesce(nullif(lower(trim(si.status)), ''), 'scheduled') not in ('completed','complete','cancelled','canceled','skipped','deleted','transferred','superseded','archived')
-              )
-          )
-          and (r.cycle_start is null or date(si.schedule_date) >= date(r.cycle_start))
-          and (r.cycle_end is null or date(si.schedule_date) <= date(r.cycle_end))
-        order by si.schedule_date, e.full_name, si.sequence_number, s.store_number
-        """,
-        params,
-        use_cache=False,
-    )
-    if df.empty:
-        return ensure_pmt_schedule_columns(df)
-    normalized = normalize_pmt_schedule_rows(df)
-    return canonicalize_current_pmt_rows(normalized, include_completed=include_completed)
 
 
 def published_pmt_run_export_draft(run_id):
@@ -2625,40 +2444,8 @@ def pmt_manage_run_items(run_id):
     return ensure_pmt_schedule_columns(df)
 
 
-PMT_ACTIVE_STATUSES = {"scheduled", "needs rescheduled", "rescheduled", "rain delay", "not completed"}
-PMT_COMPLETED_STATUSES = {"completed", "complete"}
-PMT_CANCELED_STATUSES = {"cancelled", "canceled", "skipped", "deleted", "transferred", "superseded", "archived"}
 PMT_ACTIVE_STATUS_VALUES = ["Scheduled", "Needs Rescheduled", "Rescheduled", "Rain Delay", "Not Completed"]
-PMT_NON_EDITABLE_RUN_STATUSES = {"snapshot", "deleted", "archived", "historical"}
-CANONICAL_PMT_COLUMNS = [
-    "schedule_item_id",
-    "schedule_id",
-    "pmt_schedule_run_id",
-    "employee_id",
-    "technician",
-    "store_id",
-    "store_number",
-    "schedule_date",
-    "month_start",
-    "month",
-    "sequence_number",
-    "status",
-    "work_type",
-    "schedule_source",
-    "notes",
-]
 PMT_SCHEDULE_SORT_COLUMNS = ["schedule_date", "sequence_number", "store_number"]
-
-
-def ensure_pmt_schedule_columns(df, extra_columns=None):
-    columns = list(dict.fromkeys(CANONICAL_PMT_COLUMNS + list(extra_columns or [])))
-    if df is None:
-        return pd.DataFrame(columns=columns)
-    normalized = df.copy()
-    for column in columns:
-        if column not in normalized.columns:
-            normalized[column] = pd.NA
-    return normalized
 
 
 def sort_pmt_schedule_display(df, sort_columns=None, warning_label=None):
@@ -2679,10 +2466,6 @@ def sort_pmt_schedule_display(df, sort_columns=None, warning_label=None):
     if available_sort:
         return scoped.sort_values(available_sort, kind="stable", na_position="last")
     return scoped.reset_index(drop=True)
-
-
-def normalize_schedule_status(value):
-    return clean(value).lower() or "scheduled"
 
 
 def normalize_run_status(value):
@@ -2714,26 +2497,11 @@ def active_pmt_status_condition(column):
     return func.coalesce(func.nullif(func.lower(func.trim(column)), ""), "scheduled").in_(list(PMT_ACTIVE_STATUSES))
 
 
-def pmt_active_item_mask(df):
-    statuses = df.get("status", pd.Series([], dtype=str)).apply(normalize_schedule_status)
-    return statuses.isin(PMT_ACTIVE_STATUSES)
-
-
-def pmt_completed_item_mask(df):
-    statuses = df.get("status", pd.Series([], dtype=str)).apply(normalize_schedule_status)
-    return statuses.isin(PMT_COMPLETED_STATUSES)
-
-
 def pmt_manual_completed_item_mask(df):
     if df.empty:
         return pd.Series(False, index=df.index)
     notes = df.get("notes", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
     return pmt_completed_item_mask(df) & notes.str.contains("completed on", regex=False)
-
-
-def pmt_canceled_item_mask(df):
-    statuses = df.get("status", pd.Series([], dtype=str)).apply(normalize_schedule_status)
-    return statuses.isin(PMT_CANCELED_STATUSES)
 
 
 def distinct_store_count(df):
@@ -5299,7 +5067,10 @@ def move_scheduled_stores_to_pmt(run_id, employee_id, store_ids, target_month, n
     return moved
 
 
-def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="", replace_future=False, monthly_target=None):
+def apply_pmt_manage_build_preview(
+    run_id, employee_id, preview_records, notes="", replace_future=False, monthly_target=None,
+    before_write=None, after_write=None,
+):
     preview_df = pd.DataFrame(preview_records or [])
     if preview_df.empty:
         return {"saved": 0, "superseded": 0, "created": 0, "updated": 0, "resequenced_rows": 0, "export_visible_rows": 0, "expected_month_counts": {}, "export_month_counts": {}, "employee_month_counts": {}, "error": ""}
@@ -5362,6 +5133,8 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
     employee_month_counts = {}
     now = datetime.utcnow()
     with session_scope("Apply PMT manage schedule preview") as session:
+        if before_write is not None:
+            before_write(session, preview_df)
         editable, block_message = pmt_run_edit_check(session, run_id)
         if not editable:
             return {
@@ -5585,6 +5358,8 @@ def apply_pmt_manage_build_preview(run_id, employee_id, preview_records, notes="
         for item in employee_items:
             label = month_label(month_start(item.schedule_date))
             employee_month_counts[label] = employee_month_counts.get(label, 0) + 1
+        if after_write is not None:
+            after_write(session, preview_df)
     log_action(
         "pmt manage schedule preview applied",
         "pmt_schedule_runs",
@@ -5983,6 +5758,15 @@ def build_pmt_draft(assignments, start_month, months, targets, direction, avoid_
     rows = []
     unscheduled = []
     schedule_history, backlog_history = pmt_store_history()
+    imported_owners = {}
+    with session_scope() as session:
+        imported = priority_store_ids(carryover_records(session, open_only=True, before=start_month))
+        if imported:
+            current_assignments = current_assignments_from_database(session)
+            imported_owners = dict(
+                current_assignments.loc[current_assignments["store_id"].isin(imported), ["store_id", "employee_id"]]
+                .itertuples(index=False, name=None)
+            )
     for employee_id, tech_df in assignments.groupby("employee_id"):
         tech_df = tech_df.copy()
         tech_name = tech_df.iloc[0]["technician_name"]
@@ -6026,8 +5810,15 @@ def build_pmt_draft(assignments, start_month, months, targets, direction, avoid_
         target = int(targets.get(int(employee_id), 10))
         capacity = target * int(months)
         prioritized = apply_pmt_rotation_priority(schedulable, schedule_history, backlog_history, start_month)
-        schedule_sort_columns = ["rotation_priority_group", "distance_from_home", "store_number"]
-        scheduled = prioritized.sort_values(schedule_sort_columns, ascending=[True, True, True]).head(capacity).copy()
+        imported_mask = prioritized["store_id"].map(imported_owners).eq(employee_id)
+        prioritized["imported_carryover"] = imported_mask
+        prioritized.loc[imported_mask, "front_of_line_carryover"] = True
+        prioritized.loc[imported_mask, "rotation_priority_score"] += 10000
+        prioritized.loc[imported_mask, "rotation_reason"] = (
+            CANCELLED_WO_REASON + " · " + prioritized.loc[imported_mask, "rotation_reason"]
+        )
+        schedule_sort_columns = ["imported_carryover", "rotation_priority_group", "distance_from_home", "store_number"]
+        scheduled = prioritized.sort_values(schedule_sort_columns, ascending=[False, True, True, True]).head(capacity).copy()
         scheduled_indexes = scheduled.index.tolist()
         left = prioritized.drop(index=scheduled_indexes, errors="ignore")
         assigned_count = int(schedulable["store_id"].nunique())
@@ -6050,8 +5841,16 @@ def build_pmt_draft(assignments, start_month, months, targets, direction, avoid_
             if remaining.empty or not target:
                 continue
             cycle_month = add_months(start_month, month_index)
-            month_pool = remaining.sort_values(schedule_sort_columns, ascending=[True, True, True]).head(target).copy()
-            routed_rows = home_distance_route(month_pool, home_lat, home_lon, limit=target)
+            month_pool = remaining.sort_values(schedule_sort_columns, ascending=[False, True, True, True]).head(target).copy()
+            priority_stops = month_pool[month_pool["imported_carryover"]]
+            if priority_stops.empty:
+                routed_rows = home_distance_route(month_pool, home_lat, home_lon, limit=target)
+            else:
+                routed_rows = nearest_neighbor_route(priority_stops, home_lat, home_lon)
+                last_priority = routed_rows[-1]
+                routed_rows.extend(nearest_neighbor_route(
+                    month_pool[~month_pool["imported_carryover"]], last_priority["latitude"], last_priority["longitude"],
+                ))
             remaining = remaining.drop(index=[row.name for row in routed_rows], errors="ignore")
             for sequence_number, row in enumerate(routed_rows, start=1):
                 schedule_date = first_workday(cycle_month, avoid_weekends, avoid_holidays, int(employee_id), avoid_pto)
@@ -6081,6 +5880,7 @@ def build_pmt_draft(assignments, start_month, months, targets, direction, avoid_
                         "work_type": "PMT",
                         "status": "Scheduled",
                         "rotation_priority_score": int(row.get("rotation_priority_score", 0) or 0),
+                        "imported_carryover": bool(row["imported_carryover"]),
                         "front_of_line_carryover": bool(row.get("front_of_line_carryover", False)),
                         "rotation_priority_group": int(row.get("rotation_priority_group", 1) or 1),
                         "rotation_reason": row.get("rotation_reason", "Normal rotation"),
@@ -6256,14 +6056,197 @@ def pmt_publish_conflicts(preview, start_month, months):
 
 
 
+def priority_route_context(session, employee_id, start, today):
+    run = current_pmt_run(session)
+    if run is None:
+        raise ValueError("Publish or import a PMT schedule in Build Schedule before applying a priority route.")
+    assignments = current_assignments_from_database(session)
+    territory = assignments[assignments["employee_id"] == employee_id].reset_index(drop=True)
+    if territory.empty:
+        raise ValueError("This technician has no currently assigned stores.")
+    assigned = set(territory["store_id"].astype(int))
+    priority = priority_store_ids(carryover_records(session, open_only=True, before=start)) & assigned
+    current = get_current_active_pmt_schedule_rows(run.id, start_date=today, session=session, deduplicate=False)
+    relevant = current[(current["employee_id"] == employee_id) | current["store_id"].isin(assigned)]
+    for other_run_id in editable_pmt_runs(session, end_on_or_after=today)["id"]:
+        if int(other_run_id) == int(run.id):
+            continue
+        other = get_current_active_pmt_schedule_rows(other_run_id, start_date=today, session=session, deduplicate=False)
+        if ((other["employee_id"] == employee_id) | other["store_id"].isin(assigned)).any():
+            raise ValueError(f"Future stops also exist in PMT run #{other_run_id}. Reconcile those stops before applying this route.")
+    if relevant["store_id"].duplicated().any():
+        raise ValueError("Duplicate future stops exist for this territory. Resolve them in Territory Reconciliation.")
+    effective = relevant[relevant["schedule_date"] >= start]
+    conflicts = effective[
+        (effective["employee_id"] != employee_id) | ~effective["store_id"].isin(assigned)
+    ]
+    if not conflicts.empty:
+        numbers = ", ".join(conflicts["store_number"].astype(str))
+        raise ValueError(f"Resolve current assignment conflicts in Territory Reconciliation for stores {numbers}.")
+    upcoming = relevant[relevant["schedule_date"] < start]
+    early_conflicts = upcoming[upcoming["store_id"].isin(assigned) & (upcoming["employee_id"] != employee_id)]
+    if not early_conflicts.empty:
+        numbers = ", ".join(early_conflicts["store_number"].astype(str))
+        raise ValueError(f"Resolve earlier upcoming assignment conflicts for stores {numbers}.")
+    run_start, run_end = (pd.Timestamp(value).date() for value in (run.cycle_start, run.cycle_end))
+    completed_ids = set()
+    if start <= run_end:
+        completed_ids = set(session.scalars(
+            select(ScheduleItem.store_id).where(
+                ScheduleItem.pmt_schedule_run_id == int(run.id),
+                ScheduleItem.work_type == "PMT",
+                func.lower(func.trim(ScheduleItem.status)).in_(PMT_COMPLETED_STATUSES),
+                ScheduleItem.schedule_date.between(run_start, run_end),
+            )
+        )) & assigned
+    # Open carryover remains eligible after a schedule completion until its evidence is reviewed.
+    handled = (set(upcoming["store_id"].dropna().astype(int)) | (completed_ids - priority)) & assigned
+    target = max(1, int(territory.iloc[0]["monthly_target"]))
+    geography = frozenset(
+        tuple(None if pd.isna(value) else value for value in row)
+        for row in territory[["store_id", "latitude", "longitude", "home_latitude", "home_longitude"]]
+        .itertuples(index=False, name=None)
+    )
+    signature = (
+        int(run.id), target, frozenset(assigned), frozenset(priority), frozenset(handled), geography,
+        frozenset((int(row.schedule_item_id), int(row.store_id), int(row.employee_id), row.schedule_date,
+                   row.sequence_number, row.status) for row in effective.itertuples(index=False)),
+    )
+    return run, territory, priority, handled, target, effective, signature
+
+
+def build_priority_route(territory, priority, handled, start, target, employee_id):
+    eligible = territory[~territory["store_id"].isin(handled)].copy()
+    if eligible.empty:
+        return eligible, eligible
+    has_coordinates = eligible.apply(coordinates_available, axis=1)
+    overflow = eligible[~has_coordinates].copy()
+    overflow["Reason"] = "Store missing usable coordinates"
+    routable = eligible[has_coordinates].copy()
+    if routable.empty:
+        return routable, overflow
+    first = territory.iloc[0]
+    home = pd.Series({"latitude": first["home_latitude"], "longitude": first["home_longitude"]})
+    if not coordinates_available(home):
+        raise ValueError("Set the technician's home coordinates before building a priority route.")
+    history, backlog = pmt_store_history()
+    routable = apply_pmt_rotation_priority(routable, history, backlog, start)
+    routable["Priority"] = routable["store_id"].isin(priority)
+    routable["Reason"] = routable.apply(
+        lambda row: " · ".join(dict.fromkeys([
+            *([CANCELLED_WO_REASON] if row["Priority"] else []),
+            *(["Did not fit prior schedule"] if row["not_scheduled_count"] > 0 else []),
+            *(["Carryover from prior cycle"] if row["carryover_count"] > 0 else []),
+            *(["Prior month not completed or exception"] if row["exception_count"] > 0 else []),
+            *(["Never completed"] if pd.isna(row["last_completed_date"]) else []),
+        ])) or "Current assigned store",
+        axis=1,
+    )
+    ordered = []
+    latitude, longitude = home.latitude, home.longitude
+    for group in (routable[routable["Priority"]], routable[~routable["Priority"] & routable["front_of_line_carryover"]],
+                  routable[~routable["Priority"] & ~routable["front_of_line_carryover"]]):
+        if group.empty:
+            continue
+        stops = nearest_neighbor_order(group, latitude, longitude)
+        ordered.extend(stops)
+        latitude, longitude = stops[-1]["latitude"], stops[-1]["longitude"]
+    route = pd.DataFrame(ordered).reset_index(drop=True)
+    route["Route Order"] = range(1, len(route) + 1)
+    route["assigned_pmt_employee_id"] = employee_id
+    route = distribute_route_across_months(route, start, target, employee_id)
+    validate_route_store_set(territory["store_id"], route["store_id"], overflow["store_id"], handled, priority)
+    return route, overflow
+
+
+def save_priority_route_overflow(session, run, employee_id, start, planned, overflow_ids):
+    scoped = {int(store_id) for store_id in planned} | {int(store_id) for store_id in overflow_ids}
+    entries = session.scalars(
+        select(PMTScheduleBacklog).where(
+            PMTScheduleBacklog.pmt_schedule_run_id == run.id,
+            PMTScheduleBacklog.employee_id == employee_id,
+            PMTScheduleBacklog.store_id.in_(scoped),
+            PMTScheduleBacklog.status.in_(("Not Scheduled", "Scheduled")),
+        )
+    ).all()
+    open_rows = {row.store_id: row for row in entries if row.status == "Not Scheduled"}
+    scheduled_rows = {row.store_id: row for row in entries if row.status == "Scheduled"}
+    reason = "PMT priority route overflow: store missing usable coordinates"
+    for store_id in planned:
+        row = open_rows.get(int(store_id))
+        if row and row.reason == reason and store_id not in scheduled_rows:
+            row.status = "Scheduled"
+    for store_id in overflow_ids:
+        if store_id in open_rows:
+            continue
+        row = scheduled_rows.get(store_id)
+        if row is None or row.reason != reason:
+            row = PMTScheduleBacklog(pmt_schedule_run_id=int(run.id), employee_id=employee_id, store_id=store_id)
+            session.add(row)
+        row.cycle_start = start
+        row.cycle_end = max(run.cycle_end, start)
+        row.status = "Not Scheduled"
+        row.reason = reason
+    session.flush()
+    schedule_run = session.get(PMTScheduleRun, int(run.id))
+    schedule_run.unscheduled_count = int(session.scalar(
+        select(func.count(PMTScheduleBacklog.id)).where(
+            PMTScheduleBacklog.pmt_schedule_run_id == int(run.id),
+            PMTScheduleBacklog.status.in_(PMT_BACKLOG_OPEN_STATUSES),
+        )
+    ) or 0)
+
+
+def apply_priority_route(run_id, employee_id, preview, overflow_ids, start, target, signature):
+    def guard(session, prepared):
+        lock_import_writes(session)
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(text(
+                "lock table employees, stores, pmt_schedule_runs, schedule_items in share row exclusive mode"
+            ))
+        today = date.today()
+        if start < today:
+            raise ValueError("The route start month is in the past. Build a fresh preview.")
+        _, territory, priority, handled, live_target, _, live_signature = priority_route_context(
+            session, employee_id, start, today
+        )
+        if live_signature != signature or live_target != target:
+            raise ValueError("Assignments, coordinates, carryover, monthly target, or schedule changed. Build a fresh preview.")
+        validate_route_store_set(territory["store_id"], preview["store_id"], overflow_ids, handled, priority)
+        validate_route_store_set(territory["store_id"], prepared["store_id"], overflow_ids, handled, priority)
+        if int(run_id) != live_signature[0] or month_start(prepared["Proposed Date"].min().date()) != start:
+            raise ValueError("The proposal does not match the active run and selected starting month.")
+
+    def save_overflow(session, prepared):
+        if overflow_ids or session.scalar(select(PMTScheduleBacklog.id).where(
+            PMTScheduleBacklog.pmt_schedule_run_id == run_id,
+            PMTScheduleBacklog.employee_id == employee_id,
+            PMTScheduleBacklog.status == "Not Scheduled",
+        ).limit(1)) is not None:
+            run = session.get(PMTScheduleRun, run_id)
+            save_priority_route_overflow(session, run, employee_id, start, prepared["store_id"], overflow_ids)
+
+    return apply_pmt_manage_build_preview(
+        run_id, employee_id, preview.to_dict("records"), notes="Prior-cycle cancelled WO priority route",
+        replace_future=True, monthly_target=target, before_write=guard, after_write=save_overflow,
+    )
+
+
 st.caption("PMT Scheduler build: manual-route-export-fix-2026-08-11")
 
-tab_build, tab_carryover, tab_manage_fix, tab_export = st.tabs([
+pmt_main_tabs = [
     "📋  Build Schedule",
     "📊  Carryover & Backlog",
     "🛠️  Manage & Fix Schedule",
     "📥  Export",
-])
+]
+carryover_landing = st.session_state.pop("pmt_cancelled_dashboard_employee", None)
+if carryover_landing is not None:
+    st.session_state["pmt_cancelled_technician"] = carryover_landing
+    st.session_state["pmt_landed_on_carryover"] = True
+tab_build, tab_carryover, tab_manage_fix, tab_export = st.tabs(
+    pmt_main_tabs, default=pmt_main_tabs[1] if st.session_state.get("pmt_landed_on_carryover") else pmt_main_tabs[0],
+)
 
 with tab_manage_fix:
     tab_health, tab_reconcile, tab_rebuild, tab_manage, tab_preview, tab_history = st.tabs([
@@ -7137,6 +7120,12 @@ with tab_build:
 
 
 with tab_carryover:
+    carryover_technician, carryover_details = render_cancelled_carryover()
+    if carryover_technician is not None:
+        render_priority_route(
+            carryover_technician, carryover_details, priority_route_context, build_priority_route,
+            distribute_route_across_months, validate_pmt_schedule_proposal, apply_priority_route,
+        )
     section_header("Completion Step 1: PMT Carryover / Not Scheduled Stores", "Review PMT stores that did not fit, were not completed, or need priority in the next monthly cycle.", "orange")
     st.caption(
         "PMT status guide: Scheduled = on the current PMT route. Not Scheduled = assigned to a PMT but did not fit in the selected cycle. "

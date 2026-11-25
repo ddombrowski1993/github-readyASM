@@ -8,6 +8,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -352,6 +353,49 @@ class PMTScheduleBacklog(Base, TimestampMixin):
     notes = Column(Text)
     __table_args__ = (
         UniqueConstraint("pmt_schedule_run_id", "employee_id", "store_id", "status", name="uq_pmt_backlog_run_employee_store_status"),
+    )
+
+
+class PMTCarryoverImport(Base, TimestampMixin):
+    __tablename__ = "pmt_carryover_imports"
+    id = Column(Integer, primary_key=True)
+    filename = Column(Text, nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    source_start = Column(Date, nullable=False)
+    source_end = Column(Date, nullable=False)
+    imported_by = Column(String(160), nullable=False)
+    raw_row_count = Column(Integer, nullable=False)
+    cancelled_pm_row_count = Column(Integer, nullable=False)
+    unique_store_count = Column(Integer, nullable=False)
+    matched_count = Column(Integer, nullable=False)
+    unmatched_count = Column(Integer, nullable=False)
+    duplicate_wo_count = Column(Integer, nullable=False)
+    filters = Column(JSON, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("source_start", "source_end", "fingerprint", name="uq_pmt_carryover_import_file"),
+    )
+
+
+class PMTCarryoverStore(Base, TimestampMixin):
+    __tablename__ = "pmt_carryover_stores"
+    id = Column(Integer, primary_key=True)
+    import_id = Column(Integer, ForeignKey("pmt_carryover_imports.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id", ondelete="SET NULL"), index=True)
+    source_start = Column(Date, nullable=False)
+    source_end = Column(Date, nullable=False)
+    source_store_key = Column(Text, nullable=False)
+    store_number = Column(String(12))
+    cancelled_wo_count = Column(Integer, nullable=False)
+    source_detail = Column(JSON, nullable=False)
+    status = Column(String(40), nullable=False, default="Open Carryover")
+    routing_priority = Column(Boolean, nullable=False, default=True)
+    priority_reason = Column(String(120), nullable=False, default="Prior-cycle cancelled WOs")
+    review_reason = Column(Text)
+    reviewed_by = Column(String(160))
+    reviewed_at = Column(DateTime)
+    resolved_at = Column(DateTime)
+    __table_args__ = (
+        UniqueConstraint("source_start", "source_end", "source_store_key", name="uq_pmt_carryover_cycle_store"),
     )
 
 
