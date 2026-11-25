@@ -2262,12 +2262,19 @@ def pmt_stores_not_in_run(run_id):
 def pmt_rotation_gaps_for_period(cycle_start, months):
     cycle_start = month_start(cycle_start)
     cycle_end = add_months(cycle_start, int(months)) - timedelta(days=1)
+    params = {"cycle_start": cycle_start, "cycle_end": cycle_end}
+    start_sql = "cast(:cycle_start as date)"
+    end_sql = "cast(:cycle_end as date)"
+    if is_sqlite_url(configured_database_url()):
+        # SQLite's DATE cast returns a year number. Its date function returns ISO dates.
+        start_sql = "date(:cycle_start)"
+        end_sql = "date(:cycle_end)"
     not_scheduled = safe_query(
-        """
+        f"""
         select
             null as run_id,
-            :cycle_start as cycle_start,
-            :cycle_end as cycle_end,
+            {start_sql} as cycle_start,
+            {end_sql} as cycle_end,
             null as schedule_item_id,
             'Missing From Selected Period' as source,
             e.id as employee_id,
@@ -2292,18 +2299,18 @@ def pmt_rotation_gaps_for_period(cycle_start, months):
               where si.work_type = 'PMT'
                 and si.employee_id = e.id
                 and si.store_id = s.id
-                and date(si.schedule_date) >= date(:cycle_start)
-                and date(si.schedule_date) <= date(:cycle_end)
+                and date(si.schedule_date) between {start_sql} and {end_sql}
           )
         """,
-        {"cycle_start": cycle_start, "cycle_end": cycle_end},
+        params,
+        use_cache=False,
     )
     not_completed = safe_query(
-        """
+        f"""
         select
             si.pmt_schedule_run_id as run_id,
-            :cycle_start as cycle_start,
-            :cycle_end as cycle_end,
+            {start_sql} as cycle_start,
+            {end_sql} as cycle_end,
             si.id as schedule_item_id,
             'Scheduled But Not Completed' as source,
             e.id as employee_id,
@@ -2318,11 +2325,11 @@ def pmt_rotation_gaps_for_period(cycle_start, months):
         left join employees e on e.id = si.employee_id
         left join stores s on s.id = si.store_id
         where si.work_type = 'PMT'
-          and date(si.schedule_date) >= date(:cycle_start)
-          and date(si.schedule_date) <= date(:cycle_end)
+          and date(si.schedule_date) between {start_sql} and {end_sql}
           and si.status in ('Needs Rescheduled','Rescheduled','Rain Delay','Not Completed','Carryover','Overdue','Skipped','Cancelled')
         """,
-        {"cycle_start": cycle_start, "cycle_end": cycle_end},
+        params,
+        use_cache=False,
     )
     combined = pd.concat([not_scheduled, not_completed], ignore_index=True)
     if combined.empty:

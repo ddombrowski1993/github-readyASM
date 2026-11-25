@@ -141,6 +141,50 @@ def persist(factory, preview):
         return save_cancelled_import(session, preview, SOURCE_START, SOURCE_END, "test", TODAY)
 
 
+def test_rotation_gaps_use_inclusive_date_parameters(database, scheduler, monkeypatch):
+    from src import database as db
+
+    factory, engine = database
+    start, end = date(2026, 7, 1), date(2026, 12, 31)
+    with factory.begin() as session:
+        session.add_all([
+            ScheduleItem(id=item_id, schedule_id=1, pmt_schedule_run_id=1, store_id=store_id,
+                         employee_id=1, work_type="PMT", schedule_date=day, status="Rain Delay")
+            for item_id, store_id, day in [(3, 2, start), (4, 3, end), (5, 4, date(2027, 1, 1))]
+        ])
+
+    monkeypatch.setitem(scheduler, "configured_database_url", lambda: str(engine.url))
+    monkeypatch.setitem(scheduler, "safe_query", db.safe_query)
+    monkeypatch.setattr(db, "get_database_url", lambda: str(engine.url))
+    monkeypatch.setattr(db, "current_account_schema", lambda: None)
+    monkeypatch.setattr(db, "get_engine", lambda *args, **kwargs: engine)
+    statements = []
+
+    def record_query(conn, cursor, statement, parameters, context, executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", record_query)
+    try:
+        result = scheduler["pmt_rotation_gaps_for_period"](pd.Timestamp(start), 6)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_query)
+
+    assert all(statement.split()[0].lower() == "select" for statement, _ in statements)
+    gap_queries = [parameters for statement, parameters in statements if "as cycle_start" in statement]
+    assert len(gap_queries) == 2
+    for parameters in gap_queries:
+        bound_dates = parameters.values() if isinstance(parameters, dict) else parameters
+        assert all(type(value) is date for value in bound_dates)
+    assert set(pd.to_datetime(result["cycle_start"]).dt.date) == {start}
+    assert set(pd.to_datetime(result["cycle_end"]).dt.date) == {end}
+    if engine.dialect.name == "postgresql":
+        assert all(type(value) is date for column in ("cycle_start", "cycle_end") for value in result[column])
+    exceptions = result[result["source"] == "Scheduled But Not Completed"]
+    assert set(exceptions["schedule_item_id"]) == {3, 4}
+    missing = set(result.loc[result["source"] == "Missing From Selected Period", "store_id"])
+    assert 4 in missing and missing.isdisjoint({2, 3})
+
+
 def test_preview_normalization_dedupe_current_assignment_and_unmatched(database):
     factory, _ = database
     preview = csv_export([
